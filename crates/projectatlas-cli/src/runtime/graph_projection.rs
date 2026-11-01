@@ -1476,8 +1476,6 @@ pub(super) struct StagedRepositoryGraph {
     /// Test-visible order proving projections moved before entity allocation.
     #[cfg(test)]
     projection_removals_before_entities: Vec<String>,
-    /// Effective scan policy used to recheck non-indexed document targets before commit.
-    scan_policy: RootScanPolicy,
     /// Non-indexed target states observed while resolving document candidates.
     document_target_states: Vec<(String, DocumentTargetUnresolvedReason)>,
     /// Optional disposable database replacing the in-memory row vectors.
@@ -1580,11 +1578,22 @@ impl StagedRepositoryGraph {
     }
 
     /// Refuse publication if a consulted non-indexed target changed after resolution.
-    pub(super) fn revalidate_document_targets(&self, root: &Path) -> Result<(), CliError> {
+    pub(super) fn revalidate_document_targets(
+        &self,
+        root: &Path,
+        options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        control.check(IndexWorkStage::Publication)?;
         if self.document_target_states.is_empty() {
             return Ok(());
         }
-        let current = DocumentResolutionIndex::new(root, &[], &self.scan_policy)?;
+        // Source-node equality cannot prove an absent target's current policy.
+        // Start with the original configured options, not repository-expanded
+        // exclusions or the compiled matcher captured before staging.
+        let policy = RootScanPolicy::discover(root, options, control)
+            .map_err(|source| super::source_inspection_error(root, source))?;
+        let current = DocumentResolutionIndex::new(root, &[], &policy, control)?;
         for (path, expected) in &self.document_target_states {
             if current.absent_reason(path)? != *expected {
                 return Err(source_changed_during_derivation(root, path));
@@ -3523,7 +3532,7 @@ fn finish_projection_in_database_with_documents(
     let peak_retained_bytes = entities.peak_retained_bytes;
     #[cfg(test)]
     let projection_removals_before_entities = entities.projection_removals_before_entities.clone();
-    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy)?;
+    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy, control)?;
     let staging_parent = root.join(".projectatlas");
     fs::create_dir_all(&staging_parent).map_err(|source| CliError::Io {
         path: staging_parent.clone(),
@@ -3681,7 +3690,6 @@ fn finish_projection_in_database_with_documents(
         peak_retained_bytes,
         #[cfg(test)]
         projection_removals_before_entities,
-        scan_policy: scan_policy.clone(),
         document_target_states,
         database: Some(database),
         source_recovery: SourceRecoveryWork::default(),
@@ -3736,7 +3744,7 @@ fn finish_projection_with_documents(
     let peak_retained_bytes = entities.peak_retained_bytes;
     #[cfg(test)]
     let projection_removals_before_entities = entities.projection_removals_before_entities.clone();
-    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy)?;
+    let document_index = DocumentResolutionIndex::new(root, nodes, scan_policy, control)?;
     let mut relations_by_digest = BTreeMap::new();
     let mut occurrences = Vec::new();
     let mut relation_dependencies = Vec::new();
@@ -3854,7 +3862,6 @@ fn finish_projection_with_documents(
         peak_retained_bytes,
         #[cfg(test)]
         projection_removals_before_entities,
-        scan_policy: scan_policy.clone(),
         document_target_states,
         database: None,
         source_recovery: SourceRecoveryWork::default(),
@@ -3958,6 +3965,8 @@ impl ProjectedGraphRows {
 struct DocumentResolutionIndex<'a> {
     /// Selected source root used only for bounded filesystem checks.
     root: PathBuf,
+    /// Original operation budget shared by cached and uncached target admission.
+    control: &'a IndexWorkControl,
     /// Canonical selected root used to reject symlink escape.
     canonical_root: PathBuf,
     /// Exact case-preserving staged identities.
@@ -3976,7 +3985,9 @@ impl<'a> DocumentResolutionIndex<'a> {
         root: &Path,
         nodes: &'a [Node],
         scan_policy: &'a RootScanPolicy,
+        control: &'a IndexWorkControl,
     ) -> Result<Self, CliError> {
+        control.check(IndexWorkStage::SymbolParsing)?;
         let canonical_root = fs::canonicalize(root).map_err(|source| CliError::Io {
             path: root.to_path_buf(),
             source,
@@ -4001,6 +4012,7 @@ impl<'a> DocumentResolutionIndex<'a> {
         }
         Ok(Self {
             root: root.to_path_buf(),
+            control,
             canonical_root,
             kinds_by_path,
             casefold_path_counts,
@@ -4032,6 +4044,7 @@ impl<'a> DocumentResolutionIndex<'a> {
 
     /// Distinguish absent source from excluded or escaping filesystem state.
     fn absent_reason(&self, path: &str) -> Result<DocumentTargetUnresolvedReason, CliError> {
+        self.control.check(IndexWorkStage::SymbolParsing)?;
         if let Some(reason) = self.absent_states.borrow().get(path).copied() {
             return Ok(reason);
         }
@@ -4047,8 +4060,11 @@ impl<'a> DocumentResolutionIndex<'a> {
         &self,
         path: &str,
     ) -> Result<DocumentTargetUnresolvedReason, CliError> {
+        self.control.check(IndexWorkStage::SymbolParsing)?;
         let native = self.root.join(Path::new(path));
-        let reason = if self
+        let reason = if let Some(reason) = self.target_prefix_refusal(Path::new(path))? {
+            reason
+        } else if self
             .scan_policy
             .excludes_path(&native)
             .map_err(|source| CliError::InvalidInput(source.to_string()))?
@@ -4073,6 +4089,34 @@ impl<'a> DocumentResolutionIndex<'a> {
             }
         };
         Ok(reason)
+    }
+
+    /// Admit every existing native prefix before target-specific ignore-file reads.
+    fn target_prefix_refusal(
+        &self,
+        relative: &Path,
+    ) -> Result<Option<DocumentTargetUnresolvedReason>, CliError> {
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Ok(Some(DocumentTargetUnresolvedReason::OutsideRoot));
+        }
+        let mut prefix = self.root.clone();
+        for component in relative.components() {
+            self.control.check(IndexWorkStage::SymbolParsing)?;
+            prefix.push(component.as_os_str());
+            match fs::canonicalize(&prefix) {
+                Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
+                    return Ok(Some(DocumentTargetUnresolvedReason::OutsideRoot));
+                }
+                Ok(_canonical) => {}
+                // Remaining normal children of a missing prefix cannot reenter elsewhere.
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_source) => return Ok(Some(DocumentTargetUnresolvedReason::Unsupported)),
+            }
+        }
+        Ok(None)
     }
 
     /// Return the bounded states actually consulted during document resolution.
@@ -4126,7 +4170,7 @@ pub(super) fn nonindexed_document_projection_changed(
     }
     let scan_policy = RootScanPolicy::discover(root, options, control)
         .map_err(|source| super::source_inspection_error(root, source))?;
-    let index = DocumentResolutionIndex::new(root, nodes, &scan_policy)?;
+    let index = DocumentResolutionIndex::new(root, nodes, &scan_policy, control)?;
     loop {
         for row in &page.rows {
             control.check(IndexWorkStage::RepositoryTraversal)?;
@@ -11112,7 +11156,6 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let affected_paths = BTreeSet::from(["src/lib.rs".to_string()]);
-        let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let persisted = RepositoryAffectedSourceFootprint {
             rows: MAX_INCREMENTAL_GRAPH_ROWS,
             retained_bytes: 0,
@@ -11132,7 +11175,6 @@ mod tests {
             resolution_derivations: BTreeMap::new(),
             peak_retained_bytes: 0,
             projection_removals_before_entities: Vec::new(),
-            scan_policy: RootScanPolicy::discover(root, &ScanOptions::default(), &control)?,
             document_target_states: Vec::new(),
             database: None,
             source_recovery: SourceRecoveryWork::default(),
@@ -15586,7 +15628,6 @@ function helper() {}
             EntityResolutionKey::new(entities[3].key().clone(), shared_key.clone())?,
             EntityResolutionKey::new(entities[4].key().clone(), local_package_key.clone())?,
         ];
-        let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
         let staged = StagedRepositoryGraph {
             project,
             mutation: RepositoryGraphMutation::Full,
@@ -15601,7 +15642,6 @@ function helper() {}
             resolution_derivations: BTreeMap::new(),
             peak_retained_bytes: 0,
             projection_removals_before_entities: Vec::new(),
-            scan_policy,
             document_target_states: Vec::new(),
             database: None,
             source_recovery: SourceRecoveryWork::default(),
@@ -16143,7 +16183,7 @@ function helper() {}
             .remove("docs/guide.md")
             .ok_or_else(|| io::Error::other("document owners were not projected"))?;
         let scan_policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
-        let index = DocumentResolutionIndex::new(root, &nodes, &scan_policy)?;
+        let index = DocumentResolutionIndex::new(root, &nodes, &scan_policy, &control)?;
         let rows = project_document_rows(
             project,
             generation,
@@ -16656,7 +16696,7 @@ function helper() {}
             .remove("docs/guide.md")
             .ok_or_else(|| io::Error::other("document owners were not projected"))?;
         let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
-        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy, &control)?;
         let rows = project_document_rows(
             project,
             generation,
@@ -16797,7 +16837,7 @@ function helper() {}
         )?;
         let candidates = resolution_registry_from_exports(&projection, &control)?;
         let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
-        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy, &control)?;
         let mut relations = Vec::new();
         for (graph, facts) in graphs.iter().zip(&facts) {
             let owners = projection
@@ -16846,7 +16886,7 @@ function helper() {}
         ];
         let control = super::super::standalone_index_work_control();
         let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
-        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &nodes, &scan_policy, &control)?;
         require_eq(
             &index.unresolved_reason("src/lib.rs")?,
             &Some(DocumentTargetUnresolvedReason::CaseConflict),
@@ -16862,11 +16902,128 @@ function helper() {}
     }
 
     #[test]
+    fn document_policy_probes_admit_prefixes_before_ignore_reads() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("other");
+        fs::create_dir_all(root.join("real"))?;
+        fs::create_dir_all(&outside)?;
+        fs::write(root.join(".ignore"), "ignored.md\n")?;
+        fs::write(root.join("ignored.md"), "# Ignored\n")?;
+        fs::write(root.join("real/target.md"), "# Local\n")?;
+        fs::write(outside.join(".ignore"), "target.md\n")?;
+        fs::write(outside.join("target.md"), "# Outside\n")?;
+        create_directory_link(&outside, &root.join("link"))?;
+        create_directory_link(&root.join("real"), &outside.join("back"))?;
+        create_directory_link(&root.join("real"), &root.join("alias"))?;
+        let control = super::super::standalone_index_work_control();
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let nodes = [test_file_node("real/target.md", "markdown")];
+        let index = DocumentResolutionIndex::new(&root, &nodes, &policy, &control)?;
+        for path in ["link/target.md", "link/missing.md", "link/back/target.md"] {
+            require_eq(
+                &index.inspect_absent_reason(path)?,
+                &DocumentTargetUnresolvedReason::OutsideRoot,
+                &format!("uncached document prefix admission for {path}"),
+            )?;
+            require_eq(
+                &index.unresolved_reason(path)?,
+                &Some(DocumentTargetUnresolvedReason::OutsideRoot),
+                &format!("cached document prefix admission for {path}"),
+            )?;
+        }
+        for (path, expected) in [
+            ("ignored.md", DocumentTargetUnresolvedReason::Ignored),
+            ("missing.md", DocumentTargetUnresolvedReason::Missing),
+            (
+                "alias/target.md",
+                DocumentTargetUnresolvedReason::Unsupported,
+            ),
+        ] {
+            require_eq(&index.inspect_absent_reason(path)?, &expected, path)?;
+            require_eq(&index.unresolved_reason(path)?, &Some(expected), path)?;
+        }
+        require_eq(
+            &index.unresolved_reason("real/target.md")?,
+            &None,
+            "ordinary indexed document target",
+        )?;
+        control.cancel();
+        require(
+            matches!(
+                index.unresolved_reason("missing.md"),
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ),
+            "cached document admission ignored original cancellation",
+        )?;
+        require(
+            matches!(
+                index.inspect_absent_reason("link/target.md"),
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ),
+            "uncached document admission ignored original cancellation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_freshness_probe_preserves_prefix_refusals() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("other");
+        fs::create_dir_all(&root)?;
+        fs::create_dir_all(&outside)?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(root.join("README.md"), "[outside](link/target.md)\n")?;
+        fs::write(outside.join(".ignore"), "target.md\n")?;
+        fs::write(outside.join("target.md"), "# Outside\n")?;
+        create_directory_link(&outside, &root.join("link"))?;
+        let plan = super::super::ScanRuntimePlan::for_path(None, &root, Some(100_000))?;
+        let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+        let mut store = super::super::open_atlas_store_for_project(
+            &root.join(".projectatlas/projectatlas.db"),
+            &root,
+        )?;
+        super::super::refresh_index(&mut store, &plan, &options)?;
+        let control = super::super::standalone_index_work_control();
+        let page = store.repository_unresolved_documents_page(None, 10, &control)?;
+        require_eq(&page.rows.len(), &1, "persisted escaped document count")?;
+        require_eq(
+            &page.rows[0].reason,
+            &DocumentTargetUnresolvedReason::OutsideRoot,
+            "persisted prefix refusal",
+        )?;
+        let nodes = projectatlas_fs::scan_repo(&root, &plan.scan_options)?;
+        let publication = store.index_publication()?;
+        for policy in ["target.md\n", ""] {
+            fs::write(outside.join(".ignore"), policy)?;
+            require_eq(
+                &super::nonindexed_document_projection_changed(
+                    &store,
+                    &root,
+                    &nodes,
+                    &plan.scan_options,
+                    &control,
+                )?,
+                &(false, 2),
+                "outside policy must not change an admitted source-boundary refusal",
+            )?;
+            super::super::refresh_index(&mut store, &plan, &options)?;
+            require_eq(
+                &store.index_publication()?,
+                &publication,
+                "outside policy caused a redundant graph publication",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn document_target_state_change_refuses_stale_publication() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let control = super::super::standalone_index_work_control();
         let scan_policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
-        let index = DocumentResolutionIndex::new(temp.path(), &[], &scan_policy)?;
+        let index = DocumentResolutionIndex::new(temp.path(), &[], &scan_policy, &control)?;
         let actual = index
             .unresolved_reason("docs/target.md")?
             .ok_or_else(|| std::io::Error::other("absent target unexpectedly resolved"))?;
@@ -16891,7 +17048,6 @@ function helper() {}
             resolution_derivations: BTreeMap::new(),
             peak_retained_bytes: 0,
             projection_removals_before_entities: Vec::new(),
-            scan_policy,
             document_target_states,
             database: None,
             source_recovery: SourceRecoveryWork::default(),
@@ -16899,10 +17055,18 @@ function helper() {}
         };
         require(
             matches!(
-                staged.revalidate_document_targets(temp.path()),
+                staged.revalidate_document_targets(temp.path(), &ScanOptions::default(), &control),
                 Err(CliError::RefreshRequired(_))
             ),
             "changed non-indexed target state reached publication",
+        )?;
+        control.cancel();
+        require(
+            matches!(
+                staged.revalidate_document_targets(temp.path(), &ScanOptions::default(), &control),
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ),
+            "document publication revalidation ignored original cancellation",
         )?;
         Ok(())
     }

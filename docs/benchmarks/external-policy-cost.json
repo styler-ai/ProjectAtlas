@@ -1,0 +1,1016 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-11-01",
+  "scope": "external source-policy repair; bounded Linux affected-work evidence",
+  "host": {
+    "cpu": "AMD Ryzen 7 5700U",
+    "logical_cpus": 16,
+    "kernel": "Linux 7.0.0-38-generic",
+    "target": "x86_64-unknown-linux-gnu",
+    "rustc": "1.98.0 (88d9e12ae178fab0fb5cc050a94da85685d449ea)"
+  },
+  "build": "cargo build --locked -p projectatlas-cli --release (default features)",
+  "baseline": {
+    "accepted_commit": "6927ed0ca64788db6947b4d43eafce29aac5ed61",
+    "equivalent_reviewed_commit": "5dda66c4d203b3b31e58f21f20045160ae088718",
+    "derivation": 24,
+    "semantic": 23,
+    "bytes": 69456960,
+    "sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c"
+  },
+  "candidate": {
+    "derivation": 25,
+    "semantic": 23,
+    "source_manifest_sha256": "44f2c964c790070a55d3ad1a9f48d6a02fa8499566606b92559cb1a4538d9730",
+    "bytes": 69802448,
+    "sha256": "9c7224c6ba9219325ad3c023bfc153259cc30100a556c1e4dd148a6b933d6335"
+  },
+  "protocol": {
+    "trials": 3,
+    "order": "baseline/candidate, candidate/baseline, baseline/candidate",
+    "construction_iterations": 100,
+    "full_scan_iterations": 5,
+    "targeted_iterations": 1000,
+    "cache": "ordinary warm filesystem/page cache; separate process per sample",
+    "rss": "GNU time complete micro-process maximum; table aggregates sample medians",
+    "source_manifest": "SHA256 of sorted indent=2 JSON plus newline mapping git ls-files -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo crates paths to SHA256 of exact saved bytes",
+    "micro_source_sha256": "be8b7ab61c0230a71b873e6d93ec951b8d0d917037dedea0ee65cec3c8eee397",
+    "baseline_helper_relinked_byte_identically": true,
+    "micro_binaries": {
+      "accepted-main": "fffcc9463873ebd6f7e17072a3d45f475b915a44783eafd4f90a81bc7464468e",
+      "candidate": "a03a01b96edf7cc3c1495ca479467a395805a23543632e21e533c634bd9cd0d5"
+    },
+    "policy_micro_reuse": {
+      "byte_identical_helper": true,
+      "scope": "FS policy owner unchanged; CLI publication fix measured separately below",
+      "sha256": "a03a01b96edf7cc3c1495ca479467a395805a23543632e21e533c634bd9cd0d5"
+    }
+  },
+  "fixtures": {
+    "ordinary": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "fixture_manifest_sha256": "442bc1dc99cc1ab6b22c2656dfe4fd0930f55572ffda48338ce3da354511ddb9"
+    },
+    "large-config": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "fixture_manifest_sha256": "a09ea34871342073028a7bd136098b5ddde5f7aeb6935f4ba3c91074e39b55d8"
+    },
+    "many-rules": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "fixture_manifest_sha256": "fe9eb89a69b717955a0ccfa9d8e1a4462aefe6e59c2debf8dd4a3c6fa1da76b2"
+    }
+  },
+  "samples": [
+    {
+      "case": "ordinary",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.05576109199319035,
+      "peak_rss_kib": 6740,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 9.128190000000001e-06,
+      "full_scan_seconds": 0.0050258562,
+      "targeted_seconds": 2.4147384e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 0.11293666600249708,
+      "peak_rss_kib": 5736,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 5.911471e-05,
+      "full_scan_seconds": 0.0052983954,
+      "targeted_seconds": 7.5842731e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 0.11312016699230298,
+      "peak_rss_kib": 5740,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 5.8483830000000006e-05,
+      "full_scan_seconds": 0.0054430966,
+      "targeted_seconds": 7.5819377e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.05522694799583405,
+      "peak_rss_kib": 6616,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 8.97631e-06,
+      "full_scan_seconds": 0.0052633461999999995,
+      "targeted_seconds": 2.4242681e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.054743639018852264,
+      "peak_rss_kib": 6488,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 9.142910000000001e-06,
+      "full_scan_seconds": 0.0051146656,
+      "targeted_seconds": 2.4318413e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 0.10913645499385893,
+      "peak_rss_kib": 5812,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 6.467294e-05,
+      "full_scan_seconds": 0.0046886528,
+      "targeted_seconds": 7.536437e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.10302036296343431,
+      "peak_rss_kib": 7420,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 9.16997e-06,
+      "full_scan_seconds": 0.004949969,
+      "targeted_seconds": 7.3029966e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 0.19489541900111362,
+      "peak_rss_kib": 8848,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.00084421194,
+      "full_scan_seconds": 0.0059002274,
+      "targeted_seconds": 7.5492981e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 0.19491808797465637,
+      "peak_rss_kib": 9488,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.00084483303,
+      "full_scan_seconds": 0.005859876599999999,
+      "targeted_seconds": 7.5716428e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.1066461150185205,
+      "peak_rss_kib": 6716,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 8.94384e-06,
+      "full_scan_seconds": 0.0055957108,
+      "targeted_seconds": 7.3166153e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.10237714101094753,
+      "peak_rss_kib": 6900,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 1.67647e-05,
+      "full_scan_seconds": 0.0048662914,
+      "targeted_seconds": 7.2249487e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 0.19429393601603806,
+      "peak_rss_kib": 9720,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.00081057668,
+      "full_scan_seconds": 0.006498288600000001,
+      "targeted_seconds": 7.518464900000001e-05,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 17.74659628799418,
+      "peak_rss_kib": 20872,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 9.04804e-06,
+      "full_scan_seconds": 0.0249912094,
+      "targeted_seconds": 0.017615239027,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 4.249634675972629,
+      "peak_rss_kib": 19564,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.01605129144,
+      "full_scan_seconds": 0.023785832200000002,
+      "targeted_seconds": 0.0025040427310000003,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 4.239465815015137,
+      "peak_rss_kib": 20464,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.01600994398,
+      "full_scan_seconds": 0.024089772000000002,
+      "targeted_seconds": 0.00249632007,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 18.085381118988153,
+      "peak_rss_kib": 21012,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 8.98363e-06,
+      "full_scan_seconds": 0.0238150408,
+      "targeted_seconds": 0.017959995834,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 18.00277927395655,
+      "peak_rss_kib": 20564,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 1.44952e-05,
+      "full_scan_seconds": 0.024822551,
+      "targeted_seconds": 0.017871775491,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 4.31489047704963,
+      "peak_rss_kib": 19864,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.016202533539999998,
+      "full_scan_seconds": 0.023483588,
+      "targeted_seconds": 0.002555293675,
+      "nodes": 514
+    }
+  ],
+  "medians": {
+    "ordinary": {
+      "accepted-main": {
+        "construction_seconds": 9.128190000000001e-06,
+        "full_scan_seconds": 0.0051146656,
+        "targeted_seconds": 2.4242681e-05,
+        "peak_rss_kib": 6616
+      },
+      "candidate": {
+        "construction_seconds": 5.911471e-05,
+        "full_scan_seconds": 0.0052983954,
+        "targeted_seconds": 7.5819377e-05,
+        "peak_rss_kib": 5740
+      }
+    },
+    "large-config": {
+      "accepted-main": {
+        "construction_seconds": 9.16997e-06,
+        "full_scan_seconds": 0.004949969,
+        "targeted_seconds": 7.3029966e-05,
+        "peak_rss_kib": 6900
+      },
+      "candidate": {
+        "construction_seconds": 0.00084421194,
+        "full_scan_seconds": 0.0059002274,
+        "targeted_seconds": 7.5492981e-05,
+        "peak_rss_kib": 9488
+      }
+    },
+    "many-rules": {
+      "accepted-main": {
+        "construction_seconds": 9.04804e-06,
+        "full_scan_seconds": 0.024822551,
+        "targeted_seconds": 0.017871775491,
+        "peak_rss_kib": 20872
+      },
+      "candidate": {
+        "construction_seconds": 0.01605129144,
+        "full_scan_seconds": 0.023785832200000002,
+        "targeted_seconds": 0.0025040427310000003,
+        "peak_rss_kib": 19864
+      }
+    }
+  },
+  "binary_size": {
+    "baseline_bytes": 69456960,
+    "candidate_bytes": 69802448,
+    "delta_bytes": 345488,
+    "delta_percent": 0.4974130742261107
+  },
+  "upgrade_cases": [
+    {
+      "baseline": "stable050",
+      "baseline_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+      "linked_git_worktree": false,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "stable050",
+      "baseline_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+      "linked_git_worktree": true,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "accepted-main24",
+      "baseline_sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c",
+      "linked_git_worktree": false,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "accepted-main24",
+      "baseline_sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c",
+      "linked_git_worktree": true,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "Local affected-work micro-costs, not repository-wide throughput or #708 SLO acceptance.",
+    "Default optimized CLI and native filesystem policy owner; package/platform acceptance remains #715.",
+    "Upgrade early zero timeout proves an entry-deadline refusal, not mid-publication cancellation.",
+    "Actual CLI/MCP external-policy and replacement regressions run separately against this frozen candidate.",
+    "All measured ignore rules are nonmatching for authored files: policy-overhead data, not matched-path scan cost. Positive matching is verified by separate public-adapter regressions."
+  ],
+  "cli_pipeline": {
+    "method": "Separate fresh non-Git root per process/trial; same 513 Rust files plus README.md and .gitignore; one absent-document target confirmed missing by public relation query; init and subsequent unchanged watch --once measured independently with GNU time. Warm cache, default optimized profile, three alternating trials per case.",
+    "medians": {
+      "ordinary": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.31627598602790385,
+            "peak_rss_kib": 30916
+          },
+          "noop": {
+            "wall_seconds": 0.04903359099989757,
+            "peak_rss_kib": 19824
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.30487447197083384,
+            "peak_rss_kib": 30832
+          },
+          "noop": {
+            "wall_seconds": 0.05107692000456154,
+            "peak_rss_kib": 20272
+          }
+        }
+      },
+      "large-config": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.306829156994354,
+            "peak_rss_kib": 30588
+          },
+          "noop": {
+            "wall_seconds": 0.04885226098122075,
+            "peak_rss_kib": 19380
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.31318266096059233,
+            "peak_rss_kib": 33076
+          },
+          "noop": {
+            "wall_seconds": 0.05393421900225803,
+            "peak_rss_kib": 23468
+          }
+        }
+      },
+      "many-rules": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.3865742380148731,
+            "peak_rss_kib": 42496
+          },
+          "noop": {
+            "wall_seconds": 0.07161105499835685,
+            "peak_rss_kib": 30736
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.39596459397580475,
+            "peak_rss_kib": 41872
+          },
+          "noop": {
+            "wall_seconds": 0.09793874499155208,
+            "peak_rss_kib": 32804
+          }
+        }
+      }
+    },
+    "samples": [
+      {
+        "case": "ordinary",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.31627598602790385,
+          "peak_rss_kib": 30916
+        },
+        "noop": {
+          "wall_seconds": 0.048584275995381176,
+          "peak_rss_kib": 19668
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "ordinary",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.30742831400129944,
+          "peak_rss_kib": 30984
+        },
+        "noop": {
+          "wall_seconds": 0.05107692000456154,
+          "peak_rss_kib": 20272
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "ordinary",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.3000826479983516,
+          "peak_rss_kib": 30820
+        },
+        "noop": {
+          "wall_seconds": 0.04857428901595995,
+          "peak_rss_kib": 20272
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "ordinary",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.30419861496193334,
+          "peak_rss_kib": 31112
+        },
+        "noop": {
+          "wall_seconds": 0.04903359099989757,
+          "peak_rss_kib": 19824
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "ordinary",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.31750062602804974,
+          "peak_rss_kib": 30692
+        },
+        "noop": {
+          "wall_seconds": 0.05222863896051422,
+          "peak_rss_kib": 20056
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "ordinary",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.30487447197083384,
+          "peak_rss_kib": 30832
+        },
+        "noop": {
+          "wall_seconds": 0.05117426498327404,
+          "peak_rss_kib": 20800
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.30264858197188005,
+          "peak_rss_kib": 30744
+        },
+        "noop": {
+          "wall_seconds": 0.04871333797927946,
+          "peak_rss_kib": 19664
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.31474528700346127,
+          "peak_rss_kib": 33076
+        },
+        "noop": {
+          "wall_seconds": 0.05428865598514676,
+          "peak_rss_kib": 23780
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.31318266096059233,
+          "peak_rss_kib": 33056
+        },
+        "noop": {
+          "wall_seconds": 0.05393421900225803,
+          "peak_rss_kib": 23176
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.306829156994354,
+          "peak_rss_kib": 30576
+        },
+        "noop": {
+          "wall_seconds": 0.049699022027198225,
+          "peak_rss_kib": 19308
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.3069806459825486,
+          "peak_rss_kib": 30588
+        },
+        "noop": {
+          "wall_seconds": 0.04885226098122075,
+          "peak_rss_kib": 19380
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "large-config",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "init": {
+          "wall_seconds": 0.30357919400557876,
+          "peak_rss_kib": 33400
+        },
+        "noop": {
+          "wall_seconds": 0.052200273028574884,
+          "peak_rss_kib": 23468
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.3865742380148731,
+          "peak_rss_kib": 42412
+        },
+        "noop": {
+          "wall_seconds": 0.07161105499835685,
+          "peak_rss_kib": 30736
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.39596459397580475,
+          "peak_rss_kib": 41764
+        },
+        "noop": {
+          "wall_seconds": 0.09845351002877578,
+          "peak_rss_kib": 33220
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.4032693249755539,
+          "peak_rss_kib": 41872
+        },
+        "noop": {
+          "wall_seconds": 0.09793874499155208,
+          "peak_rss_kib": 31528
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.38798539398703724,
+          "peak_rss_kib": 42496
+        },
+        "noop": {
+          "wall_seconds": 0.07342763198539615,
+          "peak_rss_kib": 30536
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.38401879800949246,
+          "peak_rss_kib": 42628
+        },
+        "noop": {
+          "wall_seconds": 0.07156539702555165,
+          "peak_rss_kib": 30884
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      },
+      {
+        "case": "many-rules",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "init": {
+          "wall_seconds": 0.3918232569703832,
+          "peak_rss_kib": 42052
+        },
+        "noop": {
+          "wall_seconds": 0.0967605960322544,
+          "peak_rss_kib": 32804
+        },
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing"
+      }
+    ]
+  }
+}

@@ -882,6 +882,27 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_access_does_not_request_recursive_rebinding() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        for path in [root.clone(), root.join("source.rs")] {
+            let access = Event::new(notify::EventKind::Access(AccessKind::Any)).add_path(path);
+            require(
+                !selection.observe(&access) && !selection.recursive_rebind_pending(),
+                "ordinary access requested recursive recovery",
+            )?;
+        }
+        let rescan = Event::new(notify::EventKind::Access(AccessKind::Any))
+            .add_path(root)
+            .set_flag(notify::event::Flag::Rescan);
+        require(
+            selection.observe(&rescan) && selection.recursive_rebind_pending(),
+            "access filtering discarded a native rescan request",
+        )
+    }
+
+    #[test]
     fn recursive_rebind_preserves_runtime_filtering_and_original_work_control()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;

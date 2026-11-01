@@ -9021,11 +9021,23 @@ impl McpContractSession {
         database: &Path,
         environment: &[(&str, Option<&str>)],
     ) -> Result<(Self, Value), Box<dyn Error>> {
+        Self::spawn_configured(executable, repo, database, None, environment)
+    }
+
+    /// Keep the process cwd independent from an explicitly configured source root.
+    fn spawn_configured(
+        executable: &Path,
+        directory: &Path,
+        database: &Path,
+        config: Option<&Path>,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
         let mut command = StdCommand::new(executable);
+        command.current_dir(directory).arg("--db").arg(database);
+        if let Some(config) = config {
+            command.arg("--config").arg(config);
+        }
         command
-            .current_dir(repo)
-            .arg("--db")
-            .arg(database)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -13104,7 +13116,7 @@ fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<
     fs::create_dir(&repo)?;
     fs::create_dir(&home)?;
     git_success(&repo, &["init", "--quiet"])?;
-    let configuration = temp.path().join("selected.gitconfig");
+    let configuration = temp.path().join(EXTERNAL_GIT_CONFIGURATION_FILE);
     let rules = temp.path().join("global rules.ignore");
     let configuration_text = configuration
         .to_str()
@@ -13404,8 +13416,307 @@ fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
+    // Native platforms may split replacement notifications into several batches.
+    const WATCH_CYCLE_BUDGET: usize = 8;
+
+    /// Author the same project namespace on a different directory object.
+    fn write_project(root: &Path, target: &str) -> Result<(), Box<dyn Error>> {
+        rust_binding_project(root, "2024")?;
+        write_source(root, target)
+    }
+
+    /// Edit only an existing descendant, leaving policy and directory entries unchanged.
+    fn write_source(root: &Path, target: &str) -> Result<(), Box<dyn Error>> {
+        fs::write(
+            root.join(RUST_LIBRARY_PATH),
+            format!("pub fn {target}() {{}}\npub fn caller() {{ {target}(); }}\n"),
+        )?;
+        Ok(())
+    }
+
+    /// Prepare complete source before the short supported directory replacement gap.
+    fn replace_project(root: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
+        let replacement = directory.join("replacement-root");
+        write_project(&replacement, "replacement_target")?;
+        fs::rename(root, directory.join("retired-root"))?;
+        fs::rename(replacement, root)?;
+        Ok(())
+    }
+
+    /// Capture every approved purpose, including its source and review status.
+    fn approved(store: &AtlasStore) -> Result<Vec<projectatlas_core::Purpose>, Box<dyn Error>> {
+        Ok(store
+            .load_nodes()?
+            .into_iter()
+            .filter(|row| row.purpose.status == projectatlas_core::PurposeStatus::Approved)
+            .map(|row| row.purpose)
+            .collect())
+    }
+
+    /// Observe durable publication without refreshing it from the test process.
+    fn watch_symbol_is_published(database: &Path, name: &str) -> Result<bool, Box<dyn Error>> {
+        Ok(AtlasStore::open_read_only(database)?
+            .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+            .iter()
+            .any(|symbol| symbol.name == name))
+    }
+
+    /// Wait for a required logical phase while the native command remains alive.
+    fn await_watch_symbol(
+        child: &mut Child,
+        database: &Path,
+        name: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+        loop {
+            if watch_symbol_is_published(database, name)? {
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(
+                    io::Error::other(format!("watch exited before {name}: {status}")).into(),
+                );
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("watch missed {name}"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    for surface in ["cli", "mcp"] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path();
+        let root = directory.join("source-root");
+        let database = directory.join("external.db");
+        let config = directory.join("external.toml");
+        let git_config = directory.join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        write_project(&root, "initial_target")?;
+        let root_text = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture root is not UTF-8"))?;
+        fs::write(&config, format!("[project]\nroot = {root_text:?}\n"))?;
+        fs::write(&git_config, "[core]\nexcludesFile = \"\"\n")?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture config is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let mut initialize = StdCommand::new(&executable);
+        initialize
+            .current_dir(&root)
+            .arg("--config")
+            .arg(&config)
+            .arg("--db")
+            .arg(&database)
+            .arg("init");
+        for (key, value) in environment {
+            if let Some(value) = value {
+                initialize.env(key, value);
+            }
+        }
+        let initialized = initialize.output()?;
+        if !initialized.status.success() {
+            return Err(io::Error::other(format!(
+                "external root init failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&initialized.stdout),
+                String::from_utf8_lossy(&initialized.stderr)
+            ))
+            .into());
+        }
+        let (identity, purposes, revision) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                SRC_DIR_NAME,
+                "Own the replacement source namespace",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                RUST_LIBRARY_PATH,
+                "Retain authored responsibility through root replacement",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                approved(&store)?,
+                store.authored_purpose_revision()?,
+            )
+        };
+        rust_binding_equal(&purposes.len(), &2)?;
+
+        if surface == "cli" {
+            // A newly published sentinel proves that native coverage was installed,
+            // rather than mistaking the earlier initializer's publication for readiness.
+            let source = root.join(RUST_LIBRARY_PATH);
+            let mut text = fs::read_to_string(&source)?;
+            text.push_str("pub fn watcher_ready() {}\n");
+            fs::write(source, text)?;
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(directory)
+                .args(["--format", "json"])
+                .arg("--config")
+                .arg(&config)
+                .arg("--db")
+                .arg(&database)
+                .arg("watch")
+                .arg(&root)
+                .args(["--poll-seconds", "1", "--max-cycles"])
+                .arg(WATCH_CYCLE_BUDGET.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let mut child = command.spawn()?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                await_watch_symbol(&mut child, &database, "watcher_ready")?;
+                replace_project(&root, directory)?;
+                await_watch_symbol(&mut child, &database, "replacement_target")?;
+                write_source(&root, "edited_target")?;
+                await_watch_symbol(&mut child, &database, "edited_target")?;
+                // Logical phases do not correspond one-to-one to native batches.
+                // After proving the child edit, finish the bounded command with
+                // distinct sequential edits. Wait for each publication before
+                // writing another, so native debounce cannot coalesce the drain.
+                for ordinal in 0..WATCH_CYCLE_BUDGET {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    let sentinel = format!("watcher_finished_{ordinal}");
+                    let source = root.join(RUST_LIBRARY_PATH);
+                    let mut text = fs::read_to_string(&source)?;
+                    writeln!(&mut text, "pub fn {sentinel}() {{}}")?;
+                    fs::write(source, text)?;
+                    let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+                    while child.try_wait()?.is_none()
+                        && !watch_symbol_is_published(&database, &sentinel)?
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "watch did not complete its replacement refreshes",
+                            )
+                            .into());
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                rust_binding_require(
+                    child.try_wait()?.is_some(),
+                    "native watch exceeded its bounded completion drain",
+                )?;
+                Ok(())
+            })();
+            // Kill only on failure; successful native completion produces its
+            // public mode report, which excludes a polling-fallback false pass.
+            if operation.is_err() {
+                let _stopped = child.kill();
+            }
+            let output = child.wait_with_output()?;
+            if let Err(error) = operation {
+                return Err(io::Error::other(format!(
+                    "CLI replacement failed: {error}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            rust_binding_require(output.status.success(), "watch refreshes failed")?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            rust_binding_equal(&report.pointer("/mode"), &Some(&json!("notify")))?;
+            rust_binding_equal(
+                &report.pointer("/cycles"),
+                &Some(&json!(WATCH_CYCLE_BUDGET)),
+            )?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                // Use the server's explicit DB/config binding. Per-call
+                // project_path intentionally selects that root's conventional DB.
+                let arguments = json!({"view": "detailed", "file": RUST_LIBRARY_PATH, "symbol": "caller", "relation": "calls", "limit": 10});
+                let refresh = json!({"path": root});
+                let targets = |session: &mut McpContractSession| -> Result<BTreeSet<(String, String)>, Box<dyn Error>> {
+                    let value: Value = toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+                    let rows = value.pointer("/symbol_relations/rows").and_then(Value::as_array).ok_or_else(|| io::Error::other(format!("missing replacement call rows: {value}")))?;
+                    Ok(rust_binding_targets(rows))
+                };
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &targets(&mut session)?,
+                        &BTreeSet::from([(
+                            RUST_LIBRARY_PATH.to_string(),
+                            "initial_target".to_string(),
+                        )]),
+                    )?;
+                }
+                replace_project(&root, directory)?;
+                session.call_tool("atlas_watch_once", &refresh)?;
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &targets(&mut session)?,
+                        &BTreeSet::from([(
+                            RUST_LIBRARY_PATH.to_string(),
+                            "replacement_target".to_string(),
+                        )]),
+                    )?;
+                }
+                write_source(&root, "edited_target")?;
+                let expected =
+                    BTreeSet::from([(RUST_LIBRARY_PATH.to_string(), "edited_target".to_string())]);
+                let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+                loop {
+                    if targets(&mut session)? == expected {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "MCP replacement child edit was not observed",
+                        )
+                        .into());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(&approved(&store)?, &purposes)?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+        rust_binding_require(
+            !root.join(ATLAS_DIR_NAME).join("projectatlas.db").exists(),
+            "replacement created an implicit database instead of retaining the explicit binding",
+        )?;
+    }
+    Ok(())
+}
+
 /// Conventional library path shared by the Rust navigation fixtures.
 const RUST_LIBRARY_PATH: &str = "src/lib.rs";
+/// Explicit Git configuration used by the external-policy fixtures.
+const EXTERNAL_GIT_CONFIGURATION_FILE: &str = "selected.gitconfig";
 /// Worker module used by the Rust binding fixtures.
 const RUST_BINDING_WORKER_PATH: &str = "src/worker.rs";
 /// Source declaration behind Rust forwarding aliases.

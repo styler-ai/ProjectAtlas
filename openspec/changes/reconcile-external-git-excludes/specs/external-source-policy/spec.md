@@ -61,13 +61,29 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a supported selected config changes the effective excludes pathname
 - **THEN** accepted reconciliation updates external watch coverage, including absent paths, and discovers later edits to the newly selected input without per-event-path reconstruction of global policy
 
+#### Scenario: Selected source directory is replaced
+- **WHEN** a supported selected source directory is replaced at the same canonical pathname during CLI/MCP observation while its explicit external database and configuration remain available
+- **THEN** structural uncertainty invalidates the prior warm epoch, recursive coverage is restored before cold source sampling, and accepted refresh/read results reflect the replacement source while preserving database/project identity and all approved purposes
+- **AND** later replacement-directory child edits remain observable, no conventional database is implicitly created, and existing root/config/registered-lifecycle admission remains enforced
+- **AND** the rebind marker and event/sequence publication share the source-observation ingress fence; ordinary access without rescan does not request a rebind, and cancellation or failed rebinding retains uncertainty under the original work budget
+
 #### Scenario: Policy-only document outcome
 - **WHEN** an exclusion changes the ignored-versus-missing classification of an absent document target without changing the indexed source inventory
 - **THEN** accepted refresh and subsequent CLI/MCP graph queries agree with full reconciliation and do not preserve a stale document reason merely because source nodes are unchanged
 
+#### Scenario: External policy changes during document staging
+- **WHEN** a selected external rule changes a retained absent-document outcome after staging while source nodes remain identical
+- **THEN** final publication revalidates those outcomes against freshly discovered policy using the original configured scan options and operation control, refusing stale staged results before the transaction
+- **AND** last-valid publication and authored state survive refusal, and a subsequent stable retry converges and becomes a no-op
+
 #### Scenario: Failure and operator compatibility
 - **WHEN** configured external policy inputs are unreadable/malformed or controlled work is cancelled or exhausts a bound
 - **THEN** existing typed failure/recovery semantics preserve the last valid publication, while valid explicit operator root/DB/config/state and external-policy paths remain usable
+
+#### Scenario: Uncached document probes retain source admission
+- **WHEN** the policy-only freshness probe or ordinary projection inspects an absent derived document target with an escaping native prefix, including an escape followed by reentry
+- **THEN** both consumers return the existing typed source-boundary reason before target-specific ignore contents are read, sharing the same admission owner and original cooperative control
+- **AND** cached checks and staged revalidation honor cancellation, while normal local targets and explicit operator global/shared-worktree policy retain their supported behavior
 
 #### Scenario: Non-regular input and regular symlink controls
 - **WHEN** a selected external input is unsupported non-regular state or a valid regular file reached through a supported symlink

@@ -268,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "24";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "25";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -3451,6 +3451,7 @@ fn repository_path_is_absent(path: &str, absent_paths: &HashSet<&str>) -> bool {
 fn publish_index_batch(
     store: &mut AtlasStore,
     batch: IndexPublicationBatch,
+    scan_options: &ScanOptions,
     control: &IndexWorkControl,
 ) -> Result<IndexPublicationOutcome, CliError> {
     control.check(IndexWorkStage::Publication)?;
@@ -3467,7 +3468,7 @@ fn publish_index_batch(
         graph,
         structural_summaries,
     } = batch;
-    graph.revalidate_document_targets(&root)?;
+    graph.revalidate_document_targets(&root, scan_options, control)?;
     let mut publication =
         store.begin_index_publication_from(&contract_fingerprint, base_generation)?;
     publication.set_project_root(&root)?;
@@ -3603,7 +3604,7 @@ pub(crate) fn run_scan_pipeline_controlled(
         batch.purpose_import.as_ref(),
         control,
     )?;
-    let outcome = publish_index_batch(store, batch, control)?;
+    let outcome = publish_index_batch(store, batch, &plan.scan_options, control)?;
     let overview = store.overview()?;
     Ok(ScanReport {
         overview,
@@ -8673,7 +8674,7 @@ fn refresh_full_index_from_source_controlled(
     if !document_projection_changed && staged_full_refresh_is_unchanged(store, &batch)? {
         return Ok(empty_index_refresh_report(plan.text_options));
     }
-    let outcome = publish_index_batch(store, batch, control)?;
+    let outcome = publish_index_batch(store, batch, &plan.scan_options, control)?;
     Ok(IndexRefreshReport {
         text_index: outcome.text_index,
         structural_summaries: outcome.structural_summaries,
@@ -9006,7 +9007,7 @@ fn refresh_index_for_changes_from_source_controlled(
         None,
         control,
     )?;
-    let outcome = publish_index_batch(store, batch, control)?;
+    let outcome = publish_index_batch(store, batch, &plan.scan_options, control)?;
     Ok(IndexRefreshReport {
         text_index: outcome.text_index,
         structural_summaries: outcome.structural_summaries,
@@ -13079,12 +13080,18 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (publish_tx, publish_rx) = std::sync::mpsc::sync_channel(1);
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let publication_options = plan.scan_options.clone();
         let publisher = std::thread::spawn(move || {
             if ready_tx.send(()).is_err() || publish_rx.recv().is_err() {
                 return;
             }
             let publication_control = standalone_index_work_control();
-            let result = publish_index_batch(&mut store, contended_batch, &publication_control);
+            let result = publish_index_batch(
+                &mut store,
+                contended_batch,
+                &publication_options,
+                &publication_control,
+            );
             drop(result_tx.send((store, result)));
         });
         ready_rx
@@ -13172,7 +13179,12 @@ mod tests {
         let winning_generation = initial_generation
             .checked_next()
             .ok_or_else(|| io::Error::other("test generation overflowed"))?;
-        let conflict = publish_index_batch(&mut store, generation_conflict_batch, &control);
+        let conflict = publish_index_batch(
+            &mut store,
+            generation_conflict_batch,
+            &plan.scan_options,
+            &control,
+        );
         if !matches!(
             conflict,
             Err(CliError::Db(
@@ -13710,7 +13722,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         // Seed a preceding contract through the full native owner so raw and
         // canonical graph generations remain consistent with its publication.
         prior_batch.contract_fingerprint = prior_projection_fingerprint;
-        publish_index_batch(&mut store, prior_batch, &prior_control)?;
+        publish_index_batch(&mut store, prior_batch, &plan.scan_options, &prior_control)?;
         if publication_contract_matches(&store, &plan)? {
             return Err(io::Error::other(
                 "prior semantic contract unexpectedly matched the current plan",
@@ -13756,7 +13768,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let cancelled = standalone_index_work_control();
         cancelled.cancel();
         if !matches!(
-            publish_index_batch(&mut store, repair, &cancelled),
+            publish_index_batch(&mut store, repair, &plan.scan_options, &cancelled),
             Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
         ) {
             return Err(io::Error::other("cancelled contract repair was not refused").into());
@@ -15084,6 +15096,118 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &probe(&store)?,
             &(false, 6),
             "new source target graph is current",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_only_document_changes_during_staging_preserve_last_valid_state()
+    -> Result<(), Box<dyn Error>> {
+        const CHILD_ROOT: &str = "PROJECTATLAS_TEST_POLICY_PUBLICATION_ROOT";
+        const TARGET: &str = "ghost.rs";
+        const RULES_FILE: &str = "global.ignore";
+        let Some(root) = std::env::var_os(CHILD_ROOT) else {
+            // Give the unit's real policy owner an isolated operator environment
+            // without mutating process-global environment in parallel tests.
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            fs::create_dir(&root)?;
+            let rules = temp.path().join(RULES_FILE);
+            fs::write(&rules, format!("{TARGET}\n"))?;
+            let config = temp.path().join("selected.gitconfig");
+            fs::write(&config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+            let output = StdCommand::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "runtime::tests::policy_only_document_changes_during_staging_preserve_last_valid_state",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, &root)
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .env("GIT_CONFIG_SYSTEM", "")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "isolated policy publication control failed: stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ))
+                .into());
+            }
+            return Ok(());
+        };
+        let root = PathBuf::from(root);
+        let rules = root
+            .parent()
+            .ok_or_else(|| io::Error::other("isolated policy root has no parent"))?
+            .join(RULES_FILE);
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(root.join("README.md"), format!("[ghost]({TARGET})\n"))?;
+        let plan = ScanRuntimePlan::for_path(None, &root, Some(100_000))?;
+        let options = SymbolBuildOptions::new(100_000, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), &root)?;
+        refresh_index(&mut store, &plan, &options)?;
+        let control = standalone_index_work_control();
+        let before = store.index_publication()?;
+        let identity = store.project_instance_id()?;
+        let initial = store.repository_unresolved_documents_page(None, 10, &control)?;
+        require_eq(&initial.rows.len(), &1, "policy publication document count")?;
+        require_eq(
+            &initial.rows[0].reason,
+            &projectatlas_core::graph::DocumentTargetUnresolvedReason::Ignored,
+            "initial policy publication reason",
+        )?;
+        fs::write(&rules, "")?;
+        let batch = stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+        fs::write(&rules, format!("{TARGET}\n"))?;
+        // This existing source fence succeeds: the target is still absent, and
+        // restoring its external exclusion does not change any source node.
+        revalidate_staged_publication_inputs_controlled(
+            &plan,
+            batch.nodes.expected_nodes(),
+            None,
+            &control,
+        )?;
+        if !matches!(
+            publish_index_batch(&mut store, batch, &plan.scan_options, &control),
+            Err(CliError::RefreshRequired(_))
+        ) {
+            return Err(
+                io::Error::other("policy-only change during staging reached publication").into(),
+            );
+        }
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "last valid policy publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "policy publication identity",
+        )?;
+        refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "restored policy no-op",
+        )?;
+        fs::write(&rules, "")?;
+        refresh_index(&mut store, &plan, &options)?;
+        let repaired = store.index_publication()?;
+        let page = store.repository_unresolved_documents_page(None, 10, &control)?;
+        require_eq(
+            &page.rows[0].reason,
+            &projectatlas_core::graph::DocumentTargetUnresolvedReason::Missing,
+            "retried policy-only document reason",
+        )?;
+        refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &store.index_publication()?,
+            &repaired,
+            "repaired policy no-op",
         )?;
         Ok(())
     }

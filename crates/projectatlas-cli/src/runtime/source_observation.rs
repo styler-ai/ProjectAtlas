@@ -488,6 +488,8 @@ impl SourceObservationEntry {
             Arc::clone(&receiver),
             Arc::clone(&ingress_sequence),
             Arc::clone(&continuity_lost),
+            #[cfg(test)]
+            None,
         ))
         .map_err(|source| observer_error(&binding.root, &source))?;
         let mut entry = Self {
@@ -1565,6 +1567,10 @@ impl SourceObservationRegistry {
     }
 }
 
+/// Bounded handshake used only by owning tests at the callback ingress fence.
+#[cfg(test)]
+type IngressFenceGate = (SyncSender<()>, Receiver<()>);
+
 /// Exclude proven unrelated parent-directory traffic before it can consume source queue capacity.
 fn selected_watcher_callback(
     selection: PolicyWatchSelection,
@@ -1572,16 +1578,22 @@ fn selected_watcher_callback(
     receiver: Arc<Mutex<Receiver<Event>>>,
     ingress_sequence: Arc<AtomicU64>,
     continuity_lost: Arc<AtomicBool>,
+    #[cfg(test)] before_fence: Option<IngressFenceGate>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
-    let mut publish = watcher_callback(sender, receiver, ingress_sequence, continuity_lost);
+    let mut publish = watcher_callback(
+        sender,
+        receiver,
+        ingress_sequence,
+        continuity_lost,
+        Some(selection.clone()),
+        #[cfg(test)]
+        before_fence,
+    );
     move |result| {
         if let Ok(event) = &result
-            && !selection.observe(event)
+            && !selection.may_affect(event)
         {
             return;
-        }
-        if result.is_err() {
-            selection.require_recursive_rebind();
         }
         publish(result);
     }
@@ -1593,10 +1605,21 @@ fn watcher_callback(
     receiver: Arc<Mutex<Receiver<Event>>>,
     ingress_sequence: Arc<AtomicU64>,
     continuity_lost: Arc<AtomicBool>,
+    selection: Option<PolicyWatchSelection>,
+    #[cfg(test)] before_fence: Option<IngressFenceGate>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |result| match result {
         Ok(event) if matches!(event.kind, EventKind::Access(_)) && !event.need_rescan() => {}
         result => {
+            #[cfg(test)]
+            if let Some((arrived, release)) = &before_fence
+                && (arrived.send(()).is_err()
+                    || release.recv_timeout(Duration::from_secs(5)).is_err())
+            {
+                continuity_lost.store(true, Ordering::Release);
+                ingress_sequence.fetch_add(1, Ordering::AcqRel);
+                return;
+            }
             let _receiver = match receiver.lock() {
                 Ok(receiver) => receiver,
                 Err(_poisoned) => {
@@ -1605,6 +1628,13 @@ fn watcher_callback(
                     return;
                 }
             };
+            if let Some(selection) = &selection {
+                match &result {
+                    Ok(event) if !selection.observe(event) => return,
+                    Ok(_) => {}
+                    Err(_) => selection.require_recursive_rebind(),
+                }
+            }
             match result {
                 Ok(event) => {
                     let needs_rescan = event.need_rescan();
@@ -2120,6 +2150,7 @@ mod tests {
             Arc::clone(&receiver),
             Arc::clone(&sequence),
             Arc::clone(&lost),
+            None,
         );
         for i in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
             callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
@@ -2164,6 +2195,7 @@ mod tests {
             receiver,
             Arc::clone(&sequence),
             Arc::clone(&lost),
+            None,
         );
         let event =
             Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan);
@@ -2184,6 +2216,76 @@ mod tests {
     }
 
     #[test]
+    fn rebind_marker_and_event_share_the_callback_ingress_fence() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        for result in [
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                    .add_path(root.clone()),
+            ),
+            Err(notify::Error::generic("fixture native observation failure")),
+        ] {
+            let is_error = result.is_err();
+            let selection = PolicyWatchSelection::new(root.clone());
+            let (sender, receiver) = sync_channel(1);
+            let receiver = Arc::new(Mutex::new(receiver));
+            let sequence = Arc::new(AtomicU64::new(0));
+            let lost = Arc::new(AtomicBool::new(false));
+            let (arrived, arrival) = sync_channel(1);
+            let (release, released) = sync_channel(1);
+            let mut callback = selected_watcher_callback(
+                selection.clone(),
+                sender,
+                Arc::clone(&receiver),
+                Arc::clone(&sequence),
+                Arc::clone(&lost),
+                Some((arrived, released)),
+            );
+            std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+                // Hold the same fence used by final drain/acceptance. The callback
+                // acknowledges its exact pre-lock boundary, without timing sleeps.
+                let held = receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let worker = scope.spawn(move || callback(result));
+                let reached = arrival.recv_timeout(Duration::from_secs(5));
+                let premature_marker = selection.recursive_rebind_pending();
+                let premature_sequence = sequence.load(Ordering::Acquire);
+                let premature_loss = lost.load(Ordering::Acquire);
+                let queue_empty = matches!(held.try_recv(), Err(TryRecvError::Empty));
+                let continued = release.try_send(());
+                drop(held);
+                let completed = worker.join();
+                reached?;
+                continued?;
+                completed.map_err(|payload| {
+                    std::io::Error::other(format!("native callback panicked: {payload:?}"))
+                })?;
+                require(
+                    !premature_marker && premature_sequence == 0 && !premature_loss && queue_empty,
+                    "acceptance fence observed a rebind marker without its event/sequence",
+                )?;
+                require(
+                    selection.recursive_rebind_pending()
+                        && sequence.load(Ordering::Acquire) == 1
+                        && lost.load(Ordering::Acquire) == is_error,
+                    "callback did not publish structural uncertainty with ingress",
+                )?;
+                let queued = receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .try_recv();
+                require(
+                    queued.is_ok() != is_error,
+                    "callback publication lost its event/error semantics",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn watcher_callback_is_bounded_and_marks_overflow_and_rescan() {
         let (sender, receiver) = sync_channel(1);
         let receiver = Arc::new(Mutex::new(receiver));
@@ -2194,6 +2296,8 @@ mod tests {
             Arc::clone(&receiver),
             Arc::clone(&sequence),
             Arc::clone(&lost),
+            None,
+            None,
         );
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
             RenameMode::Any,
@@ -2215,8 +2319,14 @@ mod tests {
         let receiver = Arc::new(Mutex::new(receiver));
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
-        let mut callback =
-            watcher_callback(sender, receiver, Arc::clone(&sequence), Arc::clone(&lost));
+        let mut callback = watcher_callback(
+            sender,
+            receiver,
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+            None,
+        );
         callback(Ok(Event::new(EventKind::Access(AccessKind::Any))));
 
         assert_eq!(sequence.load(Ordering::Acquire), 0);

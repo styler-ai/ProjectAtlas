@@ -10,6 +10,8 @@ The broader audit also reproduced targeted matching losing ancestor rules when a
 - Reconcile full traversal and targeted/document selection, including linked Git control files, without disabling no-Git .gitignore support or changing local-rule precedence.
 - Observe every selected config/policy input that can alter this selection. Reconcile unchanged prior indexes through existing derived publication invalidation and retain authored state.
 - Reuse the configured ignore engine's hierarchical matching for full and targeted paths, including inherited rules and ignored-parent pruning. Continuous CLI/MCP watch must observe selected external inputs, absent-parent creation and changed selections without admitting outside files or reconstructing global policy for each event path.
+- Restore recursive coverage when a supported source directory is replaced at its selected pathname while the database/config remain external. Serialize structural uncertainty with event ingress before accepting a warm result; preserve existing root/lifecycle admission and ignore ordinary access events without triggering a rebind.
+- Apply the already specified document-prefix admission boundary to the shared uncached policy inspector used by this issue's freshness probe and ordinary projection. Check each existing native prefix before per-target policy reads, using the caller's cooperative control; retain explicit global/shared policy inputs and typed source outcomes. #738 retains its separate complete acceptance and closure.
 
 ## Capabilities
 
