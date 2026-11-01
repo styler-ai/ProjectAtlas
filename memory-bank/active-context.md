@@ -1,3 +1,40 @@
+## Current native core proof passed; final alias-execution guard ready for publication
+
+Public/localHEAD d65a50a7fab1b98551a739294ed07b1fe2cf621e; no execution lease.
+Source41308696614 ownership/nativepolicy+actualCLI/MCPselector steps SUCCESS on ALL4OS;
+bothMacnativevolume matrices SUCCESS. Windowsstep124854493714 succeeded13:09:41
+including fullNULLSACLfix, allproject_state tests, DBcohort/runtime+rootunits, actual
+CLI/MCPadmission/writers/rootmetadata andcasesensitivewriter rerun. FullRust,
+repository/Linux/MacARM jobs SUCCESS; Windows/Intel stillrunning at13:41UTC.
+P6jJ overallACL RESOLVED afterindependentLuna741 readiness and4OSnativeproof;
+reply4435800279 posted/readback/resolvedtrue. VUodalreadyresolved4435697072. ONLY
+XLkE naming/cohort OPEN. Reviewer731 found actualaliasCLI/MCPsubcase silentlycontinues
+if no8.3alias; separate runtimeunit requiresalias butdoesnotprove thisbranch ran.
+D65log maynotshow directexecution; do NOTinfer alias-specificproof fromgenericpass.
+
+Test-onlyguard checkpoint: eachcli/mcpresetSurface nowHARDFAILS inGITHUB_ACTIONS ifactual
+DBshortaliasunavailable; directstderrPASS onlyafterallchecks+MCPshutdown; local
+unavailability explicit. No productchanges. Source lifecycleSHA0342e06db8745f0eb2f65d94d7d513e9137f70fc5b537a81451c72956b11af0c
+updatedBOTHinventorypins; selector/countsunchanged. TemporaryportableWindowsbody
+ClippyPASS andEXACTbytes restored, CLIalltarget/allfeatureClippyPASS,3inventoryPASS,
+Linuxadmission1PASS, strictOpenSpec/fmt/strings/scopedIssueOps1of5 PASS. BothLunaMaxFINALapproveNEXTNATIVEPUBLICATION
+ONLY. XLkE staysOPEN untilfreshWindowsguardprovesbothsurfaces. WAITD65fulljobsfinish
+BEFOREpublishing toavoidcancelingremainingcurrentproof. Sourcechecks done; nolease.
+
+#715 liveWhatChanges nowhasEXACThandoff (3bullets): E2E/worktree/native selectors,
+installedoverride, positivecapabilities, WinEFS/case8.3cohort/recovery/noSQLreset,
+Linux4profiles, Mac4formats/botharchs, prooflimits andfinalcombinedsource requirement.
+Readbackexact; no715tasksmodified. Bothreviewers confirmed explicitguard/inventory/
+handoffcontent aligned, no productchanges; nativefreshguardstillrequired. Reviewer731 says2.3contentready, checkafterfresh
+hostedguard andcurrentPRdescriptionreconciliation. PRbodyupdatedD65corepass/guard
+pending andresolvedACL+creationthreads. Tasksremain1/5/allacceptanceOPEN, whole3.1
+pending. Thisisstill741work/handoff only, notstarting715implementation.
+D65code+securitysummariesCOMPLETED, no newfindings. D65Rust2071632609(27) +Actions
+2071594751(4) exactnormalizedsource/flows vs c5bb; noadd/remove/suppress/dismiss.
+CurrentD65Windows/Intel advanced pastallresourceproofs intofinalplugin/nativehost
+gates at13:47UTC. Finishthose BEFOREpushguard; no lease orlocalbuildactive.
+Earlier2/3threadcounts andCLIselector-pendingheaders below historical.
+
 # Active context
 
 ## Goal and serial ownership
@@ -15,9 +52,19 @@ and short-command guide, global Rust/applicable subskills, accepted OpenSpec
 admit-generated-project-state. No schema/DER/SEM change. Only task1.1 checked (1/5);
 all acceptance OPEN. PR references741, no premature closure. No permission pending.
 
-## NULL-preview correction ready for normal publication; no lease yet
+## Current published D65: local normal+immutable PASS, native CI running; NO LEASE
 
-Public/localc5bb remains baseline until new commit/push. Current repair changes ONLY
+Public/local d65a50a7fab1b98551a739294ed07b1fe2cf621e. Normal53157/PID307079
+TERMINALPASS790.487s,34suites1733PASS12ignored; immutable87942 TERMINALPASS144inputs.
+Readonlybinary88eb105dc1691c39b60751e689313bec6dfd81188791c62e5a353437f0d1cbd8.
+Prefix/tmp/projectatlas-741-null-preview; CLI/MCPadmission8.790s/writer5.378s/
+registered9.286s/5upgrades7.031s PASS; inputs/binary/identity/config/approvedpurposes
+unchanged during proof. BothprocessesterminalBEFOREthismemoryupdate; NOLEASE.
+SOURCE41308696614 exactD65 running, watcher40304 saves terminal logs/statusprefixabove.
+Windows124854493714, Rust124854493723, Linux124854493677, MacARM124854493648,
+MacIntel124854493717, repository124854493643 runninginitially; plan124854449712 and
+SDK124854493703 PASS. Code+securityreviews AUTOMATICALLYrunning on exactD65; no
+extra request posted because bothalreadyrunning. Current repair changes ONLY
 CPE preview comparison for confirmed nativeNULL0810->absent0800, no other policy
 relaxation. Requires complete capture, raw SACL XORexactPRESENT (DEFAULTED/P/ARclear,
 AIidentical), parentfullabsence, NULL/absentnativepointers andzeroACEs inall3, DACL
@@ -29,10 +76,10 @@ AU/ML/RA/SP/populated/protected/allocated-empty negatives. Allocatedemptyfixture
 provesrawgates+discretionarycontrols match beforepointerrejection. BothLunaMax
 FINALapprove NEXTNATIVEPUBLICATIONONLY. GNUownermodule/testsClippy, CLIalltargets
 allfeaturesClippy, Linux32PASS2ignore, fmt, strictspec/strings/scopedIssueOps1of5 PASS.
-Design/delta-spec/liveissue updated/readbackexact. Freshprefixnull-preview planned.
+Design/delta-spec/liveissue updated/readbackexact. Freshprefixnull-preview published; nativeactualcorrectedcase stillpending.
 No nativeproof of repairedcase yet. Source no competinglocalbuild currently.
 
-## Current published c5bb: local proof PASS; Windows FAIL; NO LEASE
+## Previous c5bb native baseline: local proof PASS; Windows failed one case
 
 Public/local HEAD c5bb22ebf6ea06a394e51fc492bcc5c397f03e6a. Normal7403/PID108810
 TERMINALPASS783.225s:34suites1733PASS12ignored. Immutable52211 TERMINALPASS144inputs;
@@ -114,8 +161,11 @@ alsoCOMPLETED, no newfindingcomment. Code request6557797873. Ed8 code receipt655
 error retry6557442486; weekly allowance reset works. Ed8 security summary completed,
 no new finding comment. Do not equate historical findings with current acceptance.
 
-Three OPEN thread-aware threads: P6jJ overall ACL, VUod initialstage, XLkE naming
-family. Last full snapshot /tmp/projectatlas-741-split-descriptor-review-threads.json.
+Two OPEN thread-aware threads: P6jJ overallACL, XLkE naming/cohort.
+VUod PRRT_kwDOQyFgJ86yVUod RESOLVED on publishedc5bb after actualnativeactorall6role
+proof and independentLuna741 readinessreviewforthisfindingONLY. Reply4435697072
+posted/readbackexact; threadresolvedtrue readbackconfirmed viaGitHubthreadAPI.
+No broaderissue/nativeacceptance claimed; sourceD65actorSACLabsentbranchunchanged. Last full snapshot /tmp/projectatlas-741-split-descriptor-review-threads.json.
 Resolve only after actual behavior/review. Broad SACL TBSb and EFS V0FS were resolved
 with narrower native proof; don't reopen without a corresponding regression.
 TL/FL setup, enforced SELinux/Smack policy, domain CAP enforcement, EFS key-list
@@ -158,5 +208,5 @@ only then publish and independently verify RC. Stable stays outside authorizatio
 
 Detailed earlier checkpoints are preserved in Git c5bb22e:memory-bank/active-context.md
 and earlier referenced commits. Source, live tracker and actual results override
-memory. Next: inspect Windows124845320182, fresh review threads, and c5bb CodeQL;
+memory. Next: inspect Windows124854493714, fresh review threads, and D65 CodeQL;
 finish #741 and normally merge/verify issue+PR CLOSED before another owner.

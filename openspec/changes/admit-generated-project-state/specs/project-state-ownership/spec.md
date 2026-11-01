@@ -57,6 +57,7 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** an existing proven alternate WAL, SHM or journal causes a causal refusal before SQLite without changing recovery bytes; original-spelling external checkpoint recovery remains possible
 - **AND** explicit reset can preview and remove canonical and proven alternate entries without reading SQLite, while preserving outside hardlink bytes, selected-directory checks and registered lifecycle checks
 - **AND** unrelated explicit databases and literal custom names retain their supported semantics; unknown orphan aliases after independent removal of the main entry are not claimed as discovered
+- **AND** the hosted CLI/MCP cohort campaign requires an actual database short alias for each CLI and MCP reset surface and records completion; it cannot silently skip an unavailable fixture
 
 #### Scenario: Replacement preserves existing access controls
 - **WHEN** an admitted generated host config, managed TOML config or JSON sidecar is replaced

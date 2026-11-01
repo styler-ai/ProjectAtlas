@@ -5058,8 +5058,16 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             }
             let short = PathBuf::from(String::from_utf8(alias.stdout)?.trim());
             if short.file_name() == database.file_name() {
-                // Some native volumes disable DOS aliases; the Windows owning test
-                // separately requires an actual alias in the hosted campaign.
+                if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                    return Err(io::Error::other(format!(
+                        "hosted {reset_surface} cohort route requires an actual database short alias"
+                    ))
+                    .into());
+                }
+                writeln!(
+                    io::stderr().lock(),
+                    "native Windows cohort route unavailable: reset_surface={reset_surface}, no database short alias"
+                )?;
                 continue;
             }
             let (mut cohort_session, _) = McpContractSession::spawn_configured(
@@ -5209,6 +5217,10 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                 Ok(())
             })();
             complete_mcp_test_after_shutdown(cohort_result, || cohort_session.shutdown())?;
+            writeln!(
+                io::stderr().lock(),
+                "native Windows cohort route PASS: reset_surface={reset_surface}, actual_short_alias=true"
+            )?;
         }
     }
     let state = root.join(ATLAS_DIR_NAME);
