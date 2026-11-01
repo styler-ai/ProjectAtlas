@@ -13416,6 +13416,171 @@ fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<
     Ok(())
 }
 
+/// Capture every approved purpose, including its source and review status.
+fn approved_purposes(
+    store: &AtlasStore,
+) -> Result<Vec<projectatlas_core::Purpose>, Box<dyn Error>> {
+    Ok(store
+        .load_nodes()?
+        .into_iter()
+        .filter(|row| row.purpose.status == projectatlas_core::PurposeStatus::Approved)
+        .map(|row| row.purpose)
+        .collect())
+}
+
+#[test]
+fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn Error>> {
+    for policy in [".ignore", ".gitignore", "global"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(TEST_REPO_DIR);
+        fs::create_dir(&root)?;
+        let target = root.join("target.rs");
+        fs::write(&target, "pub fn ignored() {}\n")?;
+        fs::write(root.join("source.rs"), "pub fn retained() {}\n")?;
+        fs::write(root.join("README.md"), "# Links\n[target](target.rs)\n")?;
+        let rules = if policy == "global" {
+            temp.path().join("external.ignore")
+        } else {
+            root.join(policy)
+        };
+        fs::write(&rules, "target.rs\n")?;
+        let git_config = temp.path().join("global.gitconfig");
+        let rules_text = rules
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture rules path is not UTF-8"))?;
+        fs::write(
+            &git_config,
+            if policy == "global" {
+                format!("[core]\nexcludesFile = {rules_text:?}\n")
+            } else {
+                "[core]\nexcludesFile = \"\"\n".to_owned()
+            },
+        )?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture config path is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let mut init = StdCommand::new(&executable);
+        init.current_dir(&root).arg("init");
+        for (key, value) in environment {
+            if let Some(value) = value {
+                init.env(key, value);
+            }
+        }
+        let output = init.output()?;
+        rust_binding_require(output.status.success(), "document fixture init failed")?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let (identity, purposes, revision) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Document target transitions",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                approved_purposes(&store)?,
+                store.authored_purpose_revision()?,
+            )
+        };
+        let (mut session, _) = McpContractSession::spawn_configured(
+            &executable,
+            &root,
+            &database,
+            None,
+            &environment,
+        )?;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            let query = |session: &mut McpContractSession| -> Result<Value, Box<dyn Error>> {
+                Ok(toon_format::decode_default(&session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({"view":"detailed", "file":"README.md", "direction":"outbound", "relation":"documents", "content_selection":"documentation", "limit":10}),
+                )?)?)
+            };
+            let reason = |value: &Value| {
+                value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            for _ in 0..2 {
+                rust_binding_equal(&reason(&query(&mut session)?), &Some("ignored".to_owned()))?;
+            }
+            let outside = temp.path().join("outside.rs");
+            fs::write(&outside, "pub fn outside() {}\n")?;
+            for expected in ["outside_root", "ignored"] {
+                let publication = AtlasStore::open_read_only(&database)?.index_publication()?;
+                fs::remove_file(&target)?;
+                if expected == "outside_root" {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&outside, &target)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(&outside, &target)?;
+                } else {
+                    fs::write(&target, "pub fn ignored_again() {}\n")?;
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let value = query(&mut session)?;
+                    if value.pointer("/error/kind").and_then(Value::as_str)
+                        == Some("refresh_required")
+                    {
+                        rust_binding_equal(
+                            &value
+                                .pointer("/error/refresh_required/reason")
+                                .and_then(Value::as_str),
+                            &Some("policy_drift"),
+                        )?;
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::other(format!(
+                            "observed MCP retained a stale document-only target reason: policy={policy}, expected={expected}, actual={:?}",
+                            reason(&value),
+                        )).into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // A read refuses stale evidence without mutating the last valid
+                // publication; only the explicit refresh owns reconciliation.
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.index_publication()?,
+                    &publication,
+                )?;
+                let refreshed: Value = toon_format::decode_default(
+                    &session.call_tool("atlas_watch_once", &json!({"path": root}))?,
+                )?;
+                rust_binding_equal(
+                    &refreshed
+                        .pointer("/watch/last_symbols/parsed")
+                        .and_then(Value::as_u64),
+                    &Some(0),
+                )?;
+                for _ in 0..2 {
+                    rust_binding_equal(&reason(&query(&mut session)?), &Some(expected.to_owned()))?;
+                }
+            }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+        rust_binding_require(
+            store.load_node_by_path("target.rs")?.is_none(),
+            "ignored or outside target became indexed source",
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
     // Native platforms may split replacement notifications into several batches.
@@ -13443,16 +13608,6 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         fs::rename(root, directory.join("retired-root"))?;
         fs::rename(replacement, root)?;
         Ok(())
-    }
-
-    /// Capture every approved purpose, including its source and review status.
-    fn approved(store: &AtlasStore) -> Result<Vec<projectatlas_core::Purpose>, Box<dyn Error>> {
-        Ok(store
-            .load_nodes()?
-            .into_iter()
-            .filter(|row| row.purpose.status == projectatlas_core::PurposeStatus::Approved)
-            .map(|row| row.purpose)
-            .collect())
     }
 
     /// Observe durable publication without refreshing it from the test process.
@@ -13549,7 +13704,7 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             )?;
             (
                 store.project_instance_id()?,
-                approved(&store)?,
+                approved_purposes(&store)?,
                 store.authored_purpose_revision()?,
             )
         };
@@ -13703,7 +13858,7 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         }
         let store = AtlasStore::open_for_project(&database, &root)?;
         rust_binding_equal(&store.project_instance_id()?, &identity)?;
-        rust_binding_equal(&approved(&store)?, &purposes)?;
+        rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
         rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
         rust_binding_require(
             !root.join(ATLAS_DIR_NAME).join("projectatlas.db").exists(),

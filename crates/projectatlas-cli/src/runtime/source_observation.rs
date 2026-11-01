@@ -730,7 +730,7 @@ impl SourceObservationEntry {
                 }
             }
         }
-        let changed = changes.requires_full_scan || !changes.paths.is_empty();
+        let changed = changes.has_changes();
         if changed {
             if changes.requires_full_scan {
                 self.policy_selection.require_recursive_rebind();
@@ -1859,6 +1859,58 @@ mod tests {
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
+    }
+
+    #[test]
+    fn document_only_events_invalidate_verified_epochs() -> Result<(), Box<dyn Error>> {
+        for (policy, leaf) in [
+            (".ignore", "target.rs"),
+            (".gitignore", "target.rs"),
+            (".ignore", "target.asset"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            fs::write(temp.path().join(policy), format!("{leaf}\n"))?;
+            fs::write(temp.path().join(leaf), "ignored target\n")?;
+            fs::write(
+                temp.path().join("README.md"),
+                format!("# Links\n[target]({leaf})\n"),
+            )?;
+            let (database, _source) = indexed_project(temp.path())?;
+            let registry = SourceObservationRegistry::default();
+            let control = test_control();
+            let entry = registry
+                .entry(SourceBinding::new(&database, temp.path(), None)?, &control)?
+                .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
+            let (store, epoch) = registry
+                .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
+                .ok_or_else(|| std::io::Error::other("read epoch unavailable"))?;
+            store.finish_index_read_snapshot()?;
+            let target = entry.binding.root.join(leaf);
+            let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(target.clone());
+            let changes = observer_event_changes(
+                &entry.binding,
+                &projectatlas_fs::ScanOptions::default(),
+                &event,
+            );
+            require(
+                changes.document_paths.contains(&target)
+                    && changes.paths.is_empty()
+                    && !changes.requires_full_scan,
+                "ignored target event was not document-only",
+            )?;
+            entry.publish_test_event(event)?;
+            require(
+                SourceObservationRegistry::accepts_observed_result(&entry, &epoch, &control)?
+                    == ObservedAcceptance::Invalidated,
+                "document-only event left a warm verified epoch accepted",
+            )?;
+            require(
+                entry.current_epoch()?.is_none()
+                    && !entry.policy_selection.recursive_rebind_pending(),
+                "document-only invalidation retained an epoch or requested recursive rebind",
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]

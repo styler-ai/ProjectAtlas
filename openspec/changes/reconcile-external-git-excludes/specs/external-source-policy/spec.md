@@ -71,6 +71,12 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** an exclusion changes the ignored-versus-missing classification of an absent document target without changing the indexed source inventory
 - **THEN** accepted refresh and subsequent CLI/MCP graph queries agree with full reconciliation and do not preserve a stale document reason merely because source nodes are unchanged
 
+#### Scenario: Observed document-only target transition
+- **WHEN** an ignored document target becomes an outside-root symlink or returns to an ordinary ignored file while a verified CLI/MCP epoch is warm
+- **THEN** the document-only event invalidates that epoch even when the source-path set is empty, without requesting a recursive rebind for an ordinary target edit
+- **AND** subsequent read-only queries return the existing typed refresh guidance without mutating last-valid publication, and explicit refresh reconciles the reason with unchanged source parses while preserving identity and every approved purpose
+- **AND** local .ignore, no-Git .gitignore and selected global exclusions retain the same behavior, while database, ordinary access and unrelated outside events retain existing filtering
+
 #### Scenario: External policy changes during document staging
 - **WHEN** a selected external rule changes a retained absent-document outcome after staging while source nodes remain identical
 - **THEN** final publication revalidates those outcomes against freshly discovered policy using the original configured scan options and operation control, refusing stale staged results before the transaction

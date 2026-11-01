@@ -1,40 +1,68 @@
-## Current #739 checkpoint — receiver fence correction
+## Current #739 checkpoint — document-only observed epoch fix
 
-Prior normal push96803 TERMINAL0, PR745 head16338ba verified. Native34suites:
-1778PASS/0FAIL/12ignored. Hosted source41362359349 stillRUNNING; CodeQL41362357386
-Rustpending, sixotherlanguagesPASS. #731/#741 CLOSED; #739/#738/#708/#715 OPEN.
-Keep ONE issue atatime; no acceptance/closure yet. Stable050 MCP refresh index-4
-TERMINALCOMPLETE after correct typedpolicy_drift; privateDB preserved.
+Public PR745 head16338ba; exactlocalrootissue-739 HEADd2e596d plus currentdirtyfix.
+Do NOT repeat oldpush11389: intentionallyTERM143 afternewconfirmedCodexfinding,
+NOTtimeout. All9capturedprocs verifiedgone, neveruploaded; processreceipt
+/tmp/projectatlas-739-receiver-fence-push-process.json. Earlier96803 TERMINAL0
+pushed16338 with1778PASS/0FAIL/12ignored34suites. Current normalpush notstarted.
 
-Primary found and independentLuna741 confirmed TEST-ONLY callback starvationrisk:
-newnativealias testheld receiver mutex during recv_timeout100ms while callback
-needs samefence beforetry_send. Fixed shortscopedtry_recv/disconnecterror/sleep10ms
-outsidefence, same5sdeadline/distinctleaf/nativeclassifier assertion. No observed
-platformfailure claimed. Existing waits audited: controlledfencetest waits on a
-separateprelockarrival channel; acceptance waits on separatecompletion channel.
-No analogous same-receiver wait remains in sourceobserver; CLIbatch rawreceiver
-has no sharedmutex. Primarycodes; Luna741 approvedactualdiff. Correct binobserver
-38PASS2.02s; first libselector matched0 and is NOTproof. CLIalltarget/allfeature
-Clippy/strings/fmtPASS. Logs /tmp/projectatlas-739-native-receiver-fence-*.log.
+NewCodexthread PRRT_kwDOQyFgJ86yfjX1/comment4437820780 is CONFIRMED andstaysopen
+untilnewsource verified. drain_source_events manuallyignored document_paths then
+acknowledgedingress. Real48a4persistentMCP ignoredfile→outside symlink returned
+STALEignored3times; exactrefreshoutside_root. /tmp/projectatlas-739-document-epoch-
+native-negative.json. Minimalproductionfix useschanges.has_changes(): invalidates
+read/mutation epochs underexistingfence WITHOUTrecursiveRebind fordocument-only.
+Allothermanualpredicatesaudited; CLIwatch alreadyuseshas_changes. Filters/access/
+DB/outside paths unchanged; DER25/semantic23/noDBschema/reset/querymutation.
 
-Freshdefaultlockedreleasebuild84232TERMINAL0,41.36s. Source139manifest
-914972bc8d9e55a15c2dea8b072fe0dd5da7aa763b6f5ea4f41f20b2a617a577,
-CLI48a4cb9f82e0d25fd004cebd9fe5e5061b0829f02700abc40dfe9f00757f1129,
-69806528bytes, ~/.cache/projectatlas-benchmarks/external-policy-739-receiver-fence-release.
-CLI differsfrom7eaa despite onlytestRustdelta; do NOTclaimbyteidenticalCLI/reuseold
-CLImeasurements. NewactualreleaseRlibs helper68663byteidentical, so ONLY18FSsamples
-reused. Freshproof45451TERMINAL0: upgrade4PASS/CLI18samplesPASS;92364TERMINAL0:
-optimizedexternal1PASS1.34s/rootreplacement1PASS8.09s. Allnowbound48a4.
-Docs refreshed: binary+349568/+0.503287%,ordinaryinit308.3→307.8ms/noop48.9→49.6ms,
-10krulesnoop71.5→96.2ms(+24.7ms,rounded25). No #708SLOwaiver/generalspeedup.
-Luna731 finds task2.1source/localproof ready, require scopedcurrentnativeWin/Mac
-selection/observer proof beforechecking. 2.2/3.1/allacceptance remainOPEN.
+Deterministicallplatformunit: .ignore/.gitignore/ignoredasset, classifierONLYdocument
+paths, old0PASS1FAIL/fixedobserver39PASS2.22s; noepoch/norebind assertions. Permanent
+MCP E2E3policies .ignore/noGit.gitignore/global, bothIgnored↔OutsideRoot: mustfirst
+returntypedrefresh_required/policy_drift, publicationunchanged; explicitrefresh0
+sourceparses;2warmcorrectqueries, identity/allapproved/revision/sourceexclusion.
+ActualWindowsfile-symlinkoperation(noskip) requiresnewhostedproof. Newtest added
+existingfourplatformCIstep. Existingapproved-purposehelperlifted/reused. Current
+E2E againstold48a4fails atintendedstaleignored; negative-result.json accountsinitial
+quote-escaping assertionerror (notanother testrun). CorrectnewoptimizedE2EPASS.
+Initialpositive incorrectlyexpectedautomaticreconcile; fixedtesthonorsexisting
+read-onlytypedrefusal. No productworkaround. DebugE2E3.53sPASS,Clippy/strings/fmt/
+strictOpenSpec/plannedIssueOpsPASS. Inline'repo'lintcaught/fixedwithTEST_REPO_DIR.
 
-Next: complete narrowdocsreview/cheapgates, normalcommit(#739)/push(withhooks),
-verify exacthead native4platform/codeQL/Codexreviews, inspectallnewfindings, sync
-implementationandacceptance onlywhenearned, normalmerge745 andnative739CLOSED
-before738. No stablepublication or milestoneclosure. Earliercheckpoint below
-retains detailedscope andhistoricalevidence; thisheader supersedesoldcurrentleases.
+Luna731 approvesowningfix/test/spec/broaderimpact, NOTfinalacceptance. Luna741
+approvescostdocs inclcorrect0.51%. Issue739WhatChanges expanded/readbackexact;
+OpenSpecproposal/design/specs reconciled. Tasksstill1/4/allacceptanceOPEN. Thread
+replyconfirmedrepro/fix/localproof, readbackexact; noearlyresolution.
+
+FINALfrozen ~/.cache/projectatlas-benchmarks/external-policy-739-document-epoch-release:
+CLIc41b3bd19921bda4a5b11dcd1a81543aea059926948195ebbefa4152c6e2544d,
+69807752bytes;139inputmanifestebc7ab6a6da4e38aeb85bce592b166c66ea897b9ce790d4f7eb8849df284c536.
+Freshlockeddefaultrelease50938TERMINAL0; actualreceipt/RLIBs. FShelper68663byteidentical;
+reuseONLY18FSsamples; currentCLIupgrade4/CLI18samples freshlyPASS. Proof87423
+TERMINAL0: optimizeddocumentepoch1PASS1.71s/external1PASS1.28s/rootreplacement1PASS8.09s.
+/tmp/projectatlas-739-document-epoch-* artifacts. Sourceall139savedhashesmatch.
+Costdocs nowc41b/ebc7: +350792bytes/+0.505049%=0.51%,ordinaryinit311.3→312.4ms/
+noop50.3→49.7ms;10krulesnoopdelta+26.3ms (rounded26). No #708SLOwaiver/generalspeedup.
+Previous48a4/7eaa snapshots immutableHISTORICAL, notcurrentCLI.
+
+Hosted16338 sourceCI41362359349: Rust125015293207 wholePASS, Linux125015293306
+wholePASS49FS/10policy/38observer/1external/1replacement (downloaded/read log);
+MacARM125015293213/MacIntel125015293232/Windows125015293177 stillrunning atlastpoll.
+FreshsuccessorCIrequiredfordocumentfix/newtests. CodeQL41362357386 SUCCESSall7,
+Rust2073368431 has13/Actions2073317753 has1/other5zero. Codexcode+securityCOMPLETED,
+codepostedP2above; old7threadsresolved, newoneOPEN. 11Rustcompletefacts/flows equal
+bad7afterexactunchangedline mapping;412/413testflowschangedandrequireseparate
+staticreassessment, NOTfalselyidentical. Bothnow4flows withprivateFSfixtureCWD/fswrite
+sources2503-2509→fixedTempDirchildren→metadataexists644/isdir674, no shippeduntrusted
+boundary/contentread. Actionsfullresult/twoflows/workflowunchangedbad7→16338;
+NEWworkflowaddsonefixedE2Ecommand, finalscanmustbereassessed. No suppress/dismiss.
+Current16338reconciliation/artifacts retained; finalnewheadresultsnotyetavailable.
+
+Next normalcommitsole(#739)/bindall139Gittreeinputs/normalpushwithhooks. Keepselected
+treeCLEANduringlivegate/updateintegrationonly. Freshfourplatform/Codex/CodeQL results,
+inspectALLnewfindings, finalindependentreview/tasksync, Closes739 onlywhenready;
+normalmerge745 andnative739CLOSED before738→708→715→nonLatestRC1+independentinstall.
+Stable050 staysLatest; stablepublication/milestoneclosure needlaterinstruction.
+Earliercheckpointbelow preserves detailedscope/parkedwork; thisheadersupersedesoldleases.
 
 # Active RC1 checkpoint — 2026-11-02
 

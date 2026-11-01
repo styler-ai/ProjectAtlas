@@ -116,6 +116,18 @@ root/lifecycle/DB binding. Exercise the actual batch helper causally, including
 child-before-root ordering, ordinary/non-regular policy and native-error controls;
 the standalone test helper's fallback must not mask the production failure.
 
+Observed epochs consume the complete shared change set, including document-only
+paths omitted from indexed source by repository/global policy. An ignored target
+can become an outside-root symlink without changing any source node. Use the
+existing `WatchChangeSet::has_changes` owner instead of duplicating a narrower
+source-only predicate; preserve the ingress fence and invalidate the epoch without
+requesting a recursive rebind for an ordinary document target. Reads then return
+the existing typed policy-drift guidance without mutating publication; explicit
+refresh reconciles the reason with unchanged source parses. Cover both directions
+under .ignore, no-Git .gitignore and selected global rules through real persistent
+MCP, plus deterministic all-platform receiver/epoch invalidation and existing
+runtime-path/access/outside filtering, source and structural uncertainty controls.
+
 Policy-only proof includes absent-document classification with an unchanged source inventory: no source-node delta is not evidence that document admission/reasons are unchanged. Reproduce any mismatch through real CLI/MCP before choosing a repair, then reuse the existing bounded reconciliation/projection owner rather than hashing every external edit into an unconditional all-source reparse. Preserve last-valid state on failed observation/reconciliation.
 
 Selected external configuration and excludes must be repeatable file inputs. Reject unsupported non-regular inputs promptly under existing typed failure semantics while retaining regular files and symlinks to regular files. Unix config opens avoid waiting on a FIFO replaced between metadata and open; do not claim hard kernel-I/O preemption or universal adversarial race freedom from cooperative controls. Cover failure and positive operator workflows before declaring the guard complete.

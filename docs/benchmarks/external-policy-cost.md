@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 349,568 bytes (0.50%) to the optimized
+The derivation-25 policy repair adds 350,792 bytes (0.51%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -55,6 +55,10 @@ CLI measurements, upgrade cases and public CLI/MCP scenarios were rerun against
 the final CLI binary. Its identity and source manifest are in the compact result.
 The watch-gap repair retains uncertainty through batch settling; the CLI samples,
 upgrade cases and public scenarios use its rebuilt binary.
+The observed-epoch repair now includes document-only events in invalidation.
+These samples use its rebuilt CLI; the persistent MCP regression separately
+proves typed read-only refresh guidance and explicit zero-reparse reconciliation
+for ignored/outside-symlink target transitions under local and global rules.
 Component timings use canonical roots; separate regressions cover lexical aliases,
 relative root selection and selected symlink roots without claiming alias timings.
 
@@ -68,11 +72,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 308.3 → 307.8 | 48.9 → 49.6 | 31,860 → 30,920 | 20,452 → 20,408 |
-| Large config | 306.6 → 314.0 | 49.7 → 53.1 | 31,080 → 33,236 | 20,472 → 23,700 |
-| 10,000 rules | 381.3 → 389.2 | 71.5 → 96.2 | 43,688 → 41,936 | 31,812 → 33,088 |
+| Ordinary | 311.3 → 312.4 | 50.3 → 49.7 | 32,784 → 30,908 | 21,776 → 20,468 |
+| Large config | 312.2 → 312.8 | 48.8 → 53.8 | 32,972 → 33,096 | 21,876 → 23,688 |
+| 10,000 rules | 391.2 → 395.7 | 70.8 → 97.1 | 45,296 → 42,144 | 32,968 → 33,096 |
 
-The large-rule fresh-process refresh adds about 25 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 26 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
