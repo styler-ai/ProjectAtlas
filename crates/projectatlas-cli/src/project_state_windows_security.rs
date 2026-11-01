@@ -1,7 +1,7 @@
 //! Retained-handle Windows system-policy snapshots without privilege changes.
 //!
 //! The canonical safe ACL wrapper omits the control getter and panics on NULL
-//! SACLs. Read-only SDK getters need this reviewed platform-local unsafe exception.
+//! SACLs. Canonical SDK getters and empty-ACL initialization use this local exception.
 #![allow(unsafe_code)]
 
 use std::ffi::{OsStr, OsString};
@@ -14,6 +14,9 @@ use windows_permissions::wrappers::{
     SetSecurityInfo,
 };
 use windows_permissions::{Acl, LocalBox, SecurityDescriptor};
+use windows_sys::Win32::Security::{
+    ACL, ACL_REVISION, GetSecurityDescriptorControl, GetSecurityDescriptorSacl, InitializeAcl,
+};
 
 /// SACL presence, defaulting, inheritance request/state and protection.
 const SACL_CONTROL: u16 = 0x2a30;
@@ -24,24 +27,30 @@ const SACL_DEFAULTED: u16 = 0x0020;
 /// Inheritance protection for the system ACL.
 const SACL_PROTECTED: u16 = 0x2000;
 
-#[link(name = "advapi32")]
-unsafe extern "system" {
-    /// Read control flags from a valid borrowed native security descriptor.
-    #[link_name = "GetSecurityDescriptorControl"]
-    fn get_security_descriptor_control(
-        descriptor: *const SecurityDescriptor,
-        control: *mut u16,
-        revision: *mut u32,
-    ) -> i32;
+/// SDK-initialized zero-entry ACL, keeping its opaque borrow valid during a setter.
+#[repr(C, align(4))]
+struct EmptySacl(ACL);
 
-    /// Query presence and the borrowed ACL pointer, preserving native NULL state.
-    #[link_name = "GetSecurityDescriptorSacl"]
-    fn get_security_descriptor_sacl(
-        descriptor: *const SecurityDescriptor,
-        present: *mut i32,
-        sacl: *mut *const Acl,
-        defaulted: *mut i32,
-    ) -> i32;
+impl EmptySacl {
+    /// Initialize canonical aligned storage, propagating a native refusal.
+    fn new() -> io::Result<Self> {
+        let mut empty = Self(ACL::default());
+        let size = u32::try_from(std::mem::size_of::<ACL>()).map_err(io::Error::other)?;
+        // SAFETY: SDK ACL storage is aligned, writable and exactly `size` bytes.
+        // InitializeAcl creates a valid empty ACL without storing external pointers.
+        if unsafe { InitializeAcl(&raw mut empty.0, size, ACL_REVISION) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(empty)
+    }
+
+    /// Borrow the initialized SDK ACL through the safe wrapper's opaque ABI type.
+    fn as_acl(&self) -> &Acl {
+        // SAFETY: successful SDK initialization is the only constructor. Acl is
+        // the wrapper's opaque repr(C) view of this same native ACL; its borrow
+        // cannot outlive this owner and no Rust code interprets the layout.
+        unsafe { &*std::ptr::from_ref(&self.0).cast::<Acl>() }
+    }
 }
 
 /// Read the SDK control word without inspecting a descriptor's memory layout.
@@ -51,8 +60,8 @@ fn descriptor_control(descriptor: &SecurityDescriptor) -> io::Result<u16> {
     // SAFETY: GetSecurityInfo owns a valid descriptor for the borrowed lifetime;
     // the API reads it and writes only these correctly sized live stack values.
     if unsafe {
-        get_security_descriptor_control(
-            std::ptr::from_ref(descriptor),
+        GetSecurityDescriptorControl(
+            std::ptr::from_ref(descriptor).cast_mut().cast(),
             &raw mut control,
             &raw mut revision,
         )
@@ -93,13 +102,13 @@ fn admitted_control(control: u16, complete: bool) -> io::Result<u16> {
 fn descriptor_sacl(descriptor: &SecurityDescriptor) -> io::Result<Option<&Acl>> {
     let mut present = 0;
     let mut defaulted = 0;
-    let mut sacl = std::ptr::null();
+    let mut sacl = std::ptr::null_mut();
     // SAFETY: the borrowed SDK-owned descriptor is valid. The API only reads it
     // and writes these live BOOL/pointer outputs. A returned ACL remains owned
     // by that descriptor; do not inspect the pointer when presence is false.
     if unsafe {
-        get_security_descriptor_sacl(
-            std::ptr::from_ref(descriptor),
+        GetSecurityDescriptorSacl(
+            std::ptr::from_ref(descriptor).cast_mut().cast(),
             &raw mut present,
             &raw mut sacl,
             &raw mut defaulted,
@@ -113,7 +122,7 @@ fn descriptor_sacl(descriptor: &SecurityDescriptor) -> io::Result<Option<&Acl>> 
     }
     // SAFETY: successful native query returned a non-NULL ACL in a valid
     // descriptor. Borrow it only for that descriptor's lifetime, never mutate it.
-    Ok(Some(unsafe { &*sacl }))
+    Ok(Some(unsafe { &*sacl.cast::<Acl>() }))
 }
 
 /// Count native entries without trusting an image to classify NULL policy.
@@ -228,6 +237,13 @@ impl SystemPolicy {
             ));
         }
         let sacl = descriptor_sacl(&self.descriptor)?;
+        let empty =
+            if sacl.is_none() && self.control & (SACL_PRESENT | SACL_PROTECTED) == SACL_PRESENT {
+                Some(EmptySacl::new()?)
+            } else {
+                None
+            };
+        let sacl = sacl.or_else(|| empty.as_ref().map(EmptySacl::as_acl));
         let information = SecurityInformation::Sacl
             | SecurityInformation::Label
             | if self.control & SACL_PROTECTED != 0 {
@@ -252,6 +268,16 @@ impl SystemPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The safe wrapper recognizes the SDK-owned zero-entry ACL representation.
+    #[test]
+    fn sdk_initialized_empty_sacl_has_no_native_entries() -> io::Result<()> {
+        let empty = EmptySacl::new()?;
+        if GetAclInformationSize(empty.as_acl())?.AceCount != 0 {
+            return Err(io::Error::other("SDK empty ACL contains native entries"));
+        }
+        Ok(())
+    }
 
     /// A native filtered image must never be accepted as complete system policy.
     #[test]

@@ -203,6 +203,9 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.head }}
 
+      - name: Native volume cleanup causal proof
+        run: python3 .github/scripts/test-native-volume-cleanup.py
+
       - name: Install Mermaid parser
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')
         run: |
@@ -483,12 +486,19 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
           }
+          native_policy_status=0
           if [ "$RUNNER_OS" = Windows ]; then
-            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture || native_policy_status=$?
           fi
-          cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
+          cargo test --locked -p projectatlas-cli --bin projectatlas project_state:: || native_policy_status=$?
+          if [ "$native_policy_status" -ne 0 ]; then
+            exit "$native_policy_status"
+          fi
           # Compile and exercise the real routes before moving test temporaries
           # onto the small disposable filesystem images.
+          if [ "$RUNNER_OS" = Windows ]; then
+            export PROJECTATLAS_TEST_NATIVE_EFS=1
+          fi
           run_managed_state_routes
           if [ "$RUNNER_OS" = Linux ]; then
             # Build as the runner; elevate only the disposable native-label test.
@@ -588,21 +598,100 @@ jobs:
           nested_mounted=false
           detach_failed=false
           nested="$volume/.projectatlas/bridge"
+          attach_native_volume() {
+            local target="$1" elevated="$2" image_path="$3" receipt="$4"
+            python3 - "$image_path" "$target" "$receipt.owner.json" <<'PY'
+          import json, os, stat, sys
+          image, target, output = sys.argv[1:]
+          identity = os.lstat(image)
+          if not stat.S_ISREG(identity.st_mode):
+              raise SystemExit("fixture image is not a direct regular file")
+          with open(output, "w", encoding="utf-8") as stream:
+              json.dump({"path": os.path.realpath(image), "device": identity.st_dev, "inode": identity.st_ino, "mountpoint": os.path.realpath(target)}, stream)
+          PY
+            if [ "$elevated" = true ]; then
+              sudo -n hdiutil attach -plist -nobrowse -owners on -mountpoint "$target" "$image_path" > "$receipt"
+            else
+              hdiutil attach -plist -nobrowse -owners on -mountpoint "$target" "$image_path" > "$receipt"
+            fi
+          }
+          native_volume_state() {
+            local image_path="$1" receipt="$2"
+            hdiutil info -plist > "$receipt.current.plist" || return
+            python3 - "$image_path" "$receipt" "$receipt.current.plist" <<'PY'
+          import json, os, plistlib, re, sys
+          image, receipt, current = sys.argv[1:]
+          with open(receipt + ".owner.json", encoding="utf-8") as stream:
+              owner = json.load(stream)
+          identity = os.lstat(image)
+          if (os.path.realpath(image), identity.st_dev, identity.st_ino) != (owner["path"], owner["device"], owner["inode"]):
+              raise SystemExit("fixture image identity changed")
+          with open(receipt, "rb") as stream:
+              attached = plistlib.load(stream)["system-entities"]
+          with open(current, "rb") as stream:
+              images = plistlib.load(stream)["images"]
+          devices = [item["dev-entry"] for item in attached if "dev-entry" in item]
+          whole = [device for device in devices if re.fullmatch(r"/dev/disk[0-9]+", device)]
+          if not whole or len(set(devices)) != len(devices):
+              raise SystemExit("attachment lacks an unambiguous whole device")
+          mounts = [owner["mountpoint"], *[item["mount-point"] for item in attached if item.get("mount-point")]]
+          matching = [item for item in images if os.path.realpath(item.get("image-path", "")) == owner["path"]]
+          if len(matching) > 1:
+              raise SystemExit("fixture image attachment is ambiguous")
+          if not matching:
+              if any(os.path.ismount(path) for path in mounts):
+                  raise SystemExit("fixture mount persists without its image mapping")
+              print("detached")
+          else:
+              entities = matching[0]["system-entities"]
+              observed = [item["dev-entry"] for item in entities if "dev-entry" in item]
+              if set(observed) != set(devices):
+                  raise SystemExit("fixture image device mapping changed")
+              if any(item.get("mount-point") for item in entities) or any(os.path.ismount(path) for path in mounts):
+                  print("mounted")
+              else:
+                  print("unmounted:" + whole[0])
+          PY
+          }
           detach_native_volume() {
-            local target="$1"
-            local elevated="$2"
+            local target="$1" elevated="$2" image_path="$3" receipt="$4"
+            local state="unknown" device="" attempt
             if [ "$elevated" = true ]; then
               if sudo -n hdiutil detach "$target"; then return 0; fi
             else
               if hdiutil detach "$target"; then return 0; fi
             fi
-            # Do not blindly retry a detach that may have partially unmounted
-            # its image. Preserve the failure and exact mount/holder evidence.
+            # A non-force detach can unmount successfully and then find the image's
+            # device busy. Recover only that proven partial completion, never a live mount.
+            for attempt in 1 2 3; do
+              if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
+              if [ "$state" = detached ]; then
+                echo "Owned image detached after its volume unmounted: $image_path"
+                return 0
+              fi
+              case "$state" in
+                unmounted:*) device="${state#unmounted:}" ;;
+                *) break ;;
+              esac
+              if [ "$attempt" -lt 3 ]; then sleep 1; fi
+            done
+            if [ "$state" = "unmounted:$device" ] && [ -n "$device" ]; then
+              echo "Finishing owned unmounted image detach through verified device: $device"
+              if [ "$elevated" = true ]; then
+                if sudo -n hdiutil detach "$device"; then
+                  if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                fi
+              else
+                if hdiutil detach "$device"; then
+                  if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                fi
+              fi
+            fi
             detach_failed=true
-            diskutil info "$target" || true
+            diskutil info "${device:-$target}" || true
             hdiutil info || true
             mount
-            sudo -n lsof -nP +f -- "$target" || true
+            sudo -n lsof -nP "${device:-$target}" || true
             ps -axo pid,ppid,stat,command
             return 1
           }
@@ -610,11 +699,11 @@ jobs:
             export TMPDIR="$original_tmpdir"
             if [ "$detach_failed" = true ]; then return 1; fi
             if [ "$nested_mounted" = true ]; then
-              detach_native_volume "$nested" true || return
+              detach_native_volume "$nested" true "$nested_image" "$nested_receipt" || return
               nested_mounted=false
             fi
             if [ "$mounted" = true ]; then
-              detach_native_volume "$volume" false || return
+              detach_native_volume "$volume" false "$image" "$volume_receipt" || return
               mounted=false
             fi
             rm -rf "$fixture"
@@ -632,8 +721,10 @@ jobs:
           for filesystem in APFS APFSX HFS+ HFSX; do
             image="$fixture/$filesystem.dmg"
             create_case_image "$filesystem" ProjectAtlasCase "$image"
-            hdiutil attach -nobrowse -owners on -mountpoint "$volume" "$image"
+            volume_receipt="$fixture/$filesystem-attach.plist"
+            # Track attempted attachments too: a failed attach may be partial.
             mounted=true
+            attach_native_volume "$volume" false "$image" "$volume_receipt"
             mkdir -p "$volume/tmp" "$nested"
             nested_filesystem=APFSX
             if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
@@ -644,8 +735,9 @@ jobs:
             # The runner's unprivileged mount is refused below another volume.
             # Scope elevation to this disposable image and return its root to
             # the runner before executing any product command.
-            sudo -n hdiutil attach -nobrowse -owners on -mountpoint "$nested" "$nested_image"
+            nested_receipt="$fixture/nested-$filesystem-attach.plist"
             nested_mounted=true
+            attach_native_volume "$nested" true "$nested_image" "$nested_receipt"
             sudo -n chown "$(id -u):$(id -g)" "$nested"
             export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
             export TMPDIR="$volume/tmp"
@@ -663,9 +755,9 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
             export TMPDIR="$original_tmpdir"
             unset PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT
-            detach_native_volume "$nested" true
+            detach_native_volume "$nested" true "$nested_image" "$nested_receipt"
             nested_mounted=false
-            detach_native_volume "$volume" false
+            detach_native_volume "$volume" false "$image" "$volume_receipt"
             mounted=false
           done
 
@@ -1167,16 +1259,41 @@ jobs:
               }
               [SystemPolicyFixture]::Enable($true)
               foreach ($retained in @($false, $true)) {
-                foreach ($allocated in @($false, $true)) {
-                  foreach ($labels in @($false, $true)) {
-                    $path = Join-Path $directory ('empty-setter-' + $retained + '-' + $allocated + '-' + $labels)
-                    try {
-                      $value = [SystemPolicyFixture]::EmptySystemPolicyControl($path, $retained, $allocated, $labels)
-                      $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; allocated=$allocated; labels=$labels; value=$value }
-                    } catch {
-                      $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; allocated=$allocated; labels=$labels; error=$_.Exception.ToString() }
+                $ownershipModes = if ($retained) { @($false, $true) } else { @($false) }
+                foreach ($writeOwner in $ownershipModes) {
+                  foreach ($allocated in @($false, $true)) {
+                    foreach ($labels in @($false, $true)) {
+                      $path = Join-Path $directory ('empty-setter-' + $retained + '-' + $writeOwner + '-' + $allocated + '-' + $labels)
+                      try {
+                        $value = [SystemPolicyFixture]::EmptySystemPolicyControl($path, $retained, $allocated, $labels, $writeOwner)
+                        $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; write_owner=$writeOwner; allocated=$allocated; labels=$labels; value=$value }
+                      } catch {
+                        $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; write_owner=$writeOwner; allocated=$allocated; labels=$labels; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
                     }
-                    $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                  }
+                }
+              }
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                $policies = if ($systemAccess) {
+                  @('', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)', 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)', 'S:', 'S:NO_ACCESS_CONTROL')
+                } else { @('') }
+                foreach ($policy in $policies) {
+                  foreach ($protectedSource in @($false, $true)) {
+                    foreach ($widerParent in @($false, $true)) {
+                      foreach ($movedSource in @($false, $true)) {
+                        $path = Join-Path $directory ('source-descriptor-' + [guid]::NewGuid())
+                        try {
+                          $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $protectedSource, $widerParent, $movedSource, $systemAccess, $policy)
+                          $results += @{ case='source-descriptor'; root=$root.name; protected_source=$protectedSource; wider_parent=$widerParent; moved_source=$movedSource; security_privilege=$systemAccess; policy=$policy; value=$value }
+                        } catch {
+                          $results += @{ case='source-descriptor'; root=$root.name; protected_source=$protectedSource; wider_parent=$widerParent; moved_source=$movedSource; security_privilege=$systemAccess; policy=$policy; error=$_.Exception.ToString() }
+                        }
+                        $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                      }
+                    }
                   }
                 }
               }

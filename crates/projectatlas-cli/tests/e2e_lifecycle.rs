@@ -5363,6 +5363,19 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
         refused: bool,
     ) -> Result<String, Box<dyn Error>> {
         if let Some(session) = session {
+            // Explicit-config cases use a separately bound MCP session and
+            // deliberately keep its startup selection. Shared-session calls
+            // must carry their own root instead of inheriting the control one.
+            let selected = parameters.get("project_path");
+            let configured = arguments.first() == Some(&"--config");
+            if selected.is_some_and(|selected| selected != &json!(root))
+                || (selected.is_none() && !configured)
+            {
+                return Err(io::Error::other(format!(
+                    "MCP {tool} fixture target differs from its selected root"
+                ))
+                .into());
+            }
             // Administrative tools retain their established typed error payload
             // inside a successful MCP transport result. Assert its exact cause
             // below rather than confusing transport status with admission.
@@ -5737,75 +5750,119 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
             }
             fs::write(&config, &original_config)?;
 
-            #[cfg(target_os = "linux")]
-            if std::env::var_os("PROJECTATLAS_TEST_NATIVE_VERITY").is_some() {
-                // Real CLI and persistent MCP must refuse sealed automatic
-                // documents; use the independent public ioctl fixture only here.
-                const SEAL: &str = r"
+            #[cfg(any(target_os = "linux", windows))]
+            {
+                #[cfg(target_os = "linux")]
+                let native_protection =
+                    std::env::var_os("PROJECTATLAS_TEST_NATIVE_VERITY").is_some();
+                #[cfg(windows)]
+                let native_protection = std::env::var_os("PROJECTATLAS_TEST_NATIVE_EFS").is_some();
+                if native_protection {
+                    #[cfg(target_os = "linux")]
+                    const REFUSAL: &str = "fs-verity";
+                    #[cfg(windows)]
+                    const REFUSAL: &str = "EFS";
+                    #[cfg(windows)]
+                    let encrypted = |path: &Path| -> io::Result<bool> {
+                        use std::os::windows::fs::MetadataExt;
+                        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED;
+                        Ok(fs::metadata(path)?.file_attributes() & FILE_ATTRIBUTE_ENCRYPTED != 0)
+                    };
+                    fs::remove_file(&sidecar)?;
+                    fs::write(&sidecar, b"protected map bytes")?;
+                    let control_config = fs::read(control.join(CONFIG_PATH))?;
+                    for (protected, outside) in [
+                        (&config, root.with_extension("protected-config-owner")),
+                        (&sidecar, root.with_extension("protected-map-owner")),
+                    ] {
+                        fs::hard_link(protected, &outside)?;
+                        let before = fs::read(protected)?;
+                        #[cfg(target_os = "linux")]
+                        let prepare = {
+                            const SEAL: &str = r"
 import fcntl, struct, sys
 with open(sys.argv[1], 'rb') as source:
     argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 4096, 0, 0, 0, 0, 0, *([0]*11))
     fcntl.ioctl(source, 0x40806685, argument)
 ";
-                fs::remove_file(&sidecar)?;
-                fs::write(&sidecar, b"sealed map bytes")?;
-                for (sealed, outside) in [
-                    (&config, root.with_extension("sealed-config-owner")),
-                    (&sidecar, root.with_extension("sealed-map-owner")),
-                ] {
-                    fs::hard_link(sealed, &outside)?;
-                    let before = fs::read(sealed)?;
-                    let seal = std::process::Command::new("python3")
-                        .args(["-c", SEAL])
-                        .arg(sealed)
-                        .output()?;
-                    if !seal.status.success() {
-                        return Err(io::Error::other(format!(
-                            "native sealed CLI/MCP fixture failed: {seal:?}"
-                        ))
-                        .into());
+                            std::process::Command::new("python3")
+                                .args(["-c", SEAL])
+                                .arg(protected)
+                                .output()?
+                        };
+                        #[cfg(windows)]
+                        let prepare = std::process::Command::new("powershell.exe")
+                            .args([
+                                "-NoProfile",
+                                "-NonInteractive",
+                                "-Command",
+                                "[System.IO.File]::Encrypt($env:PROJECTATLAS_TEST_ACL_PATH)",
+                            ])
+                            .env("PROJECTATLAS_TEST_ACL_PATH", protected)
+                            .output()?;
+                        if !prepare.status.success() {
+                            return Err(io::Error::other(format!(
+                                "native {REFUSAL} CLI/MCP fixture failed: {prepare:?}"
+                            ))
+                            .into());
+                        }
+                        #[cfg(windows)]
+                        if !encrypted(protected)? || !encrypted(&outside)? {
+                            return Err(io::Error::other(
+                                "native EFS fixture did not encrypt its inode",
+                            )
+                            .into());
+                        }
+                        let error = if protected == &config {
+                            invoke(
+                                &executable,
+                                &root,
+                                mcp.then_some(&mut session),
+                                &[
+                                    "ignore",
+                                    "add",
+                                    "--kind",
+                                    "path-prefix",
+                                    "protected-control-path",
+                                ],
+                                "atlas_ignore_add",
+                                &json!({"project_path":root,"kind":"path-prefix", "value":"protected-control-path"}),
+                                true,
+                            )?
+                        } else {
+                            invoke(
+                                &executable,
+                                &root,
+                                mcp.then_some(&mut session),
+                                &["map", "--json", "--force"],
+                                "atlas_map",
+                                &json!({"project_path":root,"json":true,"force":true}),
+                                true,
+                            )?
+                        };
+                        if !error.contains(REFUSAL)
+                            || fs::read(protected)? != before
+                            || fs::read(&outside)? != before
+                            || !same_file::is_same_file(protected, &outside)?
+                            || fs::read(control.join(CONFIG_PATH))? != control_config
+                        {
+                            return Err(io::Error::other(format!(
+                                "native {REFUSAL} CLI/MCP request missed refusal or changed an owner: mcp={mcp}, {error}"
+                            )).into());
+                        }
+                        #[cfg(windows)]
+                        if !encrypted(protected)? || !encrypted(&outside)? {
+                            return Err(
+                                io::Error::other("CLI/MCP refusal lost EFS protection").into()
+                            );
+                        }
                     }
-                    let error = if sealed == &config {
-                        invoke(
-                            &executable,
-                            &root,
-                            mcp.then_some(&mut session),
-                            &[
-                                "ignore",
-                                "add",
-                                "--kind",
-                                "path-prefix",
-                                "sealed-control-path",
-                            ],
-                            "atlas_ignore_add",
-                            &json!({"kind":"path-prefix", "value":"sealed-control-path"}),
-                            true,
-                        )?
-                    } else {
-                        invoke(
-                            &executable,
-                            &root,
-                            mcp.then_some(&mut session),
-                            &["map", "--json", "--force"],
-                            "atlas_map",
-                            &json!({"project_path":root,"json":true,"force":true}),
-                            true,
-                        )?
-                    };
-                    if !error.contains("fs-verity")
-                        || fs::read(sealed)? != before
-                        || fs::read(&outside)? != before
-                    {
-                        return Err(io::Error::other(format!(
-                            "sealed CLI/MCP refusal changed output: {error}"
-                        ))
-                        .into());
-                    }
+                    // Continue positive workflows using fresh ordinary entries;
+                    // the outside hardlinks retain the original protected policy.
+                    fs::remove_file(&config)?;
+                    fs::write(&config, &original_config)?;
+                    fs::remove_file(&sidecar)?;
                 }
-                // Continue the same positive workflow with fresh ordinary entries.
-                fs::remove_file(&config)?;
-                fs::write(&config, &original_config)?;
-                fs::remove_file(&sidecar)?;
             }
 
             // A volume alias is managed; a separate case-sensitive name keeps

@@ -1,185 +1,153 @@
 # Active context
 
-## Current native-policy candidate
-
-PUBLIC/local HEAD de0d9dd0d0a7f7902a86c0bee13f503eb84a8406. No local execution
-lease. Normal push82090 terminalPASS791.42s,34reported suites/1731pass12ignored;
-immutable69314 terminalPASS138inputs, binary404d9116e6575fb1b5275eb025128d01b8a4adf56082cf3992016dea4f92c26a.
-Readonly binary path in /tmp/projectatlas-741-linux-name-sealing-debug-path.txt;
--native-proof.json records actualCLI/MCP10.24s/writers5.12s/registered9.29s/five050
-upgrades5.93s and unchangedidentity/approvedpurposes/config/allboundbytes.
-
-Hosted de0 SOURCE41259839710: Rust/repository/planPASS; Linux124710692085FAIL
-at independent fsverity ENABLE fixture block_size0 EINVAL (before nativecasefold/
-verityroutes); Windows124710692138FAIL33pass1fail1ignored, sourceunprotectedNULL
-SACL0810 -> stageprotected2810 strictreadback. SDK124710692126PASS. BothMacjobs
-stillactive atlastread. No nativeEFSproof because precedingSACLsuitefailed.
-
-Current DIRTY correction: bothverityfixturepacks4096, ext4mkfs-b4096; lifecycle
-bothpins86fe57703a13220b701f155cf4ceee66c4e6c29a2455d58d3de8301b5075c9a7.
-Deliverypinsunchanged. ExplicitEFSprobe movedbeforeowningsuite toavoidmasking.
-NativeSDKnew EmptySystemPolicyControl comparesheld/named, allocatedempty/NULL,
-SACL8/SACL|LABEL24 andfullheldreadback onbothTEMP roots. No speculativeNULLrepair
-or controlwaiver: 0810->2810 remainsopen and failsbeforepayload/publication.
-
-SACLomissionguard nowcomparesnative ACEcountwith canonicalSDDLdecodedcount.
-Lunafound olddrafttrustedNULLmarker; corrected with narrowlyscopedread-only SDK
-GetSecurityDescriptorSacl, checkedBOOL/presence/nonNULL andborrowlifetime. No image
-classification fornativeNULL, nodependencyaccessorpanic. applyusessamecheckedgetter.
-Tests mixed+soleML: SACLonly anddeliberateNULLimage ->Unsupported; full24positive.
-Accepteddesign includes two readonlygetters, no layout/parser/deps/privilegechanges.
-WholeWindowsGNUClippyPASS (compileonly), Linux32pass2ignored, strictstringsPASS,
-inventory3/workflow1/YAML17Bash/strictOpenSpecPASS beforefinalgetterreview. Native
-publicationonlyapproval includinglatestgetterPASS; noissueacceptance/merge/RC.
-
-FullsourceSD-at-CREATE_NEW remainsnextboundednativeexperiment, NOTimplemented.
-ProductionstagecapabilitystillUNFIXED; failedOWRAprototype isnegativecontrolonly.
-EFSNEEDS_REVIEW, notconfirmed; noEFSproductionpatch. FourCodexthreadsresolved/readback,
-eightOPEN(allACL/SACL/MIC/stage/codeP1/LinuxCF/verity/EFS). Allotherreviews in scope.
-
 ## Goal and serial owner
 
-Continue until v0.5.1-rc1 is published and independently verified: non-draft
-prerelease, Latest=false; stable v0.5.0 stays Latest. Stable publication and
-milestone closure need later instruction. Only #741 / PR743 is active; normally
-merge and verify BOTH CLOSED before next issue. #731/PR737 CLOSED on accepted
-main a5b1bebcaa79c8386b68e9c247eff73aa11e5e15. Dev retired, archive/tag retained;
-#720 CLOSED/not_planned. No RC exists. Goal active, no token budget.
+Continue until v0.5.1-rc1 is a non-draft prerelease, Latest=false, independently
+downloaded/installed/verified. Stable v0.5.0 stays Latest; stable publication and
+milestone closure require later instruction. Only #741 / PR743 is active: normally
+merge and verify BOTH CLOSED before the next issue. #731/PR737 CLOSED on accepted
+main a5b1bebcaa79c8386b68e9c247eff73aa11e5e15. Dev retired, archive retained;
+#720 CLOSED/not_planned. No RC exists. Goal active/unbounded. User requires security
+bot AND all other review findings; do not stop at a plan or ask repeat approval.
 
-Selected .worktrees/issue-741, branch fix/generated-state-741. PUBLIC HEAD415964fb9f6a7c3ddff84bfd208cfb421493a6d1. Current DIRTY Linux casefold/
-verity and native fixtures below approved by LunaMax for NATIVE publication only.
-No execution lease at checkpoint. Tasks1/5 (only1.1), acceptance allOPEN; Refs741,
-not Fixes until final readiness. No source/schema/DER/SEM bump.
+Selected .worktrees/issue-741, fix/generated-state-741. PUBLIC/local HEAD
+4f86018cf1b2a484d5ea684d3da799b55a508d70; current DIRTY correction below.
+No execution lease at this checkpoint. All source/fixes written by primary;
+read-only LunaMax review_741 owns implementation review, review_731 also reviewed
+Mac cleanup and CodeQL. Tasks1/5 (only1.1), acceptance allOPEN; Refs741, notFixes.
+No schema/DER/SEM/version bump. Preserve private DBs and parked worktrees.
 
-## Latest publication and product proof
+## Published proof and native failures
 
-Normalpush33988 PASS782.21s /34reported suites /1730pass /11ignored; PID1701494gone.
-/tmp/projectatlas-741-discretionary-fixtures-native-push.*. Immutable9817 PASS138inputs,
-binaryddad35d8b81b900c1c0ccdf904cdf7fd26b2f77e54d8b6116ca87104508e93e6,
-unique415 path /tmp/projectatlas-741-discretionary-fixtures-debug-path.txt.
-ActualCLI/MCPadmission4.88s, writers5.13s, registered9.39s, five050upgrades5.98s PASS;
-identity,allapprovedpurposes,config,binary+allboundbytes unchanged. This covers415,
-not dirty source. Newhead needs NEWprefix/uniquehead138inputfreeze/proof.
+Normalpush69127/PID2099004 terminalPASS782.52s,34reported suites/1731pass12ignored.
+/tmp/projectatlas-741-native-policy-native-push.{json,log}. Immutable34918 terminal
+PASS138boundinputs, binary404d9116e6575fb1b5275eb025128d01b8a4adf56082cf3992016dea4f92c26a;
+unique readonly4f path in /tmp/projectatlas-741-native-policy-debug-path.txt.
+-native-proof.json: actualCLI/MCPadmission9.85s,writers5.48s,registered9.19s,
+five050upgrades5.98s; identity/allapprovedpurposes/config/binary/boundbytes unchanged.
+-active-session.json completed; no lease remains. These receipts cover4f ONLY.
+Nexthead needs NEWprefix/unique binding, now139inputs including new cleanup proof.
 
-SOURCE41255442785: plan124697518396/repository124697552104/Rust124697552051/
-Linux124697552148PASS; bothMac124697552005/124697552057 stillactive atlastread;
-Windows124697552020 terminal32PASS2FAIL. Failures only rejectedOWRAprototype and
-allocated-emptySACLfixture expectation. Three previouslybadDACLtests nowPASS with
-nativeDACL-onlyfixture setup. All native Windows data /tmp/projectatlas-741-415-
-windows-job.log and -windows-security-{diagnostics.log,matrix.json} (228rows).
+SOURCE41262689458 jobs: plan124719107067/repository124719137519/SDK124719137486PASS;
+Rust124719137437 and MacIntel124719137471 stillactive atlastread.
+Linux124719137447FAIL: ext4sensitive32+2ignored, initial/late/rawrename fsverityunit,
+realadmission and CLIprotectedwriter PASS; MCPnewfixture omittedproject_path and
+hitcontrolroot. Corrected below; casefoldedext4/f2fs were NOT reached.
+Windows124719137468FAIL: EFSfull-policychild actualpublisher Ok(true), thenEFS
+preservation invariantFAIL; prior SACL suite was masked. Native EFS defect confirmed,
+not merely Rust readonly-bit speculation. /tmp/projectatlas-741-4f-windows-job.log
+and -efs-native-validation.json; new causal former-copy control pinpoints attr loss.
+MacARM124719137442FAIL: APFS/APFSX productcontrols PASS, nestedimage ejectPASS,
+outerimage partialunmount+ResourceBusy. Mountgone; sameimage remainsattached atdisk5/
+disk6, noProjectAtlas/Cargo/MCPprocess; Anka updater probesdisk5s1. Holder notproved.
+/tmp/projectatlas-741-4f-macos-arm64-job.log. Do not claim all4format4f proof.
+Earlier415 bothcompleteMacjobsPASS; de0ARMPASS/Intelsuperseded. No local nativeFS
+or Windows execution: LinuxusernsEPERM/sudo-n unavailable; use hosted evidence.
 
-## Current dirty Linux correction
+## Current dirty implementation and fixtures
 
-Accepted scope amended in OpenSpec proposal/design/spec + live741/readback;
-strictOpenSpec and scopedIssueOps1/5 PASS. Shared fixed candidate/named routes now
-use Linux directory flags + fstatfs after logicalnamespace proof. Exactnames fast;
-resolve existing physicalprefix/reductions then missingdirectory flaginheritance.
-Mountedext4/f2fs currentencoding maps onlyUnicode12.1. Small fixedASCII projection:
-19assigneddefaultignorable ranges +13ASCII chunks; no genericAPFS9/modernUnicode
-matcher. Sensitiveext4/f2fs/unflaggedbtrfs/tmpfs, XFSflaggedASCII; unknownpotential
-aliasmodel causesownershipuncertainty, unrelatedcustom/external paths stay supported.
-Flaggedtmpfs explicitlyunknown, notclaimedSensitive; currentkernelonly12.1 data,
-futuretables needprofile/filterreview. Nativeproof stillpending.
+Windows NULL SACL correction: 4fSDK16rows (/tmp/projectatlas-741-4f-empty-system-
+setter.json) proves NULLinput retainsP2810 while initializedemptyinput clearsP0810.
+HeldLABEL setter lackedWRITE_OWNER and failed5; nextSDK24cases vary that right too.
+Only presentNULL+unprotected source receives initializedemptyACL. Absent/protected
+NULL untouched; strict fullcontrol/SDDL readback remains authoritative. Use already
+locked officialwindows-sys0.61.2 optionalWindows cli-core dependency, Security+
+Storage_FileSystem. Rootlock diffONLYnewdirectedge, no packageversionchange; MSRV1.71,
+MIT|Apache2. EmptySacl repr(C,align4) initializesSDKACL INalignedowner, size_ofACL,
+checkedInitializeAcl, then opaque borrowedAcl onlyduring safesetter. Nohandlayout/
+ACEparser/globalprivilegechange. CanonicalSDKgetterbindings replace handwrittenFFI.
+Nativeomissionguard independentlycounts source/decodedACLentries; mixed/soleML,
+filtered/null-marker negatives and full24positive. Native Rust getter stillunproved.
 
-UCDindependentLuna analysis /tmp/projectatlas-741-ucd-fixed-names.py + -facts.json;
-7official12.1inputs /tmp/projectatlas-741-{CaseFolding,DerivedAge,DerivedCombiningClass,
-DerivedCoreProperties,NormalizationCorrections,NormalizationTest,UnicodeData}.txt.
-Inputhashes/provenance in accepteddesign. Fullassignedscalarprojection verified;
-no GPLkernel implementation imported. RuntimeRust authoredbyprimary.
+EFS retainedmetadata refusal in ReplacementSource capture BEFOREstage/SACL and in
+finalverifyDestination; no decryption/key synthesis. Existingmanagedreplacementonly.
+Create+existingdirectregular returnsfalse BEFOREreplacementpolicy capture onALL OS;
+alias/nonregular refusals and Gitignoreexistingno-op unchanged. NativeEFS tests both
+privilege modes: formerpermissions-only counterfactual; all6initialroles ErrEFS,
+noStage, unchangedidentity/bytes/encryption/outside/noleak; all6Createexisting false;
+latecallback mustexecute andattemptnativeencryption, otherwise logexactAPIlimitation
+and requireunchangedunencryptedstate. No silent skippedlateproof. Encrypted-parent
+host+document creation and host+JSONracewinners, custominplaceEFS positives included.
+Linuxverity unit also covers Createexistingsealed false/noStage beforeReplacechecks.
 
-Linux retainedsource fsverity admission beforestage/payload and finalsource recheck:
-canonicalrustix statxEMPTY_PATH readsVERITYonlywithsupportmask; otherwiseGETFLAGS.
-Successfulclear provesabsence; setrefuses; combineddocumentedunsupportedAPIs imply
-no supportedverityfeature underLinux5.4GETFLAGS/5.5+statx contract. Othererrors
-propagate. No FSwhitelist, re-sealing, privilegechange or stale-signaturecopy.
-Ignorednativeunit uses independentPythonUAPIEnable+Measure: all6roles, initial and
-late sealing, rawrenamecausal loss, original+outsidehardlink/bytes/digest/noleak and
-ordinaryretry. ExistingrealCLI/MCPwriterselector has explicitnativeenv sealedconfig/
-map refusal thencontinuespositives. Lifecyclebothpins3e0ffc5b63898156b5b63d9ed564d9ecf
-cb0cb9291d66d38b450d1a0bf6647c2 (join); deliverybothpins5b567030be7b54cab74f8cd63482bf
-0f4b00d4173a400a28beafdc398d6b604b unchanged. NativeLinuxCI formatsdisposableext4/f2fs
-(casefold+verity), runssensitive/CFownershipunits+verity+actualCLI/MCP/rootroutes.
-ExistingrouteBashfunction preserves78textualselectors whileexecutingallprofiles.
-PrivateDiruppercasealias test nowallOSdynamic, outsidebytes+entrycountassertions.
-Localexactext4andmkfs.f2fs1.16imageformatPASS WITHOUTmount; localverityenableEOPNOTSUPP
-andusernsEPERM, sudo-nunavailable. Neverclaimlocalmounted/nativefeature proof.
+Actualwriter E2E shares protected-doc flow for Linuxfsverity and WindowsEFS. WindowsCI
+exportsPROJECTATLAS_TEST_NATIVE_EFS=1. CLI+persistentMCP config/map requests explicitly
+selectroot, preserveoutsidebytes/hardlinkidentity+nativeEFS flags+controlconfig, then
+continueordinary/custompositives. Helperpermitsmissingproject_path ONLYseparately
+bound --config sessions, not sharedcontrolsession. Lifecyclebothpins
+96f09ba23aeb8362c4778b283785588335e4289e0566abea508cd1326d8dd533; deliverybothpins
+5b567030be7b54cab74f8cd63482bf0f4b00d4173a400a28beafdc398d6b604b unchanged.
+CIcollectsbothEFS+ownershipunit exitcodes before failing, so neither hides theother.
 
-## Windows and Mac findings still requiring work
+MacCIcleanup: capture imagepath/dev/inode+plannedmountpoint+attachplist; markattempted
+attachments beforecall. After normaldetacherror ONLYsameownedimage/device-set with
+ALLrecorded/plannedOSmounts+freshplistmounts absent canwait3boundedpolls thenONE
+nonforced verifiedwhole-device eject andfreshdisappearancereadback. Unknown/mounted/
+changedmapping/secondfail latch+preserve; never -force/kill/blindretry. New permanent
+.github/scripts/test-native-volume-cleanup.py extractsactualhelpers+EXITcleanup.
+22controls bothsudo modes PASS: normal/detached/mounted/changedidentity/mapping/
+invalidplist/midpollchange/partialrecover/secondfail AND partial/emptyattachfailures,
+originalexit25retained. Hostedrepositorystep invokesit. RealMacplistshape/order and
+botharch recovery stillneednativeproof. Luna731approved boundednativepublication.
 
-415ordinarySPclearAIguard and MLserialization correctionnativelyPASS. SACLfullrole/
-change matrix stoppedatemptyfixture: evenexplicitInitializeAcl producesNULL onboth
-nativeTEMP roots (810/2810|null|0). Dirtytest acceptsactualallocatedORNULLsnapshot
-thenstillrequiresfullstrictbefore/afterequality. Physicalallocatedemptyfileunproved.
-No SACL AI/control normalization waiver. .NETSet-Acl contamination causalproof kept;
-all3DACL-onlysetupsitesuseNativeDACL-onlysetter. Retainedsetter nativelyPASS.
+Native-only SourceDescriptorControl SDKexperiment (112cases) is nowinfixture+job:
+CreatePrivateObjectSecurityEx flags3/tokenQUERY|DUPLICATE/filemapping preview mustmatch
+source BEFOREcreating, then temporaryprotectedfullsourceSD atCREATE_NEW, original
+handle rights/initialpolicy readback, restoreunprotected onlyafterpreviewagreement,
+fullfinalreadback beforepayload/MoveFileEx, originalDELETE cleanup. Same-parent and
+explicitmoved-source controls separate. SourceP/unprotected,parentnormal/broader,
+SACLnone/audit/ML/mixed/NULL andbothTEMP roots. Lunaapproved diagnosticONLY.
+PRODUCTION stage constructor STILLinheritsinitialDACL/sharedelete; capability bug
+UNFIXED. EarlierOWRAproposal cannotSetDACL (granted13019f/1301ff,noWD) andremains
+negativecontrol only. Do notadopt obsolete /tmp/projectatlas-741-private-stage-binding-
+plan.md assumptions. Need actualproducerfix+restrictedprincipal proof afterward.
 
-ALL8OWRAcreatorcasesgranted13019f/1301ff (+ASys0x1000000), data+DELETE butNOwriteDAC;
-SetDACLfailsnative5. OWRAproposal NOTVIABLE andNOTproductadopted. DirtyRustunitnow
-explicitnegative-designcontrol: exactphase/native5, measuredrights, cleanup and
-outsidefixturepreservation; C#printsactualerrorcode. SDKdiagnosticsretain8failures.
-ActualproductionconstructorSTILLinheritsinitialDACL/sharedelete; stagecapability
-findingsNOTFIXED. FulltargetSD-at-CREATE_NEW is nextnativeexperiment; preserve
-initialP againstbroaderinheritance and creator rights, no broadenedstagepostrepair.
-Unprotectedsource inheritance, existingowner/group, full/absentSACL and heldDELETE
-publication/cleanup allneedproof. /tmp/projectatlas-741-private-stage-binding-plan.md
-is superseded whereitassumesOWRA canSetDACL; doNOTadoptthatfailedplan.
+## Reviews, gates and tooling
 
-NEW EFSthread PRRT_kwDOQyFgJ86yV0FS is NEEDS_REVIEW, notconfirmed: pinnedRust1.98
-WindowsFile::set_permissions forwardsFULLperm.attrs toFILE_BASIC_INFO beforepayload,
-so mayalreadyrefuseunsupportedEncryptedattr. /tmp/projectatlas-741-efs-review-triage.json
-rendered; reply4433884805readbackOPEN. NoEFSproductionpatch. DirtyignoredWindows
-nativeprobeactual6rolepublishermustpreserveencryptedmarker/dataORrefusewithoriginal/
-outsidehardlink/bytes/noleak. .NETFile.Encrypt forfiles; cipher.exe /e(no/s)onempty
-privateDirectoryprovesnewoutputinheritance. ExplicitWindowsCIselector, bothalready-enabled anddisabledSACLprivilege childmodes
-toavoidincidentalhidden-policyrefusalmasking. Marker+sameuser
-readback doesNOTproveauthorizedkey-list fidelity. Lunaapprovednativepublication only.
+FourCodexthreads individuallyresolved/readback: MacfilenamePTKc4433526580,
+MacdescriptorR85I4433527823, SELinuxQ2zn4433539384, WinretainedsetterSZ0R4433823906.
+EIGHTCodexthreads OPEN: overallACL P6jJ/SACL TBSb/MIC TfKy/stage T5Gl/codeP1VUod/
+LinuxCF VV8m/verity VkGm/EFS V0FS. NEW GHAdvancedSecurity thread WhYd alert399
+rust/access-invalid-pointer at4fGetSD.SACL borrow: independent731review findsstatic
+NOT_ACTIONABLE SDKoutparameter falsepositive, success/present/nonNULL/lifetime valid.
+Keepthread+alertOPEN untilcurrentnativeabsent/NULL/nonemptygetter proof. No suppress/
+dismiss. Latest /tmp/projectatlas-741-policy-final-review-threads.json (9open total).
+4fCodeQL2070184146Rust24/2070149637Actions3 downloadedas4f-*.sarif.json, reconciliation
+pending. de0CodeQL23+3 independentlyreconciled against415 source spans/flows; no new
+actionableCIcache path. /tmp/projectatlas-741-de0-codeql-reconciliation.json includes
+relatedLocations artifactindex caveat (139/157) butprimary+1318flows consistent.
 
-60eMacIntel all4volumeproducttestsPASS thenHFSXouterhdiutilResourceBusy; no confirmed
-productprocessleak, trapblindlyretriedENOENT. DirtyMaccentraldetachfailurelatch now
-emitsdiskutil/hdiutil/mount/lsof/ps andfailswithoutblindretry/force. Removesgratuitous
-hdiutilcreate-help. NewLinuximagecleanuphasmatchingfailed-unmountlatch+diagnostics;
-actualextractedBashnegativecontrol provesoneattempt/failure/fixturepreservation.
+Luna741approved EFS/SACL/Create+realCLI/MCPintegration for NATIVEpublication only;
+Luna731approved Mac22controls. Noissueacceptance. Latest WindowsGNUwholeowning
+source/testsClippyPASS58486 (compileonly), Linux32pass2ignored and realwriters44897
+PASS4.94s; latestsharedrealwriters88066PASS4.90s. Mac22controls/YAML17BashPASS,
+strictstrings/OpenSpec/scopedIssueOps1of5PASS. Finalcheap77561 terminalPASS: CLIalltargets/allfeaturesClippy, inventory3, exactworkflow,
+strictstrings/strictOpenSpec. LatestMac22controls rerun74978PASS. No livebuildlease.
 
-## Reviews and gates
+Installed050brief stillknownpolicy_drift/fullchanged0 under739; preserveDB, donot
+reruninstaller/reset asorientation. Currentcontract authoringwatch58727 terminalPASS
+197parsed529unchanged/726candidates. Newcleanupscript purpose approved/sourceagent/
+agent_reviewed throughCLI; binaryrootselectedissue741. Nativeactualresponseprofile
+frozenUCD12.1 projection/19DICP+13chunks remains in accepteddesign with7officialinput
+hashes and /tmp/projectatlas-741-ucd-fixed-names.py/-facts.json. NativeCFstillpending.
 
-FourCodexthreads individuallyresolved/readback: MacfilenamePTKc(4433526580),
-MacdescriptorR85I(4433527823), SELinuxQ2zn(4433539384), WindowsretainedsetterSZ0R
-(4433823906) on415nativeproof+independentreview. EIGHT remainOPEN: overallACL P6jJ,
-SACL TBSb, MIC TfKy, stage T5Gl, codeP1 VUod, LinuxCF VV8m, verity VkGm, EFS V0FS.
-Latest /tmp/projectatlas-741-linux-boundary-prepublish-threads.json. Recheckallbefore
-acceptance. All26CodeQL415results exactlyequal individual60e reviewedpayloads:
-Rust2069933020(23)/Actions2069899626(3), /tmp/projectatlas-741-415-codeql-reconciliation.json.
-No suppress/dismiss; alert398 reviewedexpectedread-onlyPRSDKCI threadresolvedearlier.
+## Next and release continuity
 
-LunaMaxreview_741approvedcurrentLinux+fixtures forNATIVEpublication after3reviewfixes
-andcleanupfailurelatch, thenapprovedcorrectedEFSfixture. Notissueacceptance. Primary
-writesallproduction/fixes; reviewersread-only. Local32PASS2ignored, CLIalltargets/
-allfeaturesClippy, WHOLEWindowsGNUsource+tests compile-onlyClippy, strictstrings,
-3inventory2.70s, exactworkflow0.28s, actualdefaultbinaryCLI/MCPwriters4.91s PASS.
-LatestEFSdirectorycorrectioncompile27815terminalPASS. Finalcheap15901PASS.
-YAML/all17explicitBashscriptsPASS. Re-runcheapfinalgatesafterworkflow/nativeprobe
-updates; no repeatedbroadtestingwithoutcause. Noe2e_deliveryedits.
-
-Installed050MCPbrief/purposeSet stillknownpolicy_drift/fullchanged0 tracked739.
-Currentcontractbinary authoringwatch98005PASS(194parsed531unchanged,725candidates),
-privateDBpreserved; newLinuxmodulepurposeapproved/sourceagent/agent_reviewed viaCLI.
-No reset/installerrepair. Nextnormalpushwillrefreshfinalmemory/source asrequired.
-
-## Immediate next actions and release continuity
-
-Finishcheapgates/reviewerreadbacks, commit741only, CLEANnormalpush NEWprefix
-linux-name-sealing using /tmp/projectatlas-741-acl-native-push.py. Allshelllogin:false;
-source /tmp/projectatlas-rc1-test-env.sh beforeCargo. No selectededits/competingbuild/
-index/benchmark duringnormalpush andsubsequentimmutableproof. Resumeactualsession
-untilterminal; observationtimeoutnotfailure. Then NEWheadunique138inputfreeze,
-actualCLI/MCP/registered/5upgrades and nativeext4/f2fs/WindowsEFS/SACL/fourMacformats.
-FixactualWindowscreation/finalpublishcapability and any confirmedremainingfindings;
-completefinalacceptance/gates/normalmerge+BOTHCLOSED741 before nextissue.
+Finalreviews/cheapchecksPASS; 399staticdisposition recorded in
+/tmp/projectatlas-741-codeql-399-disposition.json (threadstillOPEN). Updatecheckpoint,
+commit741ONLY and CLEANnormalpush NEWprefix (e.g.windows-native-policy) using
+/tmp/projectatlas-741-acl-native-push.py. NEWhead unique139inputfreeze/proof helpers
+basedon native-policy versions, addingnewcleanupscript. Allshelllogin:false; source
+/tmp/projectatlas-rc1-test-env.sh beforeCargo. No selectededits/competingbuild/index/
+benchmark duringpush+subsequentimmutableproof; resumeactualsessions, nottimeoutrestart.
+Then inspect nativeSDK sourceSD/NULLresults and allLinux/Windows/Macsourcejobs; finish
+actualWindowsinitialstage fix andallconfirmedreviewfindings. Onlyverifiedthreads
+resolved. Finalacceptance/gates/normalmerge+BOTHCLOSED741 before739/738/708/715.
 
 Parked7396eb0dfd+dirt,7388814d6d+dirt,708publicc65dfed/local587ecbe/PR728,715integration
 preserved. 708warm120sample1.127FAIL/focused1.031526partial,noSLOwaiver. 715children+
-blockers708/718/721/722/731/732/738/739/741;718/721/722/731/732CLOSED. QueuedCodexCI
-adoptiononlyafter741closure /tmp/projectatlas-codex-ci-followup.json. AcceptedmainDER24/
-SEM23; final715DER>everyprivatecandidate,SEM>=23. Final715requirescombinedinstalled
-CLI/MCP/plugin/skills/hooks/all4OS/upgrades/cancellation/concurrency/security/perf/
-packages/checksums/non-draftRCpublication+independentdownload/installverification.
+blockers708/718/721/722/731/732/738/739/741;718/721/722/731/732CLOSED. CodexCIadoption
+onlyafter741closure /tmp/projectatlas-codex-ci-followup.json. AcceptedmainDER24/SEM23;
+final715DER>everyprivatecandidate,SEM>=23. Final715combinedinstalledCLI/MCP/plugin/
+skills/hooks/all4OS/upgrades/cancellation/concurrency/security/perf/packages/checksums/
+non-draftRCpublication+independentdownload/installverification. Stable050Latest stays.

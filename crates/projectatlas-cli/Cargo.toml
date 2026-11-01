@@ -63,6 +63,7 @@ cli-core = [
     "dep:xattr",
     "dep:rustix",
     "dep:windows-permissions",
+    "dep:windows-sys",
     "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
@@ -147,6 +148,7 @@ rustix = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies]
 winapi-util = { workspace = true, optional = true }
 windows-permissions = { workspace = true, optional = true }
+windows-sys = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 landlock = { workspace = true, optional = true }

@@ -1582,6 +1582,21 @@ fn replacement_refuses_native_verity_and_late_sealing_without_leaking_stages() -
                 .ok_or_else(|| io::Error::other("sealed document was external"))?
         };
         let entries = fs::read_dir(&directory)?.count();
+        let reached_stage = std::cell::Cell::new(false);
+        let created = guard.publish_with_stage_check(
+            &output,
+            b"unpublished no-clobber payload",
+            FilePublication::Create,
+            |_| {
+                reached_stage.set(true);
+                Ok(())
+            },
+            || Ok(()),
+        )?;
+        require(
+            !created && !reached_stage.get() && fixture_verity(&output, false)? == digest,
+            "create-only sealed collision invoked replacement policy or staging",
+        )?;
         let result = guard.publish(
             &output,
             b"unsealed candidate",
@@ -2726,7 +2741,7 @@ public static class SystemPolicyFixture {
       if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty);
     }
   }
-  public static string EmptySystemPolicyControl(string path, bool retained, bool allocated, bool labels) {
+  public static string EmptySystemPolicyControl(string path, bool retained, bool allocated, bool labels, bool writeOwner) {
     System.IO.File.WriteAllText(path,"disposable empty SACL setter control");
     string before=Policy(path,"S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",24);
     IntPtr empty=IntPtr.Zero, handle=new IntPtr(-1);
@@ -2739,7 +2754,7 @@ public static class SystemPolicyFixture {
       uint status;
       if (retained) {
         SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
-        handle=CreateFile(path,0x01020080u,7,ref security,3,0x00200080,IntPtr.Zero);
+        handle=CreateFile(path,0x01020080u | (writeOwner ? 0x00080000u : 0u),7,ref security,3,0x00200080,IntPtr.Zero);
         if (handle == new IntPtr(-1)) throw new Win32Exception();
         status=SetSecurityInfo(handle,1,information,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,empty);
       } else {
@@ -2750,6 +2765,132 @@ public static class SystemPolicyFixture {
     } finally {
       if (handle != new IntPtr(-1)) CloseHandle(handle);
       if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty);
+    }
+  }
+  [StructLayout(LayoutKind.Sequential)] struct GenericMapping { public uint Read, Write, Execute, All; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreatePrivateObjectSecurityEx(IntPtr parent, IntPtr creator, out IntPtr result, IntPtr type, bool container, uint inheritance, IntPtr token, ref GenericMapping mapping);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetSecurityDescriptorControl(IntPtr descriptor, ushort interest, ushort value);
+  [StructLayout(LayoutKind.Sequential)] struct FileDisposition { public byte Delete; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(IntPtr file, uint kind, ref FileDisposition information, uint size);
+  static string DescriptorImage(IntPtr descriptor, uint information, bool ignoreProtection) {
+    ushort control; uint revision,length; IntPtr text=IntPtr.Zero;
+    if (!GetSecurityDescriptorControl(descriptor,out control,out revision)) throw new Win32Exception();
+    if (revision != 1) throw new Exception("Unexpected descriptor revision");
+    try {
+      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor,1,information,out text,out length)) throw new Win32Exception();
+      string image=Marshal.PtrToStringUni(text);
+      int start=image.IndexOf("D:",StringComparison.Ordinal);
+      if (start >= 0) {
+        start+=2;
+        int end=image.IndexOf('(',start), system=image.IndexOf("S:",start,StringComparison.Ordinal);
+        if (end < 0) end=image.Length;
+        if (system >= 0 && system < end) end=system;
+        string header=image.Substring(start,end-start).Replace("AI","");
+        if (ignoreProtection) header=header.Replace("P","");
+        image=image.Substring(0,start)+header+image.Substring(end);
+      }
+      uint mask=0x3f3fu & ~0x400u & (ignoreProtection ? ~0x1000u : uint.MaxValue);
+      return (control & mask).ToString("x")+"|"+image;
+    } finally { if (text != IntPtr.Zero) LocalFree(text); }
+  }
+  static IntPtr HeldDescriptor(IntPtr file, uint information) {
+    IntPtr descriptor;
+    uint result=GetSecurityDescriptorOnly(file,1,information,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,out descriptor);
+    if (result != 0) throw new Win32Exception((int)result);
+    return descriptor;
+  }
+  static IntPtr NamedDescriptor(string path, uint information) {
+    IntPtr owner,group,dacl,sacl,descriptor;
+    uint result=GetNamedSecurityInfo(path,1,information,out owner,out group,out dacl,out sacl,out descriptor);
+    if (result != 0) throw new Win32Exception((int)result);
+    return descriptor;
+  }
+  public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy) {
+    string preparation=System.IO.Path.Combine(root,"preparation"), parent=System.IO.Path.Combine(root,"publication");
+    System.IO.Directory.CreateDirectory(preparation); System.IO.Directory.CreateDirectory(parent);
+    string source=System.IO.Path.Combine(movedSource ? preparation : parent,"source"), destination=System.IO.Path.Combine(parent,"output"), stage=System.IO.Path.Combine(parent,"stage");
+    string phase="prepare source", observations="";
+    IntPtr sourceDescriptor=IntPtr.Zero,parentDescriptor=IntPtr.Zero,preview=IntPtr.Zero,stageDescriptor=IntPtr.Zero,token=IntPtr.Zero,raw=new IntPtr(-1);
+    bool published=false;
+    try {
+      DiscretionaryPolicy(preparation,"D:P(A;;FA;;;OW)");
+      DiscretionaryPolicy(parent,"D:P(A;;FA;;;OW)"+(widerParent ? "(A;OIIO;0x00050000;;;WD)" : ""));
+      System.IO.File.WriteAllText(source,"previous destination");
+      DiscretionaryPolicy(source,protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)");
+      if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
+      if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
+      uint information=7u | (systemAccess ? 24u : 16u);
+      sourceDescriptor=NamedDescriptor(destination,information);
+      parentDescriptor=NamedDescriptor(parent,information);
+      ushort sourceControl; uint revision;
+      if (!GetSecurityDescriptorControl(sourceDescriptor,out sourceControl,out revision)) throw new Win32Exception();
+      if (!systemAccess && (sourceControl & 0x10) != 0) return "refused hidden source SACL before creation";
+      string expected=DescriptorImage(sourceDescriptor,information,false), initialExpected=DescriptorImage(sourceDescriptor,information,true);
+      observations="moved-source="+movedSource+";source="+expected;
+      phase="preview native inheritance";
+      if (!OpenProcessToken(GetCurrentProcess(),0xau,out token)) throw new Win32Exception();
+      GenericMapping mapping=new GenericMapping { Read=0x120089u, Write=0x120116u, Execute=0x1200a0u, All=0x1f01ffu };
+      if (!CreatePrivateObjectSecurityEx(parentDescriptor,sourceDescriptor,out preview,IntPtr.Zero,false,3u,token,ref mapping)) throw new Win32Exception();
+      string predicted=DescriptorImage(preview,information,false);
+      observations+=";preview="+predicted;
+      if (predicted != expected) return "refused differing inheritance before creation;"+observations;
+      // Protection at creation prevents parent ACEs from granting a capability
+      // before readback. Restore it only after the independent preview matches.
+      phase="protect creation descriptor";
+      if (!SetSecurityDescriptorControl(sourceDescriptor,0x1000,0x1000)) throw new Win32Exception();
+      SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=sourceDescriptor, Inherit=false };
+      phase="create original data/security/delete handle";
+      raw=CreateFile(stage,0xc0070000u | (systemAccess ? 0x01000000u : 0u),7,ref security,1,0x00200080,IntPtr.Zero);
+      if (raw == new IntPtr(-1)) throw new Win32Exception();
+      ObjectBasicInformation basic; uint returned;
+      uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
+      if (NtQueryObject(raw,0,out basic,size,out returned) < 0 || returned != size) throw new Exception("Creator granted-access query failed");
+      observations+=";granted="+basic.GrantedAccess.ToString("x");
+      if ((basic.GrantedAccess & 0x00070003u) != 0x00070003u) throw new Exception("Creator lacks required data/security/delete rights");
+      stageDescriptor=HeldDescriptor(raw,information);
+      string initial=DescriptorImage(stageDescriptor,information,true);
+      observations+=";initial="+initial;
+      if (initial != initialExpected) return "refused initial policy before payload;"+observations;
+      LocalFree(stageDescriptor);stageDescriptor=IntPtr.Zero;
+      if (!protectedSource) {
+        bool present,defaulted; IntPtr acl;
+        if (!GetSecurityDescriptorDacl(sourceDescriptor,out present,out acl,out defaulted)) throw new Win32Exception();
+        phase="restore previewed inheritance through original handle";
+        uint result=SetSecurityInfo(raw,1,0x20000004u,IntPtr.Zero,IntPtr.Zero,acl,IntPtr.Zero);
+        if (result != 0) throw new Win32Exception((int)result);
+      }
+      stageDescriptor=HeldDescriptor(raw,information);
+      string restored=DescriptorImage(stageDescriptor,information,false);
+      observations+=";restored="+restored;
+      if (restored != expected) return "refused final policy before payload;"+observations;
+      LocalFree(stageDescriptor);stageDescriptor=IntPtr.Zero;
+      phase="creator payload and publication";
+      using (var borrowed=new Microsoft.Win32.SafeHandles.SafeFileHandle(raw,false))
+      using (var stream=new System.IO.FileStream(borrowed,System.IO.FileAccess.ReadWrite)) {
+        byte[] payload=System.Text.Encoding.ASCII.GetBytes("verified source-descriptor payload");
+        stream.Write(payload,0,payload.Length);stream.Flush(true);
+      }
+      if (!MoveFileEx(stage,destination,1)) throw new Win32Exception();
+      published=true;
+      if (System.IO.File.ReadAllText(destination) != "verified source-descriptor payload") throw new Exception("Published payload differs");
+      return "source descriptor creation/publication PASS;"+observations;
+    } catch (Exception error) { throw new Exception("Source descriptor phase: "+phase+";"+observations,error); }
+    finally {
+      if (raw != new IntPtr(-1)) {
+        if (!published) {
+          FileDisposition disposition=new FileDisposition { Delete=1 };
+          if (!SetFileInformationByHandle(raw,4,ref disposition,1)) Console.WriteLine("original-handle cleanup failed native="+Marshal.GetLastWin32Error());
+        }
+        CloseHandle(raw);
+      }
+      if (stageDescriptor != IntPtr.Zero) LocalFree(stageDescriptor);
+      if (preview != IntPtr.Zero && !DestroyPrivateObjectSecurity(ref preview)) Console.WriteLine("native descriptor cleanup failed="+Marshal.GetLastWin32Error());
+      if (parentDescriptor != IntPtr.Zero) LocalFree(parentDescriptor);
+      if (sourceDescriptor != IntPtr.Zero) LocalFree(sourceDescriptor);
+      if (token != IntPtr.Zero) CloseHandle(token);
+      DiscretionaryPolicy(parent,"D:P(A;;FA;;;OW)");
+      if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root,true);
     }
   }
   public static string CreatorControl(string path, bool systemAccess, bool maximumAllowed) {
@@ -2933,14 +3074,16 @@ fn windows_restrictive_creation_does_not_grant_unavailable_policy_rights() -> io
     )
 }
 
-/// EFS is a separate native protection; this probe establishes actual publisher
-/// behavior without assuming how Rust's full-attribute setter treats it.
+/// Retained EFS admission refuses unsupported replacement while native creation
+/// and explicit operator-selected in-place writes keep their encryption behavior.
 #[cfg(windows)]
 #[test]
 #[ignore = "requires EFS-capable NTFS and a fixture encryption key; selected explicitly in Windows CI"]
 fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io::Result<()> {
+    use same_file::Handle;
+    use std::io::Write;
     use std::os::windows::fs::MetadataExt;
-    const ENCRYPTED: u32 = 0x0000_4000;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED as ENCRYPTED;
     const MODE: &str = "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE";
     if !matches!(
         std::env::var(MODE).as_deref(),
@@ -2966,6 +3109,8 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
                 child.status.success(),
                 &format!("native EFS {mode} control failed: {child:?}"),
             )?;
+            io::stderr().lock().write_all(&child.stdout)?;
+            io::stderr().lock().write_all(&child.stderr)?;
         }
         return Ok(());
     }
@@ -2984,6 +3129,27 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
             &format!("native EFS setup failed: {result:?}"),
         )
     };
+    // Counterfactual: the former full-attribute permissions copy succeeds but
+    // cannot reproduce file-level encryption in an ordinary parent directory.
+    let former = tempfile::tempdir()?;
+    let output = former.path().join("former-encrypted-output");
+    let outside = former.path().join("former-encrypted-owner");
+    fs::write(&output, b"previous encrypted bytes")?;
+    encrypt(&output)?;
+    fs::hard_link(&output, &outside)?;
+    let permissions = fs::metadata(&output)?.permissions();
+    let mut stage = tempfile::NamedTempFile::new_in(former.path())?;
+    stage.as_file().set_permissions(permissions)?;
+    stage.write_all(b"former plaintext replacement")?;
+    stage.as_file().sync_all()?;
+    stage.persist(&output).map_err(|failure| failure.error)?;
+    require(
+        fs::read(&output)? == b"former plaintext replacement"
+            && fs::metadata(&output)?.file_attributes() & ENCRYPTED == 0
+            && fs::read(&outside)? == b"previous encrypted bytes"
+            && fs::metadata(&outside)?.file_attributes() & ENCRYPTED != 0,
+        "former permissions-only publisher did not establish EFS loss",
+    )?;
     for (private, filename, host) in replacement_targets() {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -3010,24 +3176,114 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
                 .ok_or_else(|| io::Error::other("EFS document was external"))?
         };
         let entries = fs::read_dir(&directory)?.count();
-        let replaced = guard.publish(
+        let identity = Handle::from_path(&outside)?;
+        let reached_stage = std::cell::Cell::new(false);
+        let replaced = guard.publish_with_stage_check(
             &output,
             b"encrypted replacement",
             FilePublication::Replace,
+            |_| {
+                reached_stage.set(true);
+                Ok(())
+            },
             || Ok(()),
         );
-        let expected: &[u8] = if replaced.is_ok() {
-            b"encrypted replacement"
-        } else {
-            b"last valid encrypted output"
-        };
+        writeln!(
+            io::stderr().lock(),
+            "native EFS mode={:?} role={filename} publication={replaced:?}",
+            std::env::var(MODE),
+        )?;
         require(
-            fs::read(&output)? == expected
+            replaced
+                .as_ref()
+                .is_err_and(|source| source.to_string().contains("EFS"))
+                && !reached_stage.get()
+                && fs::read(&output)? == b"last valid encrypted output"
                 && fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0
                 && fs::read(&outside)? == b"last valid encrypted output"
                 && fs::metadata(&outside)?.file_attributes() & ENCRYPTED != 0
+                && Handle::from_path(&output)? == identity
+                && Handle::from_path(&outside)? == identity
                 && fs::read_dir(&directory)?.count() == entries,
-            &format!("EFS replacement lost protection, outside bytes or cleanup: {replaced:?}"),
+            &format!("EFS admission lost refusal, bytes, identity or cleanup: {replaced:?}"),
+        )?;
+        let created = guard.publish_with_stage_check(
+            &output,
+            b"unpublished no-clobber bytes",
+            FilePublication::Create,
+            |_| {
+                reached_stage.set(true);
+                Ok(())
+            },
+            || Ok(()),
+        )?;
+        require(
+            !created
+                && !reached_stage.get()
+                && fs::read(&output)? == b"last valid encrypted output"
+                && fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0
+                && Handle::from_path(&output)? == identity
+                && Handle::from_path(&outside)? == identity
+                && fs::read_dir(&directory)?.count() == entries,
+            "create-only EFS collision changed existing output or staged a replacement",
+        )?;
+    }
+    for (private, filename, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let directory = if private {
+            root.join(STATE_DIRECTORY)
+        } else {
+            root.clone()
+        };
+        fs::create_dir_all(&directory)?;
+        let output = directory.join(filename);
+        let outside = root.join("late-encrypted-owner");
+        fs::write(&output, b"previous ordinary output")?;
+        fs::hard_link(&output, &outside)?;
+        let guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("late EFS document was external"))?
+        };
+        let entries = fs::read_dir(&directory)?.count();
+        let encrypted = std::cell::Cell::new(false);
+        let reached_callback = std::cell::Cell::new(false);
+        let replaced = guard.publish(
+            &output,
+            b"unpublished plaintext",
+            FilePublication::Replace,
+            || {
+                reached_callback.set(true);
+                if let Err(source) = encrypt(&output) {
+                    writeln!(io::stderr().lock(),
+                        "native EFS late mutation unavailable with retained snapshot: role={filename}, {source}")?;
+                    return Err(source);
+                }
+                encrypted.set(true);
+                Ok(())
+            },
+        );
+        writeln!(
+            io::stderr().lock(),
+            "native EFS late role={filename} encrypted={} publication={replaced:?}",
+            encrypted.get()
+        )?;
+        require(
+            reached_callback.get()
+                && replaced.is_err()
+                && (!encrypted.get()
+                    || replaced
+                        .as_ref()
+                        .is_err_and(|source| source.to_string().contains("EFS")))
+                && fs::read(&output)? == b"previous ordinary output"
+                && fs::read(&outside)? == b"previous ordinary output"
+                && (fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0) == encrypted.get()
+                && (fs::metadata(&outside)?.file_attributes() & ENCRYPTED != 0) == encrypted.get()
+                && same_file::is_same_file(&output, &outside)?
+                && fs::read_dir(&directory)?.count() == entries,
+            &format!("late EFS policy change escaped publication or cleanup: {replaced:?}"),
         )?;
     }
     // Genuinely new generated outputs retain ordinary directory EFS inheritance.
@@ -3046,12 +3302,75 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
             && fs::metadata(&guard.directory)?.file_attributes() & ENCRYPTED != 0,
         &format!("native EFS directory setup failed: {encrypted_directory:?}"),
     )?;
-    let output = guard.directory.join(HOST_FILES[0]);
-    guard.write_generated(&output, b"new encrypted output")?;
+    for filename in [HOST_FILES[0], CONFIG_FILE] {
+        let output = guard.directory.join(filename);
+        if filename == HOST_FILES[0] {
+            guard.write_generated(&output, b"new encrypted output")?;
+        } else {
+            let document = ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("new EFS document was external"))?;
+            document.publish(
+                &output,
+                b"new encrypted output",
+                FilePublication::Create,
+                || Ok(()),
+            )?;
+        }
+        require(
+            fs::read(&output)? == b"new encrypted output"
+                && fs::metadata(output)?.file_attributes() & ENCRYPTED != 0,
+            "new output lost EFS directory inheritance",
+        )?;
+    }
+    for filename in [HOST_FILES[1], JSON_MAP_FILE] {
+        let output = guard.directory.join(filename);
+        let outside = root.join(format!("encrypted-create-winner-{filename}"));
+        let entries = fs::read_dir(&guard.directory)?.count();
+        let document = if filename == JSON_MAP_FILE {
+            Some(
+                ProjectStateGuard::preflight_document(&root, &output)?
+                    .ok_or_else(|| io::Error::other("racing EFS document was external"))?,
+            )
+        } else {
+            None
+        };
+        let publisher = document.as_ref().unwrap_or(&guard);
+        let created = publisher.publish(
+            &output,
+            b"unpublished create payload",
+            FilePublication::Create,
+            || {
+                fs::write(&output, b"winning encrypted output")?;
+                require(
+                    fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0,
+                    "create-race winner did not inherit EFS",
+                )?;
+                fs::hard_link(&output, &outside)
+            },
+        )?;
+        require(
+            !created
+                && fs::read(&output)? == b"winning encrypted output"
+                && fs::read(&outside)? == b"winning encrypted output"
+                && fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0
+                && fs::metadata(&outside)?.file_attributes() & ENCRYPTED != 0
+                && same_file::is_same_file(&output, &outside)?
+                && fs::read_dir(&guard.directory)?.count() == entries + 1,
+            "create-only EFS race replaced the winner or leaked staging",
+        )?;
+    }
+    let custom = guard.directory.join("operator-config.toml");
+    fs::write(&custom, b"encrypted custom output")?;
     require(
-        fs::read(&output)? == b"new encrypted output"
-            && fs::metadata(output)?.file_attributes() & ENCRYPTED != 0,
-        "new output lost EFS directory inheritance",
+        ProjectStateGuard::preflight_document(&root, &custom)?.is_none()
+            && fs::metadata(&custom)?.file_attributes() & ENCRYPTED != 0,
+        "EFS restriction captured an explicit custom output",
+    )?;
+    fs::write(&custom, b"changed explicit encrypted output")?;
+    require(
+        fs::read(&custom)? == b"changed explicit encrypted output"
+            && fs::metadata(custom)?.file_attributes() & ENCRYPTED != 0,
+        "explicit in-place output lost native EFS support",
     )
 }
 

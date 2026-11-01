@@ -2030,6 +2030,7 @@ dependencies = [
  "whichdisk",
  "winapi-util",
  "windows-permissions",
+ "windows-sys 0.61.2",
  "xattr",
  "yaml-rust2",
  "zip",

@@ -313,7 +313,7 @@ safe windows-permissions dependency, which retains bitflags 1; the dependency ba
 exception is exact and justified by safe handle/OsStr compatibility. Alternatives
 using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
 wrapper accepts only str paths and has different partial-publication failures.
-Apart from the isolated macOS descriptor ACL and Windows read-only descriptor-getter exceptions
+Apart from the isolated macOS descriptor ACL and Windows descriptor/empty-ACL exceptions
 below, no project unsafe code, shell runtime dependency, global ACL change, or blanket ban
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof
@@ -379,8 +379,22 @@ changes. Native mixed and sole-label controls must reject deliberately SACL-only
 NULL-marker images without panicking, and accept SACL plus LABEL. Resource-attribute/scope conversion remains a native
 proof question; raw NTFS query with both SACL and LABEL copies the entire SACL.
 
+The unprotected present-NULL SACL case needs a non-NULL zero-entry input to the
+native setter: NTFS normalizes that input to the original unprotected NULL state,
+whereas a NULL input retains protection. Gate this adapter strictly on native
+PRESENT, unprotected control, and a NULL pointer; absence and protected NULL retain
+their existing representation. Initialize SDK `ACL` storage inside a DWORD-aligned owning wrapper with
+`InitializeAcl(size_of::<ACL>(), ACL_REVISION)`, check BOOL, and borrow the initialized
+storage as the canonical wrapper's opaque ACL only for the held setter call. Strict
+source/stage native readback remains authoritative and failure refuses before
+payload. Do not treat named-setter proof as held-setter proof; native controls must
+include the actual creator's optional label/WRITE_OWNER rights and their absence.
+Reuse the already locked official `windows-sys` 0.61.2 as a Windows-only optional
+CLI dependency with `Win32_Security` and `Win32_Storage_FileSystem`; use its canonical getter bindings too. No new
+package version, hand-written ACL layout, ACE parsing or privilege changes.
+
 The independent reviewer approved a second tiny platform-local unsafe exception:
-GetSecurityDescriptorControl and GetSecurityDescriptorSacl in a private Windows
+SDK GetSecurityDescriptorControl, GetSecurityDescriptorSacl and InitializeAcl in a private Windows
 security module, borrowing the opaque descriptor returned by windows-permissions.
 The latter is needed because the safe accessor panics on a present NULL SACL; only
 borrow a native non-NULL ACL while its owning descriptor lives. Check BOOL and descriptor
@@ -499,6 +513,34 @@ owned staging handle and rechecks its identity before automatic removal. This ke
 cleanup independent of optional POSIX-delete support, while preserving the original
 destination and outside hardlinks. Failed normalization retains the stage explicitly.
 
+### Refuse unsupported existing Windows EFS replacement
+
+EFS policy includes file encryption keys and authorized recipients, independently of
+DACL/SACL policy. The pinned standard library forwards its full attribute word, but
+the native full-policy publisher control still returns success while losing EFS;
+successful FILE_BASIC_INFO preparation is not preservation proof. Do not attempt
+flag copying, re-encryption with a fresh key, key-list synthesis or decryption.
+Check the retained admitted file's FILE_ATTRIBUTE_ENCRYPTED during capture before
+staging/security preparation, and again during final retained-source verification.
+Refuse this unsupported existing managed replacement with an EFS-specific cause.
+Create-only operations return not-created for an already present direct regular
+file before replacement-policy capture; they never need EFS-copy rights. A native
+no-clobber race also preserves its encrypted winner. Existing alias/nonregular
+refusals remain unchanged. Only the replacement source is restricted: SQLite/in-place explicit custom output,
+source indexing, root selection and new outputs remain supported. Genuinely new
+managed files in encrypted directories retain native EFS inheritance.
+
+Use canonical windows-sys Win32_Storage_FileSystem metadata constants; this adds no
+new native call or package version. Causal proof compares a former permissions-only
+stage with guarded publication, both caller privilege modes and all six existing
+replacement roles. Preserve original/outside hardlink identity, bytes, encryption
+and directory entries; require the EFS-specific refusal before the stage callback.
+Try late native encryption while the source snapshot is retained, verify the flag
+actually changed before asserting the final refusal, or report the exact native
+mutation limitation without claiming that branch executed. Prove generated-host
+and managed-document creation in an encrypted parent plus custom-output positives.
+A marker and same-user readback do not establish authorized-key-list fidelity.
+
 ### Explicit paths remain supported
 
 An explicitly selected external database or config path is an intended operator
@@ -537,7 +579,7 @@ only if implementation changes a derived-data contract.
 Reuse existing same-file handles and tempfile publication. A direct Windows-only
 winapi-util dependency reuses the already locked canonical utility solely for stable
 hard-link counts; native binding exceptions are the macOS ACL owner and the tiny
-Windows read-only descriptor getters above; do not add unrelated unsafe bindings or
+Windows descriptor getters and SDK empty-ACL initialization above; do not add unrelated unsafe bindings or
 unstable std APIs. Ordinary
 DB admission stays constant in the fixed product file family and does not index,
 parse or walk source trees. Preserve valid generated-file permissions and document

@@ -75,6 +75,13 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** a label-only query does not mistake filtered audit ACEs for policy absence, source-policy changes refuse replacement, and unsupported defaulted SACL state retains valid output
 - **AND** no process-wide privilege enablement or mutable-path security setter is introduced
 
+#### Scenario: Windows file encryption remains protected
+- **WHEN** an existing managed output is EFS encrypted initially or becomes encrypted before publication
+- **THEN** retained-file admission refuses replacement before staging or final publication and preserves its bytes, encryption policy, outside hardlinks and owned cleanup
+- **AND** a successful permissions setter or matching encryption flag alone does not establish complete EFS key-policy preservation
+- **AND** genuinely new files retain encrypted-directory inheritance, while ordinary replacement, indexing, database selection and explicit custom/external output capabilities remain available
+- **AND** create-only collisions with existing or racing encrypted direct regular files retain the established not-created result without replacement-policy admission
+
 #### Scenario: Windows replacement stages do not expose lasting inherited capabilities
 - **WHEN** a principal can create entries and inherit access to new children but cannot modify or delete the existing protected output
 - **THEN** replacement staging prevents that principal from acquiring data, delete or write-DACL capabilities before destination policy is applied, including implicit owner write-DACL rights

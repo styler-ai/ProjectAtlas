@@ -164,6 +164,11 @@ original staging handle.
 Linux fs-verity-sealed outputs are refused before staging, and sealing is rechecked
 on the retained source before replacement. Ordinary regeneration remains available;
 ProjectAtlas does not silently replace a sealed inode with an unsealed file.
+Existing EFS-encrypted Windows managed outputs are refused before replacement
+because their complete native encryption policy cannot yet be preserved. The
+retained source is rechecked before publication. New outputs still inherit EFS
+from their directory; explicit custom outputs and database/index selection remain
+supported. ProjectAtlas does not decrypt files or recreate their encryption keys.
 Ordinary Windows outputs with no system ACL remain replaceable without additional
 privilege. Replacing explicitly labeled or audited files requires full policy
 access already available to the caller; otherwise it leaves valid output intact.

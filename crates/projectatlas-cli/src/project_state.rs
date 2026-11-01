@@ -459,6 +459,11 @@ impl ProjectStateGuard {
                 Ok::<_, io::Error>(metadata)
             })
             .transpose()?;
+        // A no-clobber collision never replaces the existing policy. Validate
+        // its direct regular entry above without requiring copy/crypto rights.
+        if matches!(publication, FilePublication::Create) && metadata.is_some() {
+            return Ok(false);
+        }
         #[cfg(target_os = "linux")]
         let access = metadata
             .as_ref()
@@ -862,6 +867,8 @@ impl ReplacementSource {
             }
         };
         require_regular(path, &file.metadata()?)?;
+        #[cfg(windows)]
+        require_windows_unencrypted(&file, path)?;
         let identity = Handle::from_file(file.try_clone()?)?;
         #[cfg(target_os = "macos")]
         let acl = macos_access::get_acl(&file)?;
@@ -903,6 +910,7 @@ impl ReplacementSource {
             use std::os::windows::fs::OpenOptionsExt;
             const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
             const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            require_windows_unencrypted(&self.file, path)?;
             let current = fs::OpenOptions::new()
                 .access_mode(FILE_READ_ATTRIBUTES)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -977,6 +985,20 @@ fn preserve_replacement_access(
     // Restore the original mode only after restoring ownership and ACL entries.
     staged.as_file().set_permissions(metadata.permissions())?;
     let _ = path;
+    Ok(())
+}
+
+/// Refuse EFS replacement until the complete native encryption policy is preserved.
+#[cfg(windows)]
+fn require_windows_unencrypted(file: &fs::File, path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_ENCRYPTED != 0 {
+        return Err(refusal(
+            path,
+            "EFS-encrypted output cannot be replaced without preserving encryption policy",
+        ));
+    }
     Ok(())
 }
 
