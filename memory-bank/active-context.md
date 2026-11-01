@@ -1,5 +1,38 @@
 # Active context
 
+## Current executable-fixture publication correction
+
+PUBLIC4f86018; local0b6774080a8063f949376557d5c2d0f51b7ee7c2 NOTPUBLISHED.
+Normalpush83574terminalFAIL549.79s: e2e_navigation relocatedruntimeinit ETXTBSY26;
+proof16088terminalassertfail beforefreeze. Failedprefixwindows-native-policy retained.
+No livelease. Isolatedsameallfeaturesmap49456PASS1.46s beforefix, confirmingtransient.
+KnownRust114554 fork/CLOEXEC inheritedwritableFD mechanism; upstreamprimary body
+/tmp/projectatlas-741-executable-copy-upstream.json. ExistingDeliveryhelper already
+fixedit viachild/bin/cp; Navigation+bootstraprawcopycallers missedsharedcorrection.
+
+CurrentDIRTYfix sharescopyimplementation inexistingtests/support/mod.rs withsupplied
+boundedrunner. Deliverytinywrapper retainsownedobserver; Navigation+installer use
+assert_cmdfrom_std.timeout30; WindowssamefsCopy, independentinode/mode/errorbehavior.
+No sleep/retry/hardlink/productchange. Bothnewcallersandremainingrawcopies reviewed;
+Windows-onlymirrors/data/archives nottreatedasUniximmediateexec. POSIXruntimearchive
+is extractedtoanotherinode; copiedhooksrunthroughinterpreter. Luna741finalapproval
+fornormalpublication. Tests39407: copyparallel0.50s/map1.54s/bootstrap6 3.04s PASS.
+Final60460CLIalltargets/allfeaturesClippyPASS, initiallyinventorycaughtsupportdigest;
+updatedallowningpins then69892inventory3/strictstrings/Mac22/OpenSpec/IssueOps1of5PASS.
+Deliverybothpins cdf0fb4f7cd8425a05fdcd49588e8ca25601261c467350a1c71e80a61e7a31d8;
+Navigationboth1bcff38597c693777248e88673648624f8003766944c214eda835b0cbdb7d98e;
+sharedsupport2fa4b160266cd041d808e8709f70c3ffe9e9052cd7275fd2986dadb41df3258e
+embeddedDeliveryconstant. Lifecycle96f09 unchanged. Allolder0bsecurity/macchanges
+remainreviewedbutUNPUBLISHED; stagecapabilitystillunfixed/SDKexperimentonly.
+
+4fCodeQLreconciliationcompleted /tmp/projectatlas-741-4f-codeql-reconciliation.json:
+23oldRust source-spans/flows EXACTsame, new399staticSDKoutparamfalsepositive pending
+nativeproof; twoActionscachecasesreviewed731 no newtrustissue, untrustedcheckout
+unchanged. No suppression/dismissal. EFStechnicalreply4434172754 andpointer4434173285
+bothRESTreadback; boththreadsOPEN. 9open total. Nextcleancommit/normalpush NEWprefix
+(e.g.native-access-verification), freshunique binding MUSTunionallchangedpaths with
+prior138inputs+newcleanupscript ratherthanassumecount, thenactualCLI/MCP/5upgrades.
+
 ## Goal and serial owner
 
 Continue until v0.5.1-rc1 is a non-draft prerelease, Latest=false, independently

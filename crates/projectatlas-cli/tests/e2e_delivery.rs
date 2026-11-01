@@ -573,7 +573,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "80e380a4a77b88454bc8d9ccb784e347061350c98e2c05b3cd9b51a856c2b71b";
+    "2fa4b160266cd041d808e8709f70c3ffe9e9052cd7275fd2986dadb41df3258e";
 const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
@@ -36681,38 +36681,9 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     Ok(())
 }
 
-/// Publish a separate executable without a writable descriptor in the test parent.
+/// Copy with the shared lifecycle while retaining the installer-owned observer.
 fn copy_executable_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
-    #[cfg(unix)]
-    {
-        let metadata = fs::metadata(source)?;
-        if !metadata.is_file() || destination.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "executable fixture copy requires file paths",
-            )
-            .into());
-        }
-        // A concurrent fork can inherit a parent's writable executable descriptor
-        // even when fs::copy closes it before the subsequent exec (Rust #114554).
-        // Waiting for native cp keeps that writable descriptor in its child only.
-        let mut command = StdCommand::new("/bin/cp");
-        command.arg("--").arg(source).arg(destination);
-        let output = run_bounded_output(command, "executable fixture copy")?;
-        if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "executable fixture copy failed with status {}\nstdout:\n{}\nstderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .into());
-        }
-        fs::set_permissions(destination, metadata.permissions())?;
-    }
-    #[cfg(not(unix))]
-    fs::copy(source, destination)?;
-    Ok(())
+    support::copy_executable_fixture(source, destination, run_bounded_output)
 }
 
 #[test]

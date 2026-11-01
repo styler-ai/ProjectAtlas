@@ -5175,7 +5175,16 @@ fn map_response_preserves_legacy_file_and_separates_format_from_json_sidecar()
     let relocated_bin = temp.path().join("relocated").join("bin");
     fs::create_dir_all(&relocated_bin)?;
     let executable = relocated_bin.join(format!("projectatlas{}", std::env::consts::EXE_SUFFIX));
-    fs::copy(mcp_contract_executable(), &executable)?;
+    support::copy_executable_fixture(
+        &mcp_contract_executable(),
+        &executable,
+        |command, _label| {
+            assert_cmd::Command::from_std(command)
+                .timeout(Duration::from_secs(30))
+                .output()
+                .map_err(Into::into)
+        },
+    )?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join(SRC_DIR_NAME))?;
