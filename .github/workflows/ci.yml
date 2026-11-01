@@ -1275,6 +1275,16 @@ jobs:
                   }
                 }
               }
+              foreach ($sensitive in @($false, $true)) {
+                $path = Join-Path $directory ('native-case-' + $sensitive)
+                try {
+                  $value = [SystemPolicyFixture]::CaseBehaviorControl($path, $sensitive)
+                  $results += @{ case='windows-case-behavior'; root=$root.name; sensitive=$sensitive; value=$value }
+                } catch {
+                  $results += @{ case='windows-case-behavior'; root=$root.name; sensitive=$sensitive; error=$_.Exception.ToString() }
+                }
+                $results[-1] | ConvertTo-Json -Depth 4 -Compress
+              }
               foreach ($systemAccess in @($false, $true)) {
                 [SystemPolicyFixture]::Enable($systemAccess)
                 $policies = if ($systemAccess) {

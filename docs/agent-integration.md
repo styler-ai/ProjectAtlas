@@ -172,6 +172,10 @@ supported. ProjectAtlas does not decrypt files or recreate their encryption keys
 Ordinary Windows outputs with no system ACL remain replaceable without additional
 privilege. Replacing explicitly labeled or audited files requires full policy
 access already available to the caller; otherwise it leaves valid output intact.
+The complete retained query includes resource attributes and scoped-policy entries;
+serialization and assignment select those classes explicitly. A codec that omits
+native entries is refused before staging. The Windows binaries use the Rust
+target's Windows 10 / Server 2016 or newer baseline.
 ProjectAtlas does not enable privileges globally. Defaulted system ACLs whose
 control state cannot be reproduced are refused as unsupported.
 New outputs retain ordinary parent inheritance. The destination and staging file

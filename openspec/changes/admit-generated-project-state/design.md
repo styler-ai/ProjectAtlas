@@ -260,6 +260,32 @@ UnicodeData.txt `93ab1acd8fd9d450463b50ae77eab151a7cda48f98b25b56baed8070f80fc93
 Canonical crates in the locked graph use other Unicode versions, so this tiny
 fixed-ASCII projection is a reviewed exception, not a replacement Unicode library.
 
+### Respect Windows directory-local naming
+
+An unconditional ASCII fold over-classifies `CONFIG.TOML` in a case-sensitive
+private directory and can redirect its complete selected content into the distinct
+lowercase managed config. Repair the shared fixed-component classifier for database,
+sidecar, document and private-directory roles. Exact spelling retains its no-query
+fast path. For aliases, query the physical containing directory through a
+read-attributes, non-following directory handle using the SDK
+`GetFileInformationByHandleEx(FileCaseSensitiveInfo)` and its directory flag.
+Propagate unsupported/error state as ownership uncertainty rather than assuming
+insensitivity. Preserve unrelated custom/external selections.
+
+Resolve original existing prefixes and parent reductions before selecting the
+deepest existing directory for a missing parent. Native Win32-created child
+directories inherit this flag; the documented WSL 1 creation exception is outside
+this native writer. Prove actual native inheritance and both modes on one NTFS
+volume, including missing private directories and reductions. Compare normal
+ASCII case variants, relevant Unicode spellings and reported short-name aliases
+against real filesystem lookup before claiming those surfaces. A same-inode
+hardlink is not a naming-rule oracle; distinct custom names remain distinct.
+Owning controls cover the fixed DB/document registry, private-directory aliases,
+query failures and absence. Real CLI/MCP ignore/map operations must preserve the
+distinct lowercase file when a sensitive-directory uppercase custom file is
+explicitly selected. No per-volume assumption, general resolver or global case
+setting is introduced.
+
 ### Preserve native access controls during replacement
 
 The shared publication boundary replaces a file object rather than truncating it.
@@ -355,8 +381,13 @@ Try a no-follow retained source handle with ACCESS_SYSTEM_SECURITY; fall back to
 the existing READ_CONTROL handle only for native access/privilege denial. Never
 enable privileges process-wide or require them for ordinary no-SACL regeneration.
 
-With full access, capture SACL plus LABEL through that handle, preserving opaque
-ordered ACEs and native SACL control state. Without it, use a LABEL-only query's
+With full access, use the canonical wrapper's BACKUP query through that retained
+handle to capture the complete native descriptor, preserving opaque ordered SACL
+entries and control state. BACKUP requires READ_CONTROL and ACCESS_SYSTEM_SECURITY,
+which this handle already owns; it introduces no privilege toggle or additional
+query right. It is available within the shipped Rust Windows target baseline
+(Windows 10 / Server 2016 or newer). It is not a setter or SDDL conversion flag.
+Without full access, use a LABEL-only query's
 native control word to prove the original SACL is absent. MS-FSA 2.1.5.14 preserves
 the original SACL-present/control bits while filtering audit ACEs from that query:
 an empty filtered ACE list is not proof that a present SACL contains no auditing.
@@ -376,7 +407,7 @@ accessor, and verify ordered entries and control state before payload writes.
 Retain strict SACL AI comparison until native evidence proves a safe normalization;
 the earlier DACL normalization does not establish SACL behavior. Recheck source
 system policy alongside owner/group/DACL immediately before replacement.
-Serialize the same selected policy components that were queried. In particular,
+Serialize and assign system policy with SACL, LABEL, ATTRIBUTE and SCOPE. In particular,
 SACL-only serialization omits mandatory-label ACEs even when the descriptor holds
 them; complete comparison requires SACL plus LABEL. Native controls must distinguish
 identical audit/control policy with high versus medium integrity labels, repair a
@@ -388,8 +419,30 @@ of the comparison image, then use the fallible canonical ACL-size wrapper; add n
 parser, unsafe layout access or speculative security-info flags.
 This is an omission guard, not proof of byte/semantic fidelity for in-place codec
 changes. Native mixed and sole-label controls must reject deliberately SACL-only and
-NULL-marker images without panicking, and accept SACL plus LABEL. Resource-attribute/scope conversion remains a native
-proof question; raw NTFS query with both SACL and LABEL copies the entire SACL.
+NULL-marker images without panicking, and accept complete supported policy.
+The SDK experiment disproves the assumption that the MS-FSA raw SACL copy implies
+an unfiltered Win32 result: an independently installed RA-only or SP-only ACL is
+present in the full query but omitted by the SACL|LABEL query. Test the actual
+retained GetSecurityInfo route as well as the independent named oracle. BACKUP
+captures other native classes too; if the selected canonical serializer omits
+entries, the existing count guard refuses before staging rather than publishing
+partial policy. Do not add a BACKUP setter, require unused ownership rights, or
+hand-parse native ACEs in production.
+
+Native RA-only, SP-only and mixed audit/label/RA/SP controls must prove the former
+retained query omits policy, then compare the complete source, held stage and
+published native ACL bytes/order/control and preserve the outside hardlink. Initial
+fixture SET may canonicalize cross-class order: verify each exact requested ACE
+payload and SID independently, then retain exact ordered before/after comparisons
+from the actual installed source. The synthetic scoped-policy SID proves opaque
+preservation, not domain CAP enforcement. Preserve ordinary absent-policy positives
+and unprivileged refusal. The shared fixture must compile on both Windows
+PowerShell/.NET Framework and PowerShell 7; use their common runtime APIs.
+Run expanded owning fixtures from an owned UTF-8-with-BOM temporary script, held
+until the child completes, rather than an oversized `-Command` argument. Share
+that transport across full-fixture and declaration-only consumers; keep its
+execution-policy setting scoped to the fixture process and prove large Unicode
+script execution without changing product shell or privilege behavior.
 
 The unprotected present-NULL SACL case needs a non-NULL zero-entry input to the
 native setter: NTFS normalizes that input to the original unprotected NULL state,

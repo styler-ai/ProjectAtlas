@@ -1,3 +1,89 @@
+## Current complete-policy capture and fixture correction
+
+PUBLIC/local91b6d5b0a4f0aa6cc228ceb06cfeafbefbc27422, currentDIRTYreviewednextcandidate.
+NOlivelease. Actual91b6SDK160:84completepubpositives/28precreationrefusals/48extended
+errors. RA-only/SP-onlyfull0x78queryfirstprovesrequestednativeclasses+payloads, then
+SACL|LABELquerydiffers. MixedinitialSETcanonicalizescross-classorder (fixture issue).
+/tmp/projectatlas-741-91b6-windows-security-matrix.json and-native-policy-validation.json.
+Do NOTcallretained0x18omissionprovedyet: nextactualretainedcounterfactualmustshowit.
+
+Primarycurrentfix: SystemPolicy completeGetSecurityInfo BACKUP (queryONLY), separate
+SACL|LABEL|ATTRIBUTE|SCOPE (0x78) serializer/heldsetter, unchangedpartialLABELabsence
+gate/strictcontrols/ACEcountomissionguard. ExistingRC+ASysrights suffice; no privileged
+toggle/Backupsetter/newdependency. Rust1.98shippedWindowsMSVCbaselineWin10/Server2016+
+supportsBackup; canonicalRustplatformdocsverified. Unknowncodecclassomissionrefuses
+beforestage. NewnativeRA/SP/mixedfirsthostcases includeactualheldBackupquery,
+formerheld0x18counterfactual, fullopaqueACLstage/output/outside andunprivrefusal;
+ordinaryall6registryrolesremain. Native proofPENDING. Luna741sourceapprovedforpub.
+
+91b6Windows124744947512terminalFAIL33pass6fail1ignored: failuresCreateProcess206,
+sharedC#fixturegrewbeyondWindows32kargvlimit beforeexecution. NEWretainedrename,
+readonlystageandreadonlydestinationnativecontrolsallPASS (2260/2264/2266 in
+/tmp/projectatlas-741-91b6-windows-job.log). FinalstageT5Glresolvedwithindependentreview,
+reply4434375122+REST/toolreadback. Repo124744947470PASS22causalcleanupcontrols;
+cleanupW7Pfresolvedreply4434386616+REST/toolreadback.
+
+Fixturetransportfix: all4directfullfixture+3declarationconsumers useoneownedUTF8BOM
+.ps1 and-File, process-scopedExecutionPolicyBypass preservingformer-Commandbehavior.
+ClosewritablesetupFD viainto_temp_path BEFOREchildread; retainTempPathguarduntil
+outputcompletion (avoidWinreadersharingdenial). >32kUnicodeexecutionregression.
+UseBitConverter hexinstead.NET5Convert.ToHexString soWindowsPowerShell.NET4.8and
+pwsh7bothcompile. Thislattercompatproblemwasstaticlead, 206maskedit; notnatively
+provedyet. GNUwholeowner/testsClippyPASS; LinuxCLIalltargetsClippyPASSbeforelast
+cfgWindows-onlyteststrings; strictstrings/Mac22/YAML17Bash/OpenSpec/IssueOps1of5PASS.
+Luna741approvedcapture+transport; latestFDcloseisroutineRAIIcorrection, pendingreadback.
+
+NEWbotXLkEconfirmedsharedWindowscaseoverclassification: namedASCII-foldsover
+sensitiveNTFSdir andcanredirectUppercustomTOMLintoLowerprotectedmanagedfile.
+Primary+Luna731reviewedboundaryallDB/docs/privatecomponents. Acceptedproposal/design/
+spec/liveissueWhatChangesexpanded+readback; task2.1stillOPEN. ProducerfixNOTimplemented.
+Exactnamesfastpath; aliasqueryactualcontainingdirFileCaseSensitiveInfo23/flag1,
+physicalmissingprefixandnativechildinheritance; queryerror=>uncertainnotblindfold.
+SDKONLYCaseBehaviorControl+4workflowrows nowinthiscandidate: bothroots/modes,actual
+childflag,ASCII/dotlessi/longs/fi/short-longspellinglookups. Optionalshortqueryerrors
+recorded. ChildinheritanceloggedNOTasserted; File.Existsfalsealonecanhideerrors.
+Luna731approvedprobeONLY. InspectrawnativeoutcomesBEFOREdecidingUnicode/8dot3or
+missingparentsemantics; confirmedanalogousbugsMUSTstay741/RC1, no silentdeferral.
+FiveopenafterT5Gl/W7Pfclosures: overallACL,broadSACL,initialstage,EFS,newWinCaseXLkE.
+Latestthreadfile /tmp/projectatlas-741-91b6-current-review-threads.json was6before
+cleanupclosure. InitialWindowsstagecapabilitySTILLUNFIXED, no sourceSDconstructoradopted.
+
+NEXTcommitthiscoherentcapture/transport+nativecaseprobe, cleanNORMALpushNEWprefix
+complete-system-policy viaexistingcontroller, freshunique144+deriveinput binding
+inheritretained-stage, thenactualCLI/MCP/registered/5upgrades. No edits/competing
+build/index/benchmarkduringpushANDimmutableproof. Only741/noRC/noDBreset.
+Current91b6SOURCE41271375752 repo/Rust/SDK/Linux/MacARMPASS, Intelstillactiveatlastread,
+WindowsFAIL206. NativecaseprobeandBackupretainedproofneedNEWhead. Previouscheckpoint
+belowhistorical; preserveactualreceipts/parkedbranches.
+
+## Current terminal publication and review checkpoint
+
+Public/local91b6d5b0a4f0aa6cc228ceb06cfeafbefbc27422. Normalpush57498/PID2688941
+terminalPASS784.08s,34reported suites1731pass12ignored. Immutablewaiter22039 PASS:
+144bound inputs, binary068e5d09046f49c40b1c30e67dea64ddef94c41a6d8cf1e363087e93bcb1ed3a,
+unique /tmp/projectatlas-741-retained-stage-debug-path.txt; actualCLI/MCPadmission9.59s,
+writers5.23s,registered9.28s,five050upgrades7.28s PASS. Allboundbytes/config/identity/
+approvedpurposes/binary unchanged. -native-proof.json and-active-session.jsoncompleted.
+NOexecutionlease. Currentselectedmemoryeditonly; nextsource changesneednewfreeze.
+
+SOURCE41271375752 queued/pending91b6, prstate41271373648, PRworkflow41271372353.
+PreviousfefdLinux124737222207 andMacARM124737222178 wholejobPASS; MacIntel124737222167
+autosuperseded/cancelled afterallfeatureswarninggatepassed/duringAtlasforwarder.
+FetchterminalIntellog forscopedfourvolumeevidence; do notclaimwholeIntelsuccess.
+SixreviewthreadsOPEN afterindependentlyverifiedresolutions: MIC TfKy, old399WhYd,
+new401/402/403W-Gj/W-Gm/W-Go andLinuxCFVV8m/verityVkGm nowresolvedwithtechnical
+replies+REST/toolreadback. Latest /tmp/projectatlas-741-retained-stage-review-threads.json
+pre-Linuxreadbackhad8; actualsixremainingoverallACL,broadSACL,finalstage,initialstage,
+EFS,cleanup. Newcurrentpubfixesfinalstage/cleanupbutneednativeproof.
+FullfefdSARIF4f->fefd reconciliation+sevennew/changeddispositions reviewed731;
+23oldRustexact, new/reappearinginstallerrowexistingalert344, Actionsnew400. Noalert
+suppression/dismissal. PRbodyrewritten/readbackatfefd, updatefor91b6nativefactsnext.
+
+NEXT readactual91b6SDKsource-descriptor/extendedRA-SP outcomes BEFOREdesigningmore;
+initialstageproductioncapability STILLUNFIXED. BroadSACLstillnativeproofquestion.
+Only741 untilnormalmerge+BOTHCLOSED; noRC/noDBreset. Belowprepublicationdetails
+remainvalidexceptpublichead/lease/proof/threadstate explicitlysupersededhere.
+
 # Active context
 
 ## Goal and serial owner

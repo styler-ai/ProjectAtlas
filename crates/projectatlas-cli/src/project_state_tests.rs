@@ -2595,6 +2595,52 @@ fn windows_fixture_script(script: &str) -> io::Result<String> {
     Ok(format!("{declarations}\n{script}"))
 }
 
+/// Retain an owned UTF-8 script through child completion without command-line limits.
+#[cfg(windows)]
+fn windows_powershell_fixture(
+    script: &str,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> io::Result<std::process::Output> {
+    use std::io::Write;
+    let mut file = tempfile::Builder::new().suffix(".ps1").tempfile()?;
+    // Windows PowerShell needs the BOM to distinguish UTF-8 from its ANSI default.
+    file.write_all(b"\xef\xbb\xbf")?;
+    file.write_all(script.as_bytes())?;
+    file.flush()?;
+    // The script reader may share READ only. Close the writable setup handle
+    // before it opens the file; retain the owned path guard through completion.
+    let path = file.into_temp_path();
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            // -Command did not apply script execution policy. Scope this
+            // compatibility setting only to our owned test-script process.
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&path);
+    configure(&mut command);
+    command.output()
+}
+
+/// Large Unicode fixtures execute from an owned file rather than an oversized argv.
+#[cfg(windows)]
+#[test]
+fn native_policy_script_uses_file_transport_beyond_command_line_limits() -> io::Result<()> {
+    let script = format!(
+        "#{}\nif ('λ' -ne [string][char]0x3bb) {{ throw 'UTF-8 fixture changed' }}\n[Console]::Write('fixture passed')",
+        "padding".repeat(5_000),
+    );
+    let output = windows_powershell_fixture(&script, |_| {})?;
+    require(
+        output.status.success() && output.stdout == b"fixture passed",
+        &format!("file-backed native fixture failed: {output:?}"),
+    )
+}
+
 /// Prepare a native Windows ACL independently of the Rust publication adapter.
 #[cfg(windows)]
 fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
@@ -2620,10 +2666,9 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
     } else {
         script
     };
-    let result = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("PROJECTATLAS_TEST_ACL_PATH", path)
-        .output()?;
+    let result = windows_powershell_fixture(&script, |command| {
+        command.env("PROJECTATLAS_TEST_ACL_PATH", path);
+    })?;
     require(
         result.status.success(),
         &format!("native ACL query failed: {result:?}"),
@@ -2778,6 +2823,63 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetSecurityDescriptorControl(IntPtr descriptor, ushort interest, ushort value);
   [StructLayout(LayoutKind.Sequential)] struct FileDisposition { public byte Delete; }
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(IntPtr file, uint kind, ref FileDisposition information, uint size);
+  [DllImport("kernel32.dll", EntryPoint="GetFileInformationByHandleEx", SetLastError=true)] static extern bool GetCaseInformation(IntPtr file, uint kind, out uint information, uint size);
+  [DllImport("kernel32.dll", EntryPoint="SetFileInformationByHandle", SetLastError=true)] static extern bool SetCaseInformation(IntPtr file, uint kind, ref uint information, uint size);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetShortPathName(string path, System.Text.StringBuilder output, uint size);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetLongPathName(string path, System.Text.StringBuilder output, uint size);
+  static uint DirectoryCaseFlags(string path, uint? replacement) {
+    SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+    IntPtr file=CreateFile(path,replacement.HasValue ? 0x180u : 0x80u,7,ref security,3,0x02200000,IntPtr.Zero);
+    if (file == new IntPtr(-1)) throw new Win32Exception();
+    try {
+      uint flags;
+      if (replacement.HasValue) {
+        flags=replacement.Value;
+        if (!SetCaseInformation(file,23,ref flags,4)) throw new Win32Exception();
+      }
+      if (!GetCaseInformation(file,23,out flags,4)) throw new Win32Exception();
+      return flags;
+    } finally { CloseHandle(file); }
+  }
+  static string ExpandedName(string path, bool shortName) {
+    uint length=shortName ? GetShortPathName(path,null,0) : GetLongPathName(path,null,0);
+    if (length == 0) throw new Win32Exception();
+    var output=new System.Text.StringBuilder(checked((int)length+1));
+    uint result=shortName ? GetShortPathName(path,output,(uint)output.Capacity) : GetLongPathName(path,output,(uint)output.Capacity);
+    if (result == 0 || result >= output.Capacity) throw new Win32Exception();
+    return output.ToString();
+  }
+  public static string CaseBehaviorControl(string root, bool sensitive) {
+    System.IO.Directory.CreateDirectory(root);
+    var rows=new System.Collections.Generic.List<string>();
+    try {
+      uint flags=DirectoryCaseFlags(root,sensitive ? 1u : 0u);
+      if ((flags & 1) != (sensitive ? 1u : 0u)) throw new Exception("Native case flag did not retain requested state");
+      string child=System.IO.Path.Combine(root,"child");System.IO.Directory.CreateDirectory(child);
+      rows.Add("parent="+flags+";child="+DirectoryCaseFlags(child,null));
+      foreach (string expected in new string[] { "config.toml", "projectatlas.db", "projectatlas.toml", "projectatlas.json", ".gitignore", ".projectatlas" }) {
+        bool directory=expected == ".projectatlas";
+        string original=System.IO.Path.Combine(root,expected);
+        if (directory) System.IO.Directory.CreateDirectory(original); else System.IO.File.WriteAllText(original,"native alias fixture");
+        var variants=new System.Collections.Generic.List<string> { expected.ToUpperInvariant(), expected.Replace("i","\u0131"), expected.Replace("s","\u017f") };
+        try {
+          string shortName=System.IO.Path.GetFileName(ExpandedName(original,true));
+          rows.Add("short|"+expected+"|"+shortName+"|"+(shortName != expected));
+          variants.Add(shortName);
+        } catch (Win32Exception error) {
+          rows.Add("short-query-error|"+expected+"|"+error.NativeErrorCode);
+        }
+        if (expected == "config.toml") variants.Add("con\ufb01g.toml");
+        foreach (string variant in variants) {
+          if (variant == expected) continue;
+          string candidate=System.IO.Path.Combine(root,variant);
+          bool exists=directory ? System.IO.Directory.Exists(candidate) : System.IO.File.Exists(candidate);
+          rows.Add(expected+"|"+variant+"|"+exists+"|"+(exists ? System.IO.Path.GetFileName(ExpandedName(candidate,false)) : "absent"));
+        }
+      }
+      return String.Join("\n",rows);
+    } finally { System.IO.Directory.Delete(root,true); }
+  }
   static string DescriptorImage(IntPtr descriptor, uint information, bool ignoreProtection, bool ignoreSystemInheritance=false) {
     ushort control; uint revision,length; IntPtr text=IntPtr.Zero;
     if (!GetSecurityDescriptorControl(descriptor,out control,out revision)) throw new Win32Exception();
@@ -2822,6 +2924,19 @@ public static class SystemPolicyFixture {
     if (result != 0) throw new Win32Exception((int)result);
     return descriptor;
   }
+  static IntPtr FileDescriptor(string path, uint information) {
+    SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+    uint access=0x20080u | ((information & 0x10008u) != 0 ? 0x01000000u : 0u);
+    IntPtr file=CreateFile(path,access,7,ref security,3,0x00200080,IntPtr.Zero);
+    if (file == new IntPtr(-1)) throw new Win32Exception();
+    try { return HeldDescriptor(file,information); }
+    finally { CloseHandle(file); }
+  }
+  public static string NativePolicy(string path, uint information) {
+    IntPtr descriptor=FileDescriptor(path,information);
+    try { return NativeSystemImage(descriptor); }
+    finally { LocalFree(descriptor); }
+  }
   // Independent fixture oracle: compare the native opaque ACL bytes, including
   // resource-attribute payloads and scoped-policy SIDs, without an ACE parser.
   static string NativeSystemImage(IntPtr descriptor, bool ignoreAutoInherited=false) {
@@ -2834,7 +2949,8 @@ public static class SystemPolicyFixture {
       if (!GetAclInformation(acl,out size,(uint)Marshal.SizeOf(typeof(AclSize)),2)) throw new Win32Exception();
       byte[] bytes=new byte[checked((int)size.Used)];
       Marshal.Copy(acl,bytes,0,bytes.Length);
-      image+="|"+Convert.ToHexString(bytes);
+      // Both PowerShell 7 and Windows PowerShell/.NET Framework run this fixture.
+      image+="|"+BitConverter.ToString(bytes).Replace("-","");
     }
     uint mask=ignoreAutoInherited ? 0x2230u : 0x2a30u;
     return (control & mask).ToString("x")+"|"+image;
@@ -2854,24 +2970,48 @@ public static class SystemPolicyFixture {
     }
     throw new Exception("Extended fixture did not install requested native ACE type="+required);
   }
+  [StructLayout(LayoutKind.Sequential)] struct AceHeader { public byte Type, Flags; public ushort Size; }
+  static string NativeAceContents(IntPtr descriptor) {
+    bool present,defaulted; IntPtr acl;
+    if (!GetSecurityDescriptorSacl(descriptor,out present,out acl,out defaulted)) throw new Win32Exception();
+    if (!present || acl == IntPtr.Zero) return "";
+    AclSize size;
+    if (!GetAclInformation(acl,out size,(uint)Marshal.SizeOf(typeof(AclSize)),2)) throw new Win32Exception();
+    var entries=new System.Collections.Generic.List<string>();
+    for (uint index=0; index<size.Count; index++) {
+      IntPtr ace;
+      if (!GetAce(acl,index,out ace)) throw new Win32Exception();
+      AceHeader header=(AceHeader)Marshal.PtrToStructure(ace,typeof(AceHeader));
+      if (header.Size < Marshal.SizeOf(typeof(AceHeader)) || header.Size > size.Used) throw new Exception("Invalid native fixture ACE size");
+      byte[] bytes=new byte[header.Size];Marshal.Copy(ace,bytes,0,bytes.Length);
+      entries.Add(BitConverter.ToString(bytes));
+    }
+    // This comparison is only for initial fixture SET, which can canonicalize
+    // cross-class order. Every later before/after image retains exact order.
+    entries.Sort(StringComparer.Ordinal);return String.Join("|",entries);
+  }
   static void VerifyExtendedPolicy(IntPtr descriptor, string path, uint information, string requested) {
-    IntPtr complete=IntPtr.Zero,text=IntPtr.Zero,decoded=IntPtr.Zero,reference=IntPtr.Zero; uint length;
+    IntPtr complete=IntPtr.Zero,text=IntPtr.Zero,decoded=IntPtr.Zero,reference=IntPtr.Zero,filtered=IntPtr.Zero; uint length;
     try {
       complete=NamedDescriptor(path,0x78u);
       if (requested.Contains("(RA;")) RequireNativeAceClass(complete,0x12);
       if (requested.Contains("(SP;")) RequireNativeAceClass(complete,0x13);
       if (!ConvertStringSecurityDescriptorToSecurityDescriptor(requested,1,out reference,out length)) throw new Win32Exception();
-      // Creation may set AI. Every other control and the exact native ACE
-      // bytes/order must match the independent requested-policy descriptor.
-      if (NativeSystemImage(reference,true) != NativeSystemImage(complete,true)) throw new Exception("Extended fixture native policy differs from requested payload");
+      // Initial native SET may canonicalize order and set AI. Require each
+      // exact requested ACE payload/SID, presence and other control first.
+      string[] proposed=NativeSystemImage(reference,true).Split('|'), actual=NativeSystemImage(complete,true).Split('|');
+      if (proposed[0] != actual[0] || proposed[1] != actual[1] || NativeAceContents(reference) != NativeAceContents(complete)) throw new Exception("Extended fixture native policy differs from requested payload");
       string expected=NativeSystemImage(complete);
-      if (NativeSystemImage(descriptor) != expected) throw new Exception("Combined SACL/LABEL query omitted native extended policy");
+      filtered=FileDescriptor(path,0x18u);
+      if (NativeSystemImage(filtered) == expected) throw new Exception("Former retained SACL/LABEL query did not reproduce extended policy omission");
+      if (NativeSystemImage(descriptor) != expected) throw new Exception("Complete retained query omitted native extended policy");
       if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor,1,information,out text,out length)) throw new Win32Exception();
       if (!ConvertStringSecurityDescriptorToSecurityDescriptor(Marshal.PtrToStringUni(text),1,out decoded,out length)) throw new Win32Exception();
       if (NativeSystemImage(decoded) != expected) throw new Exception("Native extended policy changed through SDDL codec");
     } finally {
       if (decoded != IntPtr.Zero) LocalFree(decoded);
       if (reference != IntPtr.Zero) LocalFree(reference);
+      if (filtered != IntPtr.Zero) LocalFree(filtered);
       if (text != IntPtr.Zero) LocalFree(text);
       if (complete != IntPtr.Zero) LocalFree(complete);
     }
@@ -2890,8 +3030,8 @@ public static class SystemPolicyFixture {
       DiscretionaryPolicy(source,protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)");
       if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
-      uint information=7u | (systemAccess ? 24u : 16u);
-      sourceDescriptor=NamedDescriptor(destination,information);
+      uint information=7u | (systemAccess ? 0x78u : 16u);
+      sourceDescriptor=FileDescriptor(destination,systemAccess ? 0x10000u : information);
       bool extended=systemPolicy.Contains("(RA;") || systemPolicy.Contains("(SP;");
       if (extended) {
         phase="verify native extended-policy query and codec";
@@ -2948,7 +3088,7 @@ public static class SystemPolicyFixture {
             acl=empty;
           }
           phase="restore exact system inheritance through original handle";
-          uint result=SetSecurityInfo(raw,1,24u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+          uint result=SetSecurityInfo(raw,1,0x78u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
           if (result != 0) throw new Win32Exception((int)result);
         } finally { if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty); }
       }
@@ -3119,6 +3259,9 @@ $mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE
 if ($mode -eq 'query') {
   [SystemPolicyFixture]::Enable($true)
   [SystemPolicyFixture]::Policy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_SYSTEM_POLICY,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
+} elseif ($mode -eq 'native-query') {
+  [SystemPolicyFixture]::Enable($true)
+  [SystemPolicyFixture]::NativePolicy($env:PROJECTATLAS_TEST_ACL_PATH,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
 } elseif ($mode -eq 'creator') {
   [SystemPolicyFixture]::Enable($false)
   [SystemPolicyFixture]::CreatorControl($env:PROJECTATLAS_TEST_ACL_PATH,$false,$false)
@@ -3142,19 +3285,14 @@ fn windows_restrictive_creation_does_not_grant_unavailable_policy_rights() -> io
     let temp = tempfile::tempdir()?;
     let sentinel = temp.path().join("outside-fixture-owner");
     fs::write(&sentinel, b"unchanged fixture owner")?;
-    let result = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            WINDOWS_SYSTEM_POLICY_FIXTURE,
-        ])
-        .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", "creator")
-        .env(
-            "PROJECTATLAS_TEST_ACL_PATH",
-            temp.path().join("private-creation-control"),
-        )
-        .output()?;
+    let result = windows_powershell_fixture(WINDOWS_SYSTEM_POLICY_FIXTURE, |command| {
+        command
+            .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", "creator")
+            .env(
+                "PROJECTATLAS_TEST_ACL_PATH",
+                temp.path().join("private-creation-control"),
+            );
+    })?;
     let stdout = String::from_utf8(result.stdout).map_err(io::Error::other)?;
     let stderr = String::from_utf8(result.stderr).map_err(io::Error::other)?;
     let mask = stdout
@@ -3191,20 +3329,13 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
     ) {
         // A hidden-SACL refusal must not mask the encrypted-file path for
         // callers whose full policy rights are already available.
+        let executable = std::env::current_exe()?;
         for mode in ["efs-complete", "efs-unprivileged"] {
-            let child = std::process::Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    WINDOWS_SYSTEM_POLICY_FIXTURE,
-                ])
-                .env(MODE, mode)
-                .env(
-                    "PROJECTATLAS_TEST_SYSTEM_POLICY_EXE",
-                    std::env::current_exe()?,
-                )
-                .output()?;
+            let child = windows_powershell_fixture(WINDOWS_SYSTEM_POLICY_FIXTURE, |command| {
+                command
+                    .env(MODE, mode)
+                    .env("PROJECTATLAS_TEST_SYSTEM_POLICY_EXE", &executable);
+            })?;
             require(
                 child.status.success(),
                 &format!("native EFS {mode} control failed: {child:?}"),
@@ -3480,7 +3611,7 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
 /// Independently query or prepare SACL policy through native named SDK calls.
 #[cfg(windows)]
 fn windows_system_policy(path: &Path, policy: Option<&str>) -> io::Result<String> {
-    windows_system_policy_query(path, policy, 0x18)
+    windows_system_policy_query(path, policy, 0x78)
 }
 
 /// Compare full versus filtered native queries without sharing the product adapter.
@@ -3490,21 +3621,36 @@ fn windows_system_policy_query(
     policy: Option<&str>,
     information: u32,
 ) -> io::Result<String> {
-    let result = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            WINDOWS_SYSTEM_POLICY_FIXTURE,
-        ])
-        .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", "query")
-        .env(
-            "PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY",
-            information.to_string(),
-        )
-        .env("PROJECTATLAS_TEST_ACL_PATH", path)
-        .env("PROJECTATLAS_TEST_SYSTEM_POLICY", policy.unwrap_or(""))
-        .output()?;
+    windows_policy_fixture(path, policy, information, false)
+}
+
+/// Independently retain and compare the complete native opaque system ACL.
+#[cfg(windows)]
+fn windows_native_system_policy(path: &Path, information: u32) -> io::Result<String> {
+    windows_policy_fixture(path, None, information, true)
+}
+
+/// Run the shared native fixture with an explicit query class and output oracle.
+#[cfg(windows)]
+fn windows_policy_fixture(
+    path: &Path,
+    policy: Option<&str>,
+    information: u32,
+    native: bool,
+) -> io::Result<String> {
+    let result = windows_powershell_fixture(WINDOWS_SYSTEM_POLICY_FIXTURE, |command| {
+        command
+            .env(
+                "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE",
+                if native { "native-query" } else { "query" },
+            )
+            .env(
+                "PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY",
+                information.to_string(),
+            )
+            .env("PROJECTATLAS_TEST_ACL_PATH", path)
+            .env("PROJECTATLAS_TEST_SYSTEM_POLICY", policy.unwrap_or(""));
+    })?;
     require(
         result.status.success(),
         &format!("native SACL fixture failed: {result:?}"),
@@ -3523,20 +3669,13 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
     const MODE: &str = "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE";
     let mode = std::env::var(MODE).ok();
     if !matches!(mode.as_deref(), Some("complete" | "unprivileged")) {
+        let executable = std::env::current_exe()?;
         for mode in ["complete", "unprivileged"] {
-            let child = std::process::Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    WINDOWS_SYSTEM_POLICY_FIXTURE,
-                ])
-                .env(MODE, mode)
-                .env(
-                    "PROJECTATLAS_TEST_SYSTEM_POLICY_EXE",
-                    std::env::current_exe()?,
-                )
-                .output()?;
+            let child = windows_powershell_fixture(WINDOWS_SYSTEM_POLICY_FIXTURE, |command| {
+                command
+                    .env(MODE, mode)
+                    .env("PROJECTATLAS_TEST_SYSTEM_POLICY_EXE", &executable);
+            })?;
             require(
                 child.status.success(),
                 &format!("native SACL {mode} child failed: {child:?}"),
@@ -3642,7 +3781,15 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
     ]);
     for (host, private, filename) in roles {
         let extra: &[&str] = if host && filename == HOST_FILES[0] {
-            &["S:", "S:P", "S:NO_ACCESS_CONTROL", "S:(AU;SAFA;FW;;;WD)"]
+            &[
+                "S:",
+                "S:P",
+                "S:NO_ACCESS_CONTROL",
+                "S:(AU;SAFA;FW;;;WD)",
+                r#"S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))"#,
+                "S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)",
+                r#"S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)"#,
+            ]
         } else {
             &[]
         };
@@ -3665,6 +3812,17 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             let output = directory.join(filename);
             fs::write(&output, b"previous complete output")?;
             let before = windows_system_policy(&output, Some(policy))?;
+            let extended = policy.contains("(RA;") || policy.contains("(SP;");
+            let opaque = if extended {
+                let complete = windows_native_system_policy(&output, 0x10000)?;
+                require(
+                    windows_native_system_policy(&output, 0x18)? != complete,
+                    "former retained query did not reproduce extended-policy omission",
+                )?;
+                Some(complete)
+            } else {
+                None
+            };
             let native: Vec<_> = before.splitn(4, '|').collect();
             require(
                 native.len() == 4,
@@ -3690,7 +3848,12 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             }
             require(
                 (!policy.contains("(AU;") || before.contains("(AU;"))
-                    && (!policy.contains("(ML;") || before.contains("(ML;")),
+                    && (!policy.contains("(ML;") || before.contains("(ML;"))
+                    && (!policy.contains("(RA;")
+                        || (before.contains("(RA;")
+                            && before.contains("alpha")
+                            && before.contains("beta")))
+                    && (!policy.contains("(SP;") || before.contains("S-1-17-1-2-3-4-5-6-7-8")),
                 "native SACL fixture did not retain its intended ACE classes",
             )?;
             let filtered = windows_system_policy_query(&output, None, 0x10)?;
@@ -3717,7 +3880,32 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                     .ok_or_else(|| io::Error::other("system-policy document was not admitted"))?
             };
             let entries = fs::read_dir(&directory)?.count();
-            let replaced = if host {
+            let replaced = if let Some(expected) = &opaque
+                && complete
+            {
+                let staged = std::cell::RefCell::new(None::<std::path::PathBuf>);
+                guard
+                    .publish_with_stage_check(
+                        &output,
+                        b"preserved system-policy replacement",
+                        FilePublication::Replace,
+                        |stage| {
+                            *staged.borrow_mut() = Some(stage.path().to_owned());
+                            Ok(())
+                        },
+                        || {
+                            let path = staged.borrow();
+                            let path = path
+                                .as_ref()
+                                .ok_or_else(|| io::Error::other("missing extended-policy stage"))?;
+                            require(
+                                windows_native_system_policy(path, 0x10000)? == *expected,
+                                "held-stage setter changed native extended-policy bytes or order",
+                            )
+                        },
+                    )
+                    .map(|_| ())
+            } else if host {
                 guard.write_generated(&output, b"preserved system-policy replacement")
             } else {
                 guard.write_document(b"preserved system-policy replacement")
@@ -3741,6 +3929,13 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                     && fs::read_dir(&directory)?.count() == entries,
                 "replacement changed system policy, outside bytes or staging entries",
             )?;
+            if let Some(expected) = opaque {
+                require(
+                    windows_native_system_policy(&output, 0x10000)? == expected
+                        && windows_native_system_policy(&outside, 0x10000)? == expected,
+                    "publication changed opaque native extended policy or the outside owner",
+                )?;
+            }
         }
     }
     windows_system_policy_failure_controls(complete)?;
@@ -3998,10 +4193,9 @@ fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Resul
         $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'TakeOwnership','ContainerInherit,ObjectInherit','None','Deny')); \
         [SystemPolicyFixture]::DiscretionaryPolicy($p,$a.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access))",
     )?;
-    let setup = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("PROJECTATLAS_TEST_ACL_PATH", &guard.directory)
-        .output()?;
+    let setup = windows_powershell_fixture(&script, |command| {
+        command.env("PROJECTATLAS_TEST_ACL_PATH", &guard.directory);
+    })?;
     require(
         setup.status.success(),
         "take-ownership denial fixture failed",
@@ -4392,11 +4586,11 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
         let script = windows_fixture_script(
             "[SystemPolicyFixture]::DiscretionaryPolicy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_ACL_SDDL)",
         )?;
-        let setup = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .env("PROJECTATLAS_TEST_ACL_PATH", &output)
-            .env("PROJECTATLAS_TEST_ACL_SDDL", sddl)
-            .output()?;
+        let setup = windows_powershell_fixture(&script, |command| {
+            command
+                .env("PROJECTATLAS_TEST_ACL_PATH", &output)
+                .env("PROJECTATLAS_TEST_ACL_SDDL", sddl);
+        })?;
         require(
             setup.status.success(),
             &format!("native special DACL setup failed: {setup:?}"),

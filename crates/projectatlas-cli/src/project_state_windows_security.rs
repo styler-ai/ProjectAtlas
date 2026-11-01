@@ -27,6 +27,14 @@ const SACL_DEFAULTED: u16 = 0x0020;
 /// Inheritance protection for the system ACL.
 const SACL_PROTECTED: u16 = 0x2000;
 
+/// Select every supported system-policy class for serialization and assignment.
+fn system_information() -> SecurityInformation {
+    SecurityInformation::Sacl
+        | SecurityInformation::Label
+        | SecurityInformation::Attribute
+        | SecurityInformation::Scope
+}
+
 /// SDK-initialized zero-entry ACL, keeping its opaque borrow valid during a setter.
 #[repr(C, align(4))]
 struct EmptySacl(ACL);
@@ -178,16 +186,26 @@ impl SystemPolicy {
     /// # Errors
     /// Returns native query failures or refuses policy that cannot be preserved.
     pub(super) fn capture(file: &File, complete: bool) -> io::Result<Self> {
-        let information = if complete {
-            SecurityInformation::Sacl | SecurityInformation::Label
+        let query = if complete {
+            // The SDK's individual selectors filter ACE classes. BACKUP is a
+            // complete descriptor query, requiring only the RC + system rights
+            // already held here; never use it for serialization or assignment.
+            SecurityInformation::Backup
         } else {
             SecurityInformation::Label
         };
-        let descriptor = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, information)?;
+        let descriptor = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, query)?;
         // A LABEL query retains the original presence/control bits but filters
         // audit ACEs. Never infer absence from that filtered ACE list or SDDL.
         let control = admitted_control(descriptor_control(&descriptor)?, complete)?;
-        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
+        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &descriptor,
+            if complete {
+                system_information()
+            } else {
+                query
+            },
+        )?;
         require_complete_sacl_image(&descriptor, &sddl)?;
         Ok(Self {
             descriptor,
@@ -244,8 +262,7 @@ impl SystemPolicy {
                 None
             };
         let sacl = sacl.or_else(|| empty.as_ref().map(EmptySacl::as_acl));
-        let information = SecurityInformation::Sacl
-            | SecurityInformation::Label
+        let information = system_information()
             | if self.control & SACL_PROTECTED != 0 {
                 SecurityInformation::ProtectedSacl
             } else {

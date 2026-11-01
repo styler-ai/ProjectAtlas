@@ -40,6 +40,11 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** classification uses the actual containing volume's case behavior, protects case aliases before database/document writes even when the main file is absent, and propagates unresolved ownership rather than choosing an external writer
 - **AND** case-distinct custom names on case-sensitive volumes remain available, including separate hardlink entries and unrelated external paths
 
+#### Scenario: Windows managed names respect directory-local case sensitivity
+- **WHEN** a fixed database, sidecar, document or private-directory component differs in case on Windows
+- **THEN** ownership follows the actual containing directory's native naming mode, including correctly resolved missing parents and inherited case flags
+- **AND** distinct selected custom entries on sensitive directories do not redirect writes into lowercase managed entries; insensitive aliases remain protected, exact names remain usable, and uncertain native queries refuse before side effects
+
 #### Scenario: Replacement preserves existing access controls
 - **WHEN** an admitted generated host config, managed TOML config or JSON sidecar is replaced
 - **THEN** publication preserves its existing access ACL/DACL and effective ownership, including applicable inheritance protection, and does not broaden access through the staging directory's defaults
@@ -75,6 +80,7 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** ordinary source and stage objects with proven absent SACLs remain replaceable without additional privilege; create-only outputs retain normal inheritance
 - **AND** a label-only query does not mistake filtered audit ACEs for policy absence, source-policy changes refuse replacement, and unsupported defaulted SACL state retains valid output
 - **AND** no process-wide privilege enablement or mutable-path security setter is introduced
+- **AND** complete retained queries preserve resource-attribute and scoped-policy entries as well as audit and integrity policy; unsupported serialization refuses before staging, while independent native readback preserves exact source policy and outside hardlinks
 
 #### Scenario: Windows file encryption remains protected
 - **WHEN** an existing managed output is EFS encrypted initially or becomes encrypted before publication

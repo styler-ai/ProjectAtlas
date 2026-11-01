@@ -29,6 +29,11 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   casefold flag and filesystem model. Match mounted ext4/f2fs Unicode 12.1 behavior,
   preserve distinct sensitive-directory custom names, and refuse uncertain ownership
   for potential aliases on unrecognized models before side effects.
+- Classify Windows fixed-name aliases using each containing directory's native
+  case-sensitivity flag. Preserve distinct selected custom names on sensitive
+  directories, including missing-parent inheritance and private-directory variants;
+  investigate actual Unicode/short-name aliases without using file identity as
+  proof that distinct hardlinks are the same namespace entry.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
 - Preserve existing access-control lists when replacing an admitted generated host
@@ -92,6 +97,9 @@ GetSecurityDescriptorControl, missing from the canonical safe wrapper. Preserve
 system policy through retained handles when full rights are already available;
 otherwise prove source and stage have no SACL or refuse replacement before bytes.
 No global privilege enablement or blanket elevation requirement is introduced.
+Full policy capture uses the canonical retained BACKUP query, with explicit
+SACL/LABEL/ATTRIBUTE/SCOPE serialization and assignment; ordinary partial queries
+must not silently omit resource-attribute or scoped-policy entries.
 
 ## Release Scope
 
