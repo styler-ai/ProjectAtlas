@@ -23,7 +23,7 @@ mod windows_security;
 
 #[cfg(windows)]
 #[path = "project_state_windows.rs"]
-mod windows_filesystem;
+pub(crate) mod windows_filesystem;
 
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";

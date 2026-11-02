@@ -4981,6 +4981,9 @@ fn init_reports_host_config_failure_before_nonzero_exit() -> Result<(), Box<dyn 
 
 #[test]
 fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    const COHORT_SOURCE_FILE: &str = "file.rs";
+    const COHORT_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+    const COHORT_CONFIG_PATH: &str = ".projectatlas/config.toml";
     fn command(executable: &Path, root: &Path) -> StdCommand {
         let mut command = StdCommand::new(executable);
         command
@@ -5032,21 +5035,96 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             .into());
         }
     }
+    #[cfg(unix)]
+    {
+        let cohort_root = temp.path().join("cohort-operator-alias");
+        fs::create_dir(&cohort_root)?;
+        fs::write(cohort_root.join(COHORT_SOURCE_FILE), "pub fn cohort() {}\n")?;
+        let initialized = command(&executable, &cohort_root).arg("init").output()?;
+        if !initialized.status.success() {
+            return Err(
+                io::Error::other(format!("alias fixture init failed: {initialized:?}")).into(),
+            );
+        }
+        let database = cohort_root.join(COHORT_DATABASE_PATH);
+        let config = cohort_root.join(COHORT_CONFIG_PATH);
+        let selected = temp.path().join("operator-database.db");
+        std::os::unix::fs::symlink(&database, &selected)?;
+        let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+        let (mut session, _) = McpContractSession::spawn_configured(
+            &executable,
+            &cohort_root,
+            &selected,
+            Some(&config),
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            let set = command(&executable, &cohort_root)
+                .arg("--config")
+                .arg(&config)
+                .arg("--db")
+                .arg(&selected)
+                .args(["purpose", "set", "file.rs", "alias CLI purpose"])
+                .output()?;
+            if !set.status.success() {
+                return Err(io::Error::other(format!("alias CLI write failed: {set:?}")).into());
+            }
+            for _ in 0..3 {
+                let summary =
+                    session.call_tool("atlas_file_summary", &json!({"file":"file.rs"}))?;
+                if !summary.contains("alias CLI purpose") {
+                    return Err(io::Error::other(format!(
+                        "alias MCP read refused its own SQLite cohort: {summary}"
+                    ))
+                    .into());
+                }
+            }
+            session.call_tool(
+                "atlas_purpose_set",
+                &json!({"path":"file.rs", "purpose":"alias MCP purpose"}),
+            )?;
+            let summary = command(&executable, &cohort_root)
+                .args(["summary", "file.rs"])
+                .output()?;
+            if !summary.status.success()
+                || !String::from_utf8_lossy(&summary.stdout).contains("alias MCP purpose")
+            {
+                return Err(io::Error::other(format!(
+                    "canonical CLI missed operator-alias MCP write: {summary:?}"
+                ))
+                .into());
+            }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        let store = AtlasStore::open_read_only(&database)?;
+        if store.project_instance_id()? != identity {
+            return Err(io::Error::other("operator alias changed project identity").into());
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            if sqlite_sidecar_path(&selected, suffix).exists() {
+                return Err(io::Error::other(
+                    "operator symlink created an alternate SQLite cohort",
+                )
+                .into());
+            }
+        }
+    }
     #[cfg(windows)]
     {
         // Exercise real configured CLI/MCP opens, refusals and explicit recovery reset.
         for reset_surface in ["cli", "mcp"] {
             let cohort_root = temp.path().join(format!("cohort-{reset_surface}"));
             fs::create_dir(&cohort_root)?;
-            fs::write(cohort_root.join("file.rs"), "pub fn cohort() {}\n")?;
+            fs::write(cohort_root.join(COHORT_SOURCE_FILE), "pub fn cohort() {}\n")?;
             let initialized = command(&executable, &cohort_root).arg("init").output()?;
             if !initialized.status.success() {
                 return Err(
                     io::Error::other(format!("cohort init failed: {initialized:?}")).into(),
                 );
             }
-            let database = cohort_root.join(".projectatlas/projectatlas.db");
-            let config = cohort_root.join(".projectatlas/config.toml");
+            let database = cohort_root.join(COHORT_DATABASE_PATH);
+            let config = cohort_root.join(COHORT_CONFIG_PATH);
             let alias = StdCommand::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
                 .env("PROJECTATLAS_TEST_DB_PATH", &database).output()?;

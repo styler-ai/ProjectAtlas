@@ -116,6 +116,33 @@ root/lifecycle/DB binding. Exercise the actual batch helper causally, including
 child-before-root ordering, ordinary/non-regular policy and native-error controls;
 the standalone test helper's fallback must not mask the production failure.
 
+Runtime-event suppression must identify an admitted filename namespace, not any
+source path that resolves to the same object. An explicit operator DB symlink
+(or Windows managed 8.3 input) can name SQLite while its real main/WAL/SHM/journal
+entries use the resolved target spelling. Capture that target alongside the
+unchanged selected database path in the process-local binding; include it in the
+observer key so alias retargeting cannot reuse an old binding. Filter the bounded
+selected and target namespaces by parent/native entry name. Preserve distinct
+source symlink/hardlink names and aliases to the metadata directory, structural
+main-file changes, target uncertainty and genuine configuration/policy events.
+Do not retarget actual SQLite opens or blanket-ignore metadata descendants.
+Reuse the existing Windows literal-entry lookup, and require actual directory
+case behavior before folding a missing sidecar suffix: an 8.3 alias alone is not
+proof of case insensitivity. With no captured target, keep uncertainty observable.
+
+This adds one optional path to each of at most sixteen process-local observer
+bindings, one target lookup at binding construction on each observed request
+(including warm requests), and constant bounded work
+per relevant event (at most two namespace bases and three sidecars). Native
+callbacks still perform no policy/filesystem I/O; ordinary warm drains with no
+events add no filter work. Existing cooperative controls and source/publication
+owners remain authoritative. No schema, extraction-fact contract, retry budget,
+filesystem-jail or universal hostile-path-race guarantee is added. Prove the
+actual native target-sidecar notification, CLI/MCP reads and purpose writes
+through an external DB symlink, real Windows short-name admission, stale document
+invalidation through a distinct DB-object alias, removed sidecars, retargeting,
+and selected config/ignore-file positive controls.
+
 Observed epochs consume the complete shared change set, including document-only
 paths omitted from indexed source by repository/global policy. An ignored target
 can become an outside-root symlink without changing any source node. Use the

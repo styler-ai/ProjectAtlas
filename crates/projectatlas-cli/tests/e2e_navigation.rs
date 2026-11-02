@@ -88,6 +88,11 @@ use zip::write::SimpleFileOptions as FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
 
+const OBSERVED_SOURCE_PATH: &str = "source.rs";
+const OBSERVED_DOCUMENT_TARGET_PATH: &str = "target.rs";
+const EXTERNAL_DATABASE_FILE_NAME: &str = "external.db";
+const PROJECT_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+
 const SRC_DIR_NAME: &str = "src";
 
 const TESTS_DIR_NAME: &str = "tests";
@@ -13428,15 +13433,131 @@ fn approved_purposes(
         .collect())
 }
 
+/// Query one persistent observer's fixture document relation without refreshing it.
+fn observed_document_relations(session: &mut McpContractSession) -> Result<Value, Box<dyn Error>> {
+    Ok(toon_format::decode_default(&session.call_tool(
+        "atlas_symbol_relations",
+        &json!({"view":"detailed", "file":"README.md", "direction":"outbound", "relation":"documents", "content_selection":"documentation", "limit":10}),
+    )?)?)
+}
+
+/// Keep a distinct source name observable even when its target is the selected database.
+fn check_database_object_document_alias(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&root)?;
+    fs::write(root.join(OBSERVED_SOURCE_PATH), "pub fn retained() {}\n")?;
+    fs::write(root.join("README.md"), "# Links\n[target](target.rs)\n")?;
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    let database = temp.path().join(EXTERNAL_DATABASE_FILE_NAME);
+    let environment = [
+        ("GIT_CONFIG_GLOBAL", Some("")),
+        ("GIT_CONFIG_SYSTEM", Some("")),
+        ("GIT_CONFIG_NOSYSTEM", Some("1")),
+        ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+    ];
+    let mut init = StdCommand::new(executable);
+    init.current_dir(&root)
+        .arg("--db")
+        .arg(&database)
+        .arg("init");
+    for (key, value) in environment {
+        if let Some(value) = value {
+            init.env(key, value);
+        }
+    }
+    let output = init.output()?;
+    rust_binding_require(
+        output.status.success(),
+        "external database fixture init failed",
+    )?;
+    let (identity, purposes, revision, publication) = {
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store.set_purpose(
+            "README.md",
+            "Document database aliases",
+            PurposeSource::Agent,
+        )?;
+        (
+            store.project_instance_id()?,
+            approved_purposes(&store)?,
+            store.authored_purpose_revision()?,
+            store.index_publication()?,
+        )
+    };
+    let (mut session, _) =
+        McpContractSession::spawn_configured(executable, &root, &database, None, &environment)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        for _ in 0..2 {
+            let value = observed_document_relations(&mut session)?;
+            rust_binding_equal(
+                &value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str),
+                &Some("missing"),
+            )?;
+        }
+        let target = root.join(OBSERVED_DOCUMENT_TARGET_PATH);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&database, &target)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&database, &target)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let value = observed_document_relations(&mut session)?;
+            if value.pointer("/error/kind").and_then(Value::as_str) == Some("refresh_required") {
+                break;
+            }
+            rust_binding_require(
+                Instant::now() < deadline,
+                "database-object source alias was swallowed as runtime state",
+            )?;
+            thread::sleep(Duration::from_millis(10));
+        }
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &publication,
+        )?;
+        let refresh: Value = toon_format::decode_default(
+            &session.call_tool("atlas_watch_once", &json!({"path":root}))?,
+        )?;
+        rust_binding_equal(
+            &refresh
+                .pointer("/watch/last_symbols/parsed")
+                .and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        for _ in 0..2 {
+            let value = observed_document_relations(&mut session)?;
+            rust_binding_equal(
+                &value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str),
+                &Some("outside_root"),
+            )?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+    let store = AtlasStore::open_read_only(&database)?;
+    rust_binding_equal(&store.project_instance_id()?, &identity)?;
+    rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
+    rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+    rust_binding_require(
+        !root.join(PROJECT_DATABASE_PATH).exists(),
+        "external binding created an implicit database",
+    )
+}
+
 #[test]
 fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn Error>> {
     for policy in [".ignore", ".gitignore", "global"] {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join(TEST_REPO_DIR);
         fs::create_dir(&root)?;
-        let target = root.join("target.rs");
+        let target = root.join(OBSERVED_DOCUMENT_TARGET_PATH);
         fs::write(&target, "pub fn ignored() {}\n")?;
-        fs::write(root.join("source.rs"), "pub fn retained() {}\n")?;
+        fs::write(root.join(OBSERVED_SOURCE_PATH), "pub fn retained() {}\n")?;
         fs::write(root.join("README.md"), "# Links\n[target](target.rs)\n")?;
         let rules = if policy == "global" {
             temp.path().join("external.ignore")
@@ -13475,7 +13596,7 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
         }
         let output = init.output()?;
         rust_binding_require(output.status.success(), "document fixture init failed")?;
-        let database = root.join(".projectatlas/projectatlas.db");
+        let database = root.join(PROJECT_DATABASE_PATH);
         let (identity, purposes, revision) = {
             let store = AtlasStore::open_for_project(&database, &root)?;
             store.set_purpose(
@@ -13497,12 +13618,7 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
             &environment,
         )?;
         let operation = (|| -> Result<(), Box<dyn Error>> {
-            let query = |session: &mut McpContractSession| -> Result<Value, Box<dyn Error>> {
-                Ok(toon_format::decode_default(&session.call_tool(
-                    "atlas_symbol_relations",
-                    &json!({"view":"detailed", "file":"README.md", "direction":"outbound", "relation":"documents", "content_selection":"documentation", "limit":10}),
-                )?)?)
-            };
+            let query = observed_document_relations;
             let reason = |value: &Value| {
                 value
                     .pointer("/symbol_relations/rows/0/document_unresolved_reason")
@@ -13578,7 +13694,7 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
             "ignored or outside target became indexed source",
         )?;
     }
-    Ok(())
+    check_database_object_document_alias(&mcp_contract_executable())
 }
 
 #[test]
@@ -13649,7 +13765,7 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         let temp = tempfile::tempdir()?;
         let directory = temp.path();
         let root = directory.join("source-root");
-        let database = directory.join("external.db");
+        let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
         let config = directory.join("external.toml");
         let git_config = directory.join(EXTERNAL_GIT_CONFIGURATION_FILE);
         write_project(&root, "initial_target")?;

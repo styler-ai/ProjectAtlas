@@ -71,6 +71,12 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** an exclusion changes the ignored-versus-missing classification of an absent document target without changing the indexed source inventory
 - **THEN** accepted refresh and subsequent CLI/MCP graph queries agree with full reconciliation and do not preserve a stale document reason merely because source nodes are unchanged
 
+#### Scenario: Database aliases distinguish runtime state from source events
+- **WHEN** an explicit operator DB symlink or supported managed Windows short name uses a different spelling from SQLite's actual runtime cohort
+- **THEN** main/WAL/SHM/journal self-events in the selected and resolved target namespaces do not fabricate source drift, and real CLI/MCP reads and purpose updates remain usable without retargeting the selected SQLite path
+- **AND** distinct source symlink/hardlink names pointing at a DB object, aliases to the metadata directory, main-file replacements, alias retargets and selected config/ignore changes remain observable
+- **AND** the observer captures the target in its binding identity, does not acknowledge using a changed or unknown target, and uses bounded native filename evidence rather than assuming that an 8.3 alias proves case insensitivity
+
 #### Scenario: Observed document-only target transition
 - **WHEN** an ignored document target becomes an outside-root symlink or returns to an ordinary ignored file while a verified CLI/MCP epoch is warm
 - **THEN** the document-only event invalidates that epoch even when the source-path set is empty, without requesting a recursive rebind for an ordinary target edit

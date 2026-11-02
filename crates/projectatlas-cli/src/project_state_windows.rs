@@ -43,7 +43,7 @@ pub(super) fn short_name_candidate(name: &std::ffi::OsStr) -> bool {
 }
 
 /// Query the containing directory's actual per-directory comparison mode.
-pub(super) fn case_sensitive(directory: &Path) -> io::Result<bool> {
+pub(crate) fn case_sensitive(directory: &Path) -> io::Result<bool> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)
@@ -75,7 +75,7 @@ pub(super) fn case_sensitive(directory: &Path) -> io::Result<bool> {
 
 /// Resolve one long/short namespace entry, including a reparse entry itself.
 /// No file identity or target-following path is used as a filename oracle.
-pub(super) fn entry_name(path: &Path) -> io::Result<Option<std::ffi::OsString>> {
+pub(crate) fn entry_name(path: &Path) -> io::Result<Option<std::ffi::OsString>> {
     entry_names(path).map(|entry| entry.map(|(name, _)| name))
 }
 

@@ -157,3 +157,64 @@ Next: commit this reviewed inventory packet with sole(#739), bind all139 Git-tre
 inputs, normal push with hooks, keep selected tree CLEAN while active and update
 integration memory only. Inspect every current-head finding, earn task/acceptance
 checks, normal merge745 and verify native739 CLOSED before starting738.
+
+
+## Superseding checkpoint — 2026-11-02, #739 cohort repair
+
+Live GitHub readback: #731 and #741 CLOSED; #739/#738/#708/#715 OPEN.
+PR745 OPEN, unmerged. RC1 unpublished. Continue one issue at a time:739→738→708→715.
+Public/local HEAD2c206a28a18b165c502c405f5cc81832abcac20c was normally pushed
+with1780PASS/0FAIL/12ignored across34 suites. Its source CI41366456477 is
+TERMINAL FAILURE: Windows managed project-state lifecycle regression failed;
+Linux, both Macs, Rust and repository jobs passed. Earlier live-process/CI
+statements above are superseded. No push is currently running.
+
+Windows short-path SQLite admission exposed runtime database self-events escaping
+observer filtering. Linux external database symlink reproduces the same false
+refresh refusal; a distinct source alias to that database also reproduced the
+opposite stale-document error. Current uncommitted owning fix captures the DB
+target for filtering/keying, preserves selected SQLite opens, and compares runtime
+namespace entries rather than swallowing arbitrary object aliases. Main structural
+changes, target uncertainty/retarget, config and policy events remain observable.
+No rollback of the required document-only has_changes fix; no blanket metadata
+exclusion; no database reset/schema change.
+
+Both permanent CLI/MCP regressions fail against prior frozen c41b at the intended
+assertions. Latest local rerun logs: cohort-observer-positive42PASS/0FAIL2.22s;
+cohort-lifecycle-positive1PASS4.36s; cohort-documents-positive1PASS4.24s;
+cohort-clippy and cohort-strings PASS. Logs /tmp/projectatlas-739-cohort-*.log.
+Old process9529 is no longer registered; these terminal logs are preserved.
+No current Windows-hosted proof exists for the uncommitted fix.
+
+Next: update live specification/task handoff, obtain independent Luna Max review
+of latest controls/E2Es, refresh both E2E source hashes/inventory and run its3
+checks, build/freeze/measure new production binary (old c41b proof is historical),
+normal commit/push with hooks, inspect exact-head cross-platform/security/review
+results, then normally merge745 and verify native739 closure before738.
+
+
+### Cohort artifact and handoff update
+
+Luna731 independently approved the latest source/spec/E2E slice for next gates;
+explicitly requires fresh Windows hosted proof. Per-request target canonicalization
+cost (including warm requests) is now explicit in design and cost docs. No source
+changes followed the reviewed controls. Permanent current inventory hashes:
+lifecycle9029b55bb0cfdd5e65386c2d9f74242a1a28c9a52c704dc1c7d845b67735bc21;
+navigationb226b2463f3f7ceb2690be6f76a3380ca23f0fb125196ef2a62076b56637c0fe.
+224tests/82selectors unchanged; inventory positive/tamper3PASS2.70s.
+
+Fresh locked default release58728 TERMINAL0,41.26s; immutable directory
+~/.cache/projectatlas-benchmarks/external-policy-739-cohort-release. CLI SHA256
+767986fa05e456222952716077d87eede317effed433d55ec09cb06840de700c,
+69,784,464bytes.139-input manifest7870a1cf6276003fa4828baa2c71489febbea8d8231abb00e540c6582e7013c0.
+FShelper68663dbeaf98788375eb33213c0b472b4e0fcc3c3bd5da176089e79113aebb72
+relinked byte-identically; ONLY FS18samples reused. Fresh cohort proof32143
+TERMINAL0: four native upgrade/rollback cases and18CLImeasurements PASS.
+Optimized permanent adapter suite81675 TERMINAL0: lifecycle1PASS2.03s,
+document1PASS2.14s, externalpolicy1PASS1.26s, rootreplacement1PASS8.13s.
+Logs /tmp/projectatlas-739-cohort-{upgrade-proof,cli-cost-proof,optimized-*}.log.
+Cost +327504bytes/+0.471521%=0.47%; ordinary init292.7→292.8ms,
+noop49.9→49.6ms;10krulesnoop71.0→102.0ms. No broad speedup/SLO waiver.
+Stale CLI bit-identical reuse claim removed; persistent MCP warm latency is not
+isolated by these CLI samples. Live739 scope expanded and read back exactly.
+Strict OpenSpec and planned IssueOps pass; acceptance tasks remain unchecked.

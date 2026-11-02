@@ -21,9 +21,9 @@
   "candidate": {
     "derivation": 25,
     "semantic": 23,
-    "source_manifest_sha256": "097ead7d2827bb0130a2775be21d9bcba34996956507176ef266a68d4a5d6640",
-    "bytes": 69807752,
-    "sha256": "c41b3bd19921bda4a5b11dcd1a81543aea059926948195ebbefa4152c6e2544d"
+    "source_manifest_sha256": "7870a1cf6276003fa4828baa2c71489febbea8d8231abb00e540c6582e7013c0",
+    "bytes": 69784464,
+    "sha256": "767986fa05e456222952716077d87eede317effed433d55ec09cb06840de700c"
   },
   "protocol": {
     "trials": 3,
@@ -46,15 +46,7 @@
       "scope": "Fresh 18-sample FS measurements after root-alias repair; helper relinked byte-identically from final source. Final CLI costs, upgrades and public regressions rerun separately.",
       "measured_source_manifest_sha256": "23dbb47bfcd2a63aebcaae847fa2feb8868d244662083a898b2c6e2f2e33759d"
     },
-    "cli_binary_reuse": {
-      "byte_identical": true,
-      "sha256": "c41b3bd19921bda4a5b11dcd1a81543aea059926948195ebbefa4152c6e2544d",
-      "measured_source_manifest_sha256": "ebc7ab6a6da4e38aeb85bce592b166c66ea897b9ce790d4f7eb8849df284c536",
-      "changed_source_inputs": [
-        "crates/projectatlas-cli/tests/support/source_contract.rs"
-      ],
-      "scope": "Fresh locked default release rebuild after integration-test inventory correction is byte-identical. Reuse the same optimized CLI cost samples, four upgrade cases and three public CLI/MCP regression results; filesystem helper also remains byte-identical."
-    }
+    "observer_namespace_cost": "SourceBinding capture adds one canonical database-target lookup on each observed request, including warm requests; event filtering is bounded to selected and target namespaces and three sidecars. Fresh CLI init/unchanged-refresh costs are measured here; these samples do not isolate persistent MCP warm-request latency."
   },
   "fixtures": {
     "ordinary": {
@@ -361,9 +353,9 @@
   },
   "binary_size": {
     "baseline_bytes": 69456960,
-    "candidate_bytes": 69807752,
-    "delta_bytes": 350792,
-    "delta_percent": 0.5050494579664777
+    "candidate_bytes": 69784464,
+    "delta_bytes": 327504,
+    "delta_percent": 0.4715207806388344
   },
   "upgrade_cases": [
     {
@@ -634,66 +626,66 @@
       "ordinary": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.3112526430049911,
-            "peak_rss_kib": 32784
+            "wall_seconds": 0.2926821110304445,
+            "peak_rss_kib": 32820
           },
           "noop": {
-            "wall_seconds": 0.05028036702424288,
-            "peak_rss_kib": 21776
+            "wall_seconds": 0.04991375398822129,
+            "peak_rss_kib": 21860
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3123676659888588,
-            "peak_rss_kib": 30908
+            "wall_seconds": 0.29277599696069956,
+            "peak_rss_kib": 30820
           },
           "noop": {
-            "wall_seconds": 0.04974298499291763,
-            "peak_rss_kib": 20468
+            "wall_seconds": 0.04957743198610842,
+            "peak_rss_kib": 19900
           }
         }
       },
       "large-config": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.3122450250084512,
-            "peak_rss_kib": 32972
+            "wall_seconds": 0.2878423009533435,
+            "peak_rss_kib": 32516
           },
           "noop": {
-            "wall_seconds": 0.04879171401262283,
-            "peak_rss_kib": 21876
+            "wall_seconds": 0.05041470500873402,
+            "peak_rss_kib": 21676
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3127839700318873,
-            "peak_rss_kib": 33096
+            "wall_seconds": 0.2983337870100513,
+            "peak_rss_kib": 34036
           },
           "noop": {
-            "wall_seconds": 0.05382682097842917,
-            "peak_rss_kib": 23688
+            "wall_seconds": 0.0530836780089885,
+            "peak_rss_kib": 23612
           }
         }
       },
       "many-rules": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.39117178501328453,
-            "peak_rss_kib": 45296
+            "wall_seconds": 0.37732947600306943,
+            "peak_rss_kib": 45000
           },
           "noop": {
-            "wall_seconds": 0.07080920797307044,
-            "peak_rss_kib": 32968
+            "wall_seconds": 0.07104579696897417,
+            "peak_rss_kib": 33504
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3957185539766215,
-            "peak_rss_kib": 42144
+            "wall_seconds": 0.3739720900193788,
+            "peak_rss_kib": 41856
           },
           "noop": {
-            "wall_seconds": 0.09713505901163444,
-            "peak_rss_kib": 33096
+            "wall_seconds": 0.10203024500515312,
+            "peak_rss_kib": 32788
           }
         }
       }
@@ -709,12 +701,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3141678390093148,
-          "peak_rss_kib": 32356
+          "wall_seconds": 0.2926821110304445,
+          "peak_rss_kib": 32820
         },
         "noop": {
-          "wall_seconds": 0.048267555015627295,
-          "peak_rss_kib": 21776
+          "wall_seconds": 0.04991375398822129,
+          "peak_rss_kib": 21700
         }
       },
       {
@@ -727,12 +719,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3123676659888588,
-          "peak_rss_kib": 30908
+          "wall_seconds": 0.29402245802339166,
+          "peak_rss_kib": 30896
         },
         "noop": {
-          "wall_seconds": 0.05008707399247214,
-          "peak_rss_kib": 20412
+          "wall_seconds": 0.04885307198856026,
+          "peak_rss_kib": 20572
         }
       },
       {
@@ -745,12 +737,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.32032158301444724,
-          "peak_rss_kib": 30800
+          "wall_seconds": 0.2895636239554733,
+          "peak_rss_kib": 29816
         },
         "noop": {
-          "wall_seconds": 0.04804501903709024,
-          "peak_rss_kib": 20468
+          "wall_seconds": 0.050074526050593704,
+          "peak_rss_kib": 19900
         }
       },
       {
@@ -763,12 +755,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3083589940215461,
-          "peak_rss_kib": 33236
+          "wall_seconds": 0.288463598000817,
+          "peak_rss_kib": 31888
         },
         "noop": {
-          "wall_seconds": 0.05028036702424288,
-          "peak_rss_kib": 21908
+          "wall_seconds": 0.04977448203135282,
+          "peak_rss_kib": 21860
         }
       },
       {
@@ -781,12 +773,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3112526430049911,
-          "peak_rss_kib": 32784
+          "wall_seconds": 0.29445228597614914,
+          "peak_rss_kib": 33036
         },
         "noop": {
-          "wall_seconds": 0.05114421300822869,
-          "peak_rss_kib": 21412
+          "wall_seconds": 0.051294808043166995,
+          "peak_rss_kib": 22008
         }
       },
       {
@@ -799,12 +791,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.30848276801407337,
-          "peak_rss_kib": 31092
+          "wall_seconds": 0.29277599696069956,
+          "peak_rss_kib": 30820
         },
         "noop": {
-          "wall_seconds": 0.04974298499291763,
-          "peak_rss_kib": 20900
+          "wall_seconds": 0.04957743198610842,
+          "peak_rss_kib": 19848
         }
       },
       {
@@ -817,12 +809,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3122450250084512,
-          "peak_rss_kib": 32972
+          "wall_seconds": 0.2878423009533435,
+          "peak_rss_kib": 32160
         },
         "noop": {
-          "wall_seconds": 0.048260341049171984,
-          "peak_rss_kib": 21876
+          "wall_seconds": 0.05041470500873402,
+          "peak_rss_kib": 21676
         }
       },
       {
@@ -835,12 +827,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.312304510967806,
-          "peak_rss_kib": 33096
+          "wall_seconds": 0.29258938698330894,
+          "peak_rss_kib": 35500
         },
         "noop": {
-          "wall_seconds": 0.05246725201141089,
-          "peak_rss_kib": 23656
+          "wall_seconds": 0.05539124202914536,
+          "peak_rss_kib": 23640
         }
       },
       {
@@ -853,12 +845,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31908755900803953,
-          "peak_rss_kib": 32196
+          "wall_seconds": 0.29951466497732326,
+          "peak_rss_kib": 34036
         },
         "noop": {
-          "wall_seconds": 0.054311889980454,
-          "peak_rss_kib": 23688
+          "wall_seconds": 0.053050855989567935,
+          "peak_rss_kib": 23612
         }
       },
       {
@@ -871,12 +863,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.30931442795554176,
-          "peak_rss_kib": 33208
+          "wall_seconds": 0.29176491900580004,
+          "peak_rss_kib": 33092
         },
         "noop": {
-          "wall_seconds": 0.04879171401262283,
-          "peak_rss_kib": 22012
+          "wall_seconds": 0.0511988079524599,
+          "peak_rss_kib": 21612
         }
       },
       {
@@ -889,12 +881,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3157853650045581,
-          "peak_rss_kib": 32936
+          "wall_seconds": 0.2828669360023923,
+          "peak_rss_kib": 32516
         },
         "noop": {
-          "wall_seconds": 0.049406488018576056,
-          "peak_rss_kib": 21724
+          "wall_seconds": 0.04723588394699618,
+          "peak_rss_kib": 21764
         }
       },
       {
@@ -907,12 +899,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3127839700318873,
-          "peak_rss_kib": 33500
+          "wall_seconds": 0.2983337870100513,
+          "peak_rss_kib": 33012
         },
         "noop": {
-          "wall_seconds": 0.05382682097842917,
-          "peak_rss_kib": 24032
+          "wall_seconds": 0.0530836780089885,
+          "peak_rss_kib": 23252
         }
       },
       {
@@ -925,12 +917,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.39117178501328453,
-          "peak_rss_kib": 45296
+          "wall_seconds": 0.3709336330066435,
+          "peak_rss_kib": 44712
         },
         "noop": {
-          "wall_seconds": 0.06993103597778827,
-          "peak_rss_kib": 32832
+          "wall_seconds": 0.06904495897470042,
+          "peak_rss_kib": 32396
         }
       },
       {
@@ -943,12 +935,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3957185539766215,
-          "peak_rss_kib": 42744
+          "wall_seconds": 0.37058873497880995,
+          "peak_rss_kib": 42288
         },
         "noop": {
-          "wall_seconds": 0.09796983399428427,
-          "peak_rss_kib": 32772
+          "wall_seconds": 0.10203024500515312,
+          "peak_rss_kib": 32524
         }
       },
       {
@@ -961,12 +953,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3868922289693728,
-          "peak_rss_kib": 41016
+          "wall_seconds": 0.3778168819844723,
+          "peak_rss_kib": 40740
         },
         "noop": {
-          "wall_seconds": 0.09693451697239652,
-          "peak_rss_kib": 33096
+          "wall_seconds": 0.10211695800535381,
+          "peak_rss_kib": 32852
         }
       },
       {
@@ -979,12 +971,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.39702048600884154,
-          "peak_rss_kib": 45060
+          "wall_seconds": 0.37732947600306943,
+          "peak_rss_kib": 45000
         },
         "noop": {
-          "wall_seconds": 0.07237960898783058,
-          "peak_rss_kib": 33308
+          "wall_seconds": 0.07134937698720023,
+          "peak_rss_kib": 33504
         }
       },
       {
@@ -997,12 +989,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.38351792603498325,
-          "peak_rss_kib": 45444
+          "wall_seconds": 0.37736189702991396,
+          "peak_rss_kib": 45416
         },
         "noop": {
-          "wall_seconds": 0.07080920797307044,
-          "peak_rss_kib": 32968
+          "wall_seconds": 0.07104579696897417,
+          "peak_rss_kib": 33648
         }
       },
       {
@@ -1015,12 +1007,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3979007099987939,
-          "peak_rss_kib": 42144
+          "wall_seconds": 0.3739720900193788,
+          "peak_rss_kib": 41856
         },
         "noop": {
-          "wall_seconds": 0.09713505901163444,
-          "peak_rss_kib": 33140
+          "wall_seconds": 0.09873475495260209,
+          "peak_rss_kib": 32788
         }
       }
     ]

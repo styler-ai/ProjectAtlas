@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 350,792 bytes (0.51%) to the optimized
+The derivation-25 policy repair adds 327,504 bytes (0.47%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -59,10 +59,13 @@ The observed-epoch repair now includes document-only events in invalidation.
 These samples use its rebuilt CLI; the persistent MCP regression separately
 proves typed read-only refresh guidance and explicit zero-reparse reconciliation
 for ignored/outside-symlink target transitions under local and global rules.
-A later integration-test inventory correction changes only a test-support input.
-A fresh locked release rebuild is byte-identical to the measured CLI and helper,
-so their measurements, upgrade cases and public regressions remain applicable.
-The compact result records the current and measured source-manifest identities.
+The runtime namespace repair preserves the selected SQLite path while filtering
+its actual target cohort and keeping distinct source aliases observable. The CLI
+measurements and upgrade/public-adapter proofs were rerun against its fresh binary.
+Capturing the database target adds one canonicalization per observed request,
+including warm requests; this is not just observer-startup work. Event filtering
+checks at most two namespace bases and three sidecars, with no callback I/O.
+These fresh-process samples do not isolate persistent MCP warm-request latency.
 Component timings use canonical roots; separate regressions cover lexical aliases,
 relative root selection and selected symlink roots without claiming alias timings.
 
@@ -76,11 +79,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 311.3 → 312.4 | 50.3 → 49.7 | 32,784 → 30,908 | 21,776 → 20,468 |
-| Large config | 312.2 → 312.8 | 48.8 → 53.8 | 32,972 → 33,096 | 21,876 → 23,688 |
-| 10,000 rules | 391.2 → 395.7 | 70.8 → 97.1 | 45,296 → 42,144 | 32,968 → 33,096 |
+| Ordinary | 292.7 → 292.8 | 49.9 → 49.6 | 32,820 → 30,820 | 21,860 → 19,900 |
+| Large config | 287.8 → 298.3 | 50.4 → 53.1 | 32,516 → 34,036 | 21,676 → 23,612 |
+| 10,000 rules | 377.3 → 374.0 | 71.0 → 102.0 | 45,000 → 41,856 | 33,504 → 32,788 |
 
-The large-rule fresh-process refresh adds about 26 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 31 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in

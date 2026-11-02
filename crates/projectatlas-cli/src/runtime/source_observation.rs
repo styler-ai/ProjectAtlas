@@ -337,13 +337,18 @@ struct SourceBinding {
     root: PathBuf,
     /// Database excluded from source-change invalidation.
     database: PathBuf,
+    /// Resolved runtime namespace captured without retargeting the selected SQLite path.
+    database_target: Option<PathBuf>,
     /// Optional scanner configuration watched with the source root.
     config: Option<PathBuf>,
 }
 
 impl PartialEq for SourceBinding {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root && self.database == other.database && self.config == other.config
+        self.root == other.root
+            && self.database == other.database
+            && self.database_target == other.database_target
+            && self.config == other.config
     }
 }
 
@@ -351,6 +356,7 @@ impl Hash for SourceBinding {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.root.hash(state);
         self.database.hash(state);
+        self.database_target.hash(state);
         self.config.hash(state);
     }
 }
@@ -363,10 +369,12 @@ impl SourceBinding {
             source,
         })?;
         let database = absolute_path_from(&root, database);
+        let database_target = fs::canonicalize(&database).ok();
         let config = config.map(|path| absolute_path_from(&root, path));
         Ok(Self {
             root,
             database,
+            database_target,
             config,
         })
     }
@@ -828,8 +836,8 @@ fn filtered_observer_event(binding: &SourceBinding, event: &Event) -> Option<Eve
     let metadata_directory = binding.root.join(".projectatlas");
     filtered.paths.retain(|path| {
         let candidate = super::absolute_watch_path(&binding.root, path);
-        !same_native_path(&candidate, &metadata_directory)
-            && !is_database_runtime_path(&candidate, &binding.database)
+        !same_runtime_namespace_entry(&candidate, &metadata_directory)
+            && !is_database_runtime_path(&candidate, binding, event.kind)
     });
     if filtered.paths.is_empty() && !event.need_rescan() {
         return None;
@@ -851,25 +859,86 @@ fn observer_event_changes(
 }
 
 /// Return whether a path is the database or one of its runtime sidecar files.
-fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
-    if same_native_path(candidate, database) {
+fn is_database_runtime_path(candidate: &Path, binding: &SourceBinding, kind: EventKind) -> bool {
+    let namespaces = [
+        Some(binding.database.as_path()),
+        binding
+            .database_target
+            .as_deref()
+            .filter(|target| *target != binding.database.as_path()),
+    ];
+    for database in namespaces.into_iter().flatten() {
+        let main = same_runtime_namespace_entry(candidate, database);
+        let runtime = main
+            || ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
+                let mut sidecar = database.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let sidecar = Path::new(&sidecar);
+                same_runtime_namespace_entry(candidate, sidecar) || {
+                    #[cfg(windows)]
+                    {
+                        missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        false
+                    }
+                }
+            });
+        if !runtime {
+            continue;
+        }
+        // A namespace captured before an alias retarget must not acknowledge
+        // notifications using the old target's authority.
+        if binding.database_target.is_none()
+            || fs::canonicalize(&binding.database).ok() != binding.database_target
+        {
+            return false;
+        }
+        return !main
+            || !matches!(
+                kind,
+                EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            );
+    }
+    false
+}
+
+/// Match a known runtime namespace without following a distinct source leaf.
+fn same_runtime_namespace_entry(candidate: &Path, known: &Path) -> bool {
+    let (Some(parent), Some(known_parent), Some(leaf), Some(known_leaf)) = (
+        candidate.parent(),
+        known.parent(),
+        candidate.file_name(),
+        known.file_name(),
+    ) else {
+        return false;
+    };
+    if !same_native_path(parent, known_parent) {
+        return false;
+    }
+    if leaf == known_leaf {
         return true;
     }
-    ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
-        let mut sidecar = database.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let sidecar = Path::new(&sidecar);
-        same_native_path(candidate, sidecar) || {
-            #[cfg(windows)]
-            {
-                missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
-            }
-            #[cfg(not(windows))]
-            {
-                false
-            }
+    #[cfg(windows)]
+    {
+        use crate::project_state::windows_filesystem as native_names;
+        match (
+            native_names::entry_name(candidate),
+            native_names::entry_name(known),
+        ) {
+            (Ok(Some(candidate)), Ok(Some(known))) => candidate == known,
+            _ => false,
         }
-    })
+    }
+    #[cfg(not(windows))]
+    {
+        fs::symlink_metadata(candidate).is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && fs::symlink_metadata(known).is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && same_native_path(candidate, known)
+    }
 }
 
 /// Match a removed sidecar through its existing database leaf on ordinary
@@ -915,7 +984,13 @@ fn missing_windows_sidecar_matches(
     // An unresolved candidate whose base spelling is already exact has no
     // native evidence that the missing suffix belongs to a case-insensitive
     // namespace; leave that event observable instead of guessing.
-    base != database && same_native_path(&base, database)
+    if base == database || !same_runtime_namespace_entry(&base, database) {
+        return false;
+    }
+    let exact_suffix = leaf_units[leaf_units.len() - suffix_units.len()..] == suffix_units;
+    exact_suffix
+        || crate::project_state::windows_filesystem::case_sensitive(parent)
+            .is_ok_and(|sensitive| !sensitive)
 }
 
 /// Compare native paths without converting identity through display text.
@@ -1862,6 +1937,117 @@ mod tests {
     }
 
     #[test]
+    fn native_observer_filters_target_cohort_through_operator_database_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        #[cfg(unix)]
+        let selected = temp.path().join("operator-alias.db");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&database, &selected)?;
+        #[cfg(windows)]
+        let selected = {
+            let output = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
+                .env("PROJECTATLAS_TEST_DB_PATH", &database)
+                .output()?;
+            require(output.status.success(), "native short-name lookup failed")?;
+            let selected = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+            if selected.file_name() == database.file_name() {
+                if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                    return Err(std::io::Error::other(
+                        "hosted observer proof requires a real database short name",
+                    )
+                    .into());
+                }
+                eprintln!("native short-name observer proof unavailable on this filesystem");
+                return Ok(());
+            }
+            selected
+        };
+        let entry = SourceObservationEntry::start(SourceBinding::new(&selected, &root, None)?)?;
+        let store = super::super::open_atlas_store_for_project(&selected, &root)?;
+        store.set_purpose("source.rs", "Alias writer", PurposeSource::Agent)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        let mut captured = Vec::new();
+        while Instant::now() < deadline {
+            let events: Vec<_> = entry
+                .receiver
+                .lock()
+                .map_err(|_poisoned| std::io::Error::other("observer receiver lock poisoned"))?
+                .try_iter()
+                .collect();
+            for event in events {
+                if captured.len() < 16 {
+                    captured.push(format!("{event:?}"));
+                }
+                let runtime_event = event.paths.iter().any(|path| {
+                    #[cfg(windows)]
+                    let native_name = crate::project_state::windows_filesystem::entry_name(path)
+                        .ok()
+                        .flatten();
+                    #[cfg(windows)]
+                    let name = native_name.as_deref().or_else(|| path.file_name());
+                    #[cfg(not(windows))]
+                    let name = path.file_name();
+                    name.is_some_and(|name| {
+                        name == "projectatlas.db-wal" || name == "projectatlas.db-shm"
+                    })
+                });
+                if !runtime_event {
+                    continue;
+                }
+                observed = true;
+                let changes = observer_event_changes(
+                    &entry.binding,
+                    &projectatlas_fs::ScanOptions::default(),
+                    &event,
+                );
+                if changes.has_changes() {
+                    return Err(std::io::Error::other(format!(
+                        "native target-cohort event escaped filtering: event={event:?}, full={}, sources={:?}, documents={:?}",
+                        changes.requires_full_scan, changes.paths, changes.document_paths,
+                    )).into());
+                }
+            }
+            if observed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !observed {
+            return Err(std::io::Error::other(format!(
+                "native SQLite target-cohort event was not observed: {captured:?}"
+            ))
+            .into());
+        }
+        drop(store);
+        for database in [
+            selected.as_path(),
+            entry.binding.database_target.as_deref().ok_or_else(|| {
+                std::io::Error::other("database target namespace was not captured")
+            })?,
+        ] {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut path = database.as_os_str().to_os_string();
+                path.push(suffix);
+                let event = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                    .add_path(PathBuf::from(path));
+                require(
+                    filtered_observer_event(&entry.binding, &event).is_none(),
+                    "removed selected/target SQLite sidecar was not recognized as runtime state",
+                )?;
+            }
+        }
+        fs::write(entry.binding.root.join(".projectatlas/config.toml"), "")?;
+        await_native_policy_change(&entry)?;
+        Ok(())
+    }
+
+    #[test]
     fn document_only_events_invalidate_verified_epochs() -> Result<(), Box<dyn Error>> {
         for (policy, leaf) in [
             (".ignore", "target.rs"),
@@ -1911,6 +2097,117 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_preserves_distinct_source_aliases_to_database_objects() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        for (case, database) in [temp.path().join("external.db"), root.join("inside.db")]
+            .into_iter()
+            .enumerate()
+        {
+            let _store = super::super::open_atlas_store_for_project(&database, &root)?;
+            let binding = SourceBinding::new(&database, &root, None)?;
+            for (leaf, symlink) in [("database-link.rs", true), ("database-hardlink.rs", false)] {
+                let source = binding.root.join(format!("{case}-{leaf}"));
+                if symlink {
+                    std::os::unix::fs::symlink(&database, &source)?;
+                } else {
+                    fs::hard_link(&database, &source)?;
+                }
+                let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone());
+                let changes = observer_event_changes(
+                    &binding,
+                    &projectatlas_fs::ScanOptions::default(),
+                    &event,
+                );
+                require(
+                    changes.document_paths.contains(&source),
+                    "a distinct source alias to a database object was treated as runtime state",
+                )?;
+            }
+        }
+        let binding = SourceBinding::new(&root.join("inside.db"), &root, None)?;
+        let directory_alias = binding.root.join("metadata-link");
+        fs::create_dir_all(binding.root.join(".projectatlas"))?;
+        std::os::unix::fs::symlink(binding.root.join(".projectatlas"), &directory_alias)?;
+        let event =
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(directory_alias.clone());
+        require(
+            observer_event_changes(&binding, &projectatlas_fs::ScanOptions::default(), &event)
+                .document_paths
+                .contains(&directory_alias),
+            "a source alias to the metadata directory was treated as the directory itself",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_alias_retarget_and_policy_events_remain_observable() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let selected = root.join("selected.db");
+        std::os::unix::fs::symlink(&database, &selected)?;
+        let binding = SourceBinding::new(&selected, &root, None)?;
+        let options = projectatlas_fs::ScanOptions::default();
+        for kind in [
+            EventKind::Create(notify::event::CreateKind::File),
+            EventKind::Remove(notify::event::RemoveKind::File),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+        ] {
+            require(
+                observer_event_changes(
+                    &binding,
+                    &options,
+                    &Event::new(kind).add_path(selected.clone()),
+                )
+                .has_changes(),
+                "database namespace replacement was acknowledged as an ordinary self-write",
+            )?;
+        }
+        let replacement = temp.path().join("replacement.db");
+        fs::copy(&database, &replacement)?;
+        fs::remove_file(&selected)?;
+        std::os::unix::fs::symlink(&replacement, &selected)?;
+        require(
+            binding != SourceBinding::new(&selected, &root, None)?,
+            "retargeted database alias reused its previous observer binding",
+        )?;
+        require(
+            observer_event_changes(
+                &binding,
+                &options,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(selected),
+            )
+            .has_changes(),
+            "retargeted database alias was filtered by stale target authority",
+        )?;
+        let config = binding.root.join(".projectatlas/config.toml");
+        require(
+            filtered_observer_event(
+                &binding,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(config),
+            )
+            .is_some(),
+            "selected project configuration was filtered with runtime database state",
+        )?;
+        let policy = binding.root.join(".ignore");
+        fs::write(&policy, "ignored.rs\n")?;
+        require(
+            observer_event_changes(
+                &binding,
+                &options,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(policy),
+            )
+            .has_changes(),
+            "local ignore policy was filtered with runtime database state",
+        )
     }
 
     #[cfg(unix)]
