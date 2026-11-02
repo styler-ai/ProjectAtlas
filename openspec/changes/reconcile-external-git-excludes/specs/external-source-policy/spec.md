@@ -66,6 +66,12 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **THEN** bounded nonrecursive namespace coverage observes the replacement without a source edit, reconciliation rebinds the same selected pathnames to the replacement directories, and subsequent distinct policy edits remain observable
 - **AND** immediate-child filtering retains unrelated outside-event suppression without filesystem I/O in callbacks; unavailable or over-capacity coverage retains the existing exact or polling fallback instead of certifying a partially watched epoch
 
+#### Scenario: Windows ancestor-move lifecycle
+- **WHEN** native Windows observation holds an open directory handle below an ancestor selected for a move
+- **THEN** if Windows refuses the move before namespace mutation, automatic warm rebinding is not promised for that unperformed operation; the operator stops observation before moving/recreating the ancestor and restarts observation for fresh discovery
+- **AND** that fresh discovery binds the current selected policy paths and subsequent distinct policy edits remain observable, with no-handle, target-handle and descendant-handle controls establishing the native boundary and successful moves after handle release
+- **AND** supported nearest-directory replacements, missing-parent creation and regular directory/file aliases retain native Windows proof; the nine ordinary higher-ancestor replacement layouts remain required on Linux and macOS
+
 #### Scenario: A selected policy parent is a regular file
 - **WHEN** a selected policy pathname requires traversing an existing regular file as a directory, directly or through a symlink target
 - **THEN** watch admission refuses the impossible parent and releases partial native coverage on every supported platform, even when the operating system reports the child as missing

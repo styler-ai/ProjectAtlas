@@ -283,6 +283,35 @@ on Unix too. Its real outside parent must enable higher ancestor coverage even
 when the nearest target directory is in-root; retain a causal native selection
 control for this case rather than relying on the target path alone.
 
+Windows ancestor-move acceptance must distinguish a rejected mutation from a
+missed event. The direct-layout native failure was the rename of control/current,
+which contained the watched nested directory, before any alias case was reached.
+Microsoft's FILE_RENAME_INFORMATION remarks describe restrictions involving open
+handles below a renamed directory:
+https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information.
+Do not infer that FILE_SHARE_DELETE alone permits that ancestor move, or turn a
+PermissionDenied return into a passing replacement assertion. Require an isolated
+native control matrix for no handles, the target handle alone, a descendant
+handle with notify's exact access/share/flags, and real notify watches. Expected
+descendant denial must leave the tree unchanged; closing its handle must allow
+the actual move. Notify teardown is asynchronous, so only that already observed
+native denial may be retried under a bounded teardown acknowledgment; timeout
+or any other error remains failure. Never register the same path twice in the
+control, since the locked backend can replace its tracked state without stopping
+the earlier request.
+
+Keep all nine higher-ancestor layouts on Linux/macOS. Windows native positive
+coverage instead exercises legal nearest-directory replacement, missing-parent
+creation and external/source-contained directory aliases, retaining the same
+selection/install/rebind/distinct-later-leaf owner. Static higher-ancestor routing
+coverage remains shared. The separate Windows stop/move/restart control constructs
+a fresh selection and watcher, installs through the real cold discovery owner,
+and requires a distinct later policy event. This explicitly documents a native
+backend lifecycle limit rather than claiming automatic higher-ancestor recovery
+from tests of another operation. The isolated Windows matrix and restart control
+must establish the limit natively before this acceptance is complete; no product
+backend, source witness, quota, indexing deadline or security boundary changes.
+
 Native source-policy CI remains required under its existing ten-minute cap.
 Place its unchanged commands after the existing twenty-minute PHP regression,
 which owns cold symbol/CLI dependency compilation in this job. Full-mode Intel

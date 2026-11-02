@@ -1533,6 +1533,7 @@ mod tests {
         )
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn ordinary_external_ancestor_replacement_rebinds_native_policy_events()
     -> Result<(), Box<dyn Error>> {
@@ -1547,135 +1548,310 @@ mod tests {
             (true, "higher-ancestor"),
             (true, "missing-parent"),
         ] {
-            let fixture_io = |operation: &str, path: &Path, result: std::io::Result<()>| {
-                result.map_err(|source| std::io::Error::new(source.kind(), format!(
-                    "ancestor replacement (missing={missing}, layout={layout}): {operation} at {path:?}: {source:?}"
+            assert_native_policy_directory_replacement(missing, layout)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_policy_parent_replacement_and_creation_rebind_native_events()
+    -> Result<(), Box<dyn Error>> {
+        for (missing, layout) in [
+            (false, "direct"),
+            (true, "direct"),
+            (false, "external-alias"),
+            (true, "external-alias"),
+            (false, "source-alias"),
+            (true, "source-alias"),
+            (true, "missing-parent"),
+        ] {
+            assert_native_policy_directory_replacement(missing, layout)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_descendant_directory_handles_bound_ancestor_rename() -> Result<(), Box<dyn Error>> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let parent = base.join("parent");
+        let nested = parent.join("nested");
+        let retired = base.join("retired");
+        fs::create_dir_all(&nested)?;
+        let roundtrip = |operation: &str| -> std::io::Result<()> {
+            fs::rename(&parent, &retired)
+                .and_then(|()| fs::rename(&retired, &parent))
+                .map_err(|source| std::io::Error::new(source.kind(), format!(
+                    "native ancestor rename control ({operation}): {parent:?} -> {retired:?}: {source:?}"
                 )))
-            };
-            let temp = tempfile::tempdir()?;
-            let base = temp.path().canonicalize()?;
-            let root = base.join("repo");
-            let selected_parent = base.join("control/current");
-            let directory = selected_parent.join("nested");
-            fixture_io("create source root", &root, fs::create_dir(&root))?;
-            fixture_io(
-                "create selected directory",
-                &directory,
-                fs::create_dir_all(&directory),
-            )?;
-            let selected = if matches!(layout, "external-alias" | "source-alias") {
-                let alias = if layout == "source-alias" {
-                    root.join("selected")
-                } else {
-                    base.join("selected")
-                };
-                create_policy_directory_alias(&base.join("control"), &alias)?;
-                alias.join("current/nested")
-            } else {
-                directory.clone()
-            };
-            let input = selected.join("rules");
-            let later_input = selected.join("later-rules");
-            if !missing {
-                fixture_io(
-                    "write initial policy",
-                    &input,
-                    fs::write(&input, "original.rs\n"),
-                )?;
-            }
-            if layout == "missing-parent" {
-                fixture_io(
-                    "remove prospective parent",
-                    &directory,
-                    fs::remove_dir(&directory),
-                )?;
-            }
-            let control =
-                IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)));
-            let selection = PolicyWatchSelection::new(root.clone());
-            let callback_selection = selection.clone();
-            let (sender, receiver) = std::sync::mpsc::sync_channel(32);
-            let mut watcher = RecommendedWatcher::new(
-                move |result: notify::Result<Event>| {
-                    if result
-                        .as_ref()
-                        .is_ok_and(|event| !callback_selection.observe(event))
-                    {
-                        return;
-                    }
-                    drop(sender.try_send(result));
-                },
-                notify::Config::default(),
-            )?;
-            let mut registered = BTreeSet::new();
-            let install = |watcher: &mut RecommendedWatcher, registered: &mut BTreeSet<PathBuf>| {
-                PolicyWatchInputs::install_selected_with_discovery(
-                    &selection,
-                    watcher,
-                    registered,
-                    &control,
-                    || self::selected(&root, &[input.clone(), later_input.clone()]),
-                )
-            };
-            let mut inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
-                "ancestor replacement (missing={missing}, layout={layout}): install initial watches for {input:?}: {source:?}"
-            )))?;
-            let await_selected_event = |inputs: &PolicyWatchInputs,
-                                        expected: Option<&Path>|
-             -> Result<(), Box<dyn Error>> {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                loop {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    let event = receiver.recv_timeout(remaining).map_err(|source| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!("ordinary external ancestor replacement was not observed (missing={missing}, layout={layout}): {source}"),
-                        )
-                    })??;
-                    if inputs.affects(&event)
-                        && expected.is_none_or(|path| event.paths.iter().any(|event| event == path))
-                    {
+        };
+        let denied = |operation: &str| -> Result<(), Box<dyn Error>> {
+            let error = fs::rename(&parent, &retired).err().ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "native ancestor rename unexpectedly succeeded with {operation}"
+                ))
+            })?;
+            require(
+                error.raw_os_error() == Some(5)
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && parent.is_dir()
+                    && nested.is_dir()
+                    && !retired.exists(),
+                &format!(
+                    "native ancestor rename control ({operation}) changed its error or tree: {error:?}"
+                ),
+            )
+        };
+        let open_directory = |path: &Path| {
+            // Match the locked notify backend's access, share and directory flags.
+            fs::OpenOptions::new()
+                .access_mode(FILE_LIST_DIRECTORY)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED)
+                .open(path)
+        };
+        roundtrip("no handles")?;
+        let target_handle = open_directory(&parent)?;
+        roundtrip("target handle only")?;
+        drop(target_handle);
+        let descendant_handle = open_directory(&nested)?;
+        denied("descendant handle")?;
+        drop(descendant_handle);
+        roundtrip("descendant handle dropped")?;
+
+        let await_teardown = |source_path: &Path, destination: &Path| -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match fs::rename(source_path, destination) {
+                    Ok(()) => {
+                        fs::rename(destination, source_path)?;
                         return Ok(());
                     }
+                    Err(source)
+                        if source.raw_os_error() == Some(5)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(source) => {
+                        return Err(std::io::Error::new(
+                            source.kind(),
+                            format!(
+                                "native ancestor rename after notify teardown: {source_path:?} -> {destination:?}: {source:?}"
+                            ),
+                        ));
+                    }
                 }
-            };
-            // The selected file and nearest watched directory are unchanged objects
-            // in the retired subtree; only an ordinary higher ancestor is renamed.
-            let replaced = if matches!(layout, "higher-ancestor" | "missing-parent") {
-                base.join("control")
+            }
+        };
+        let mut watcher = RecommendedWatcher::new(|_event| {}, notify::Config::default())?;
+        watcher.watch(&parent, RecursiveMode::NonRecursive)?;
+        roundtrip("notify target only")?;
+        watcher.watch(&nested, RecursiveMode::NonRecursive)?;
+        denied("notify descendant")?;
+        drop(watcher);
+        // notify queues teardown; await only the already observed native denial.
+        await_teardown(&parent, &retired)?;
+        // Stop/move/restart is a cold lifecycle, not an observed warm rename.
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let input = nested.join("rules");
+        let later = nested.join("later-rules");
+        fs::write(&input, "original.rs\n")?;
+        fs::rename(&parent, &retired)?;
+        fs::create_dir_all(&nested)?;
+        fs::write(&input, "replacement.rs\n")?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        let callback_selection = selection.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(32);
+        let mut watcher = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| {
+                if result
+                    .as_ref()
+                    .is_ok_and(|event| !callback_selection.observe(event))
+                {
+                    return;
+                }
+                drop(sender.try_send(result));
+            },
+            notify::Config::default(),
+        )?;
+        let control =
+            IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)));
+        let inputs = PolicyWatchInputs::install_selected_with_discovery(
+            &selection,
+            &mut watcher,
+            &mut BTreeSet::new(),
+            &control,
+            || self::selected(&root, &[input.clone(), later.clone()]),
+        )?;
+        require(
+            inputs.paths.contains(&input) && inputs.directories.contains(&nested),
+            "cold native restart did not rediscover the replacement policy directory",
+        )?;
+        fs::write(&later, "later.rs\n")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let event = receiver
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))??;
+            if inputs.affects(&event) && event.paths.iter().any(|path| path == &later) {
+                break;
+            }
+        }
+        drop(watcher);
+        await_teardown(&parent, &base.join("closed-parent"))?;
+        Ok(())
+    }
+
+    /// Exercise selection, native delivery, rebind and a distinct later policy leaf.
+    fn assert_native_policy_directory_replacement(
+        missing: bool,
+        layout: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let fixture_io = |operation: &str, path: &Path, result: std::io::Result<()>| {
+            result.map_err(|source| std::io::Error::new(source.kind(), format!(
+                "ancestor replacement (missing={missing}, layout={layout}): {operation} at {path:?}: {source:?}"
+            )))
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let selected_parent = base.join("control/current");
+        let directory = selected_parent.join("nested");
+        fixture_io("create source root", &root, fs::create_dir(&root))?;
+        fixture_io(
+            "create selected directory",
+            &directory,
+            fs::create_dir_all(&directory),
+        )?;
+        let selected = if matches!(layout, "external-alias" | "source-alias") {
+            let alias = if layout == "source-alias" {
+                root.join("selected")
             } else {
-                selected_parent
+                base.join("selected")
             };
+            create_policy_directory_alias(&base.join("control"), &alias)?;
+            alias.join("current/nested")
+        } else {
+            directory.clone()
+        };
+        let input = selected.join("rules");
+        let later_input = selected.join("later-rules");
+        if !missing {
+            fixture_io(
+                "write initial policy",
+                &input,
+                fs::write(&input, "original.rs\n"),
+            )?;
+        }
+        if layout == "missing-parent" {
+            fixture_io(
+                "remove prospective parent",
+                &directory,
+                fs::remove_dir(&directory),
+            )?;
+        }
+        let control =
+            IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)));
+        let selection = PolicyWatchSelection::new(root.clone());
+        let callback_selection = selection.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(32);
+        let mut watcher = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| {
+                if result
+                    .as_ref()
+                    .is_ok_and(|event| !callback_selection.observe(event))
+                {
+                    return;
+                }
+                drop(sender.try_send(result));
+            },
+            notify::Config::default(),
+        )?;
+        let mut registered = BTreeSet::new();
+        let install = |watcher: &mut RecommendedWatcher, registered: &mut BTreeSet<PathBuf>| {
+            PolicyWatchInputs::install_selected_with_discovery(
+                &selection,
+                watcher,
+                registered,
+                &control,
+                || self::selected(&root, &[input.clone(), later_input.clone()]),
+            )
+        };
+        let mut inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
+            "ancestor replacement (missing={missing}, layout={layout}): install initial watches for {input:?}: {source:?}"
+        )))?;
+        let await_selected_event = |inputs: &PolicyWatchInputs,
+                                    expected: Option<&Path>|
+         -> Result<(), Box<dyn Error>> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let event = receiver.recv_timeout(remaining).map_err(|source| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("ordinary external ancestor replacement was not observed (missing={missing}, layout={layout}): {source}"),
+                    )
+                })??;
+                if inputs.affects(&event)
+                    && expected.is_none_or(|path| event.paths.iter().any(|event| event == path))
+                {
+                    return Ok(());
+                }
+            }
+        };
+        // Unix-like backends permit higher ancestors to move with descendant
+        // watches open. Windows uses legal parent replacement/creation here;
+        // its separate causal matrix must establish the native handle limit.
+        #[cfg(not(windows))]
+        let replaced = Some(if matches!(layout, "higher-ancestor" | "missing-parent") {
+            base.join("control")
+        } else {
+            selected_parent
+        });
+        #[cfg(windows)]
+        let replaced = (layout != "missing-parent").then(|| directory.clone());
+        if let Some(replaced) = replaced {
             let retired = base.join("retired");
             fixture_io(
                 &format!("rename to {retired:?}"),
                 &replaced,
                 fs::rename(&replaced, &retired),
             )?;
-            fixture_io(
-                "recreate selected directory",
-                &directory,
-                fs::create_dir_all(&directory),
-            )?;
-            fixture_io(
-                "write replacement policy",
-                &input,
-                fs::write(&input, "replacement.rs\n"),
-            )?;
-            await_selected_event(&inputs, None)?;
-            inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
-                "ancestor replacement (missing={missing}, layout={layout}): rebind replacement watches for {input:?}: {source:?}"
-            )))?;
-            while receiver.try_recv().is_ok() {}
-            // A distinct new leaf prevents a delayed replacement event from
-            // impersonating later delivery from the newly registered directory.
-            fixture_io(
-                "write later policy",
-                &later_input,
-                fs::write(&later_input, "later.rs\n"),
-            )?;
-            await_selected_event(&inputs, Some(&directory.join("later-rules")))?;
         }
+        fixture_io(
+            "recreate selected directory",
+            &directory,
+            fs::create_dir_all(&directory),
+        )?;
+        fixture_io(
+            "write replacement policy",
+            &input,
+            fs::write(&input, "replacement.rs\n"),
+        )?;
+        await_selected_event(&inputs, None)?;
+        inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
+            "ancestor replacement (missing={missing}, layout={layout}): rebind replacement watches for {input:?}: {source:?}"
+        )))?;
+        while let Ok(result) = receiver.try_recv() {
+            result?;
+        }
+        // A distinct new leaf prevents a delayed replacement event from
+        // impersonating later delivery from the newly registered directory.
+        fixture_io(
+            "write later policy",
+            &later_input,
+            fs::write(&later_input, "later.rs\n"),
+        )?;
+        await_selected_event(&inputs, Some(&directory.join("later-rules")))?;
         Ok(())
     }
 

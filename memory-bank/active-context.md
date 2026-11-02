@@ -12,8 +12,8 @@ noverify/selfapproval, DB reset or silent confirmed self-hosting-bug deferral.
 
 Selected .worktrees/issue-739, fix/external-excludes-739, PR745 OPEN/unmerged,
 Refs739/base6927ed0ca64788db6947b4d43eafce29aac5ed61. Public/local committed
-HEAD8a276a885086fd4a0afb386d053d517898f4785e. Native watch-scope/CI follow-up
-is UNCOMMITTED; see current checkpoint below. Older sections are predecessor evidence.
+HEAD57bad541e70ff5833d25296261521e438815e0c1. Native watch-scope/CI follow-up
+is COMMITTED/PUSHED; see latest hosted checkpoint below. Older sections are predecessor evidence.
 Live731/PR737 and741/PR743 merged/CLOSED;739/738/708/715 OPEN; RC1 absent.
 Only OpenSpec1.1 checked;2.1/2.2/3.1 and all five acceptance rows remain open.
 
@@ -232,3 +232,166 @@ Both actual-diff independent Luna Max reviews APPROVE this bounded follow-up
 for native rerun. Not whole-issue acceptance, and Os5cause remains unresolved.
 Final fmt/strictOpenSpec/scopedPRIssueOps/diffcheck PASS. Normalcommit/push next;
 no selected-checkout edits during required hooks.
+
+
+## Latest authoritative checkpoint — public57bad54, 15:19Z onward
+
+Normalpush20909/wrapper4193263/git4193267 TERMINAL0 at2026-11-02T15:19:08.519898Z.
+Do NOT repoll/restart it as live.1814PASS/34suites/0FAIL/12ignored; required Rust,
+docs,dependency,repository,Atlas scan+lowpurpose lint gates PASS. Public/local
+HEAD57bad541e70ff5833d25296261521e438815e0c1 verified; PR745OPEN/unmerged/Refs739.
+Only memory edits afterpush; all artifact/cost proofs remain predecessor8a/dd15
+as explicitly labelled, not current-source equivalence.
+
+Source41470417383 LIVE, not terminal. Plan125362199356/repository125362377370/
+Windowsdiagnostics125362377377 SUCCESS. Rust125362377449/Linux125362377475/
+MacIntel125362377534/MacARM125362377643/Windows125362377760 LIVE. Retain same
+run/handles; Windows initially toolchainpreflight, Linux/MacARM PHPcoldbuild.
+Native policy commands now followPHP, no deadlineorselectorwaiver. Need actual
+Windows test result to establish Os5AccessDenied operation/layout/path; not yet
+rooted or claimedfixed. MacIntel compiletimeout fix likewise needsnativeproof.
+pr-state41470414773 SUCCESS. CodeQL41470411586 LIVE. Both Codex code review and
+separate securityreview RUNNING exact57 per6562604562 at15:19:44Z; no quotaerror.
+Prior8a code+Security completed; codehadfalse/false, securityretained3advisories.
+
+Current supplied31securitycollection assessment is COMPLETE, superseding older
+incomplete claims here: reported27native8a +3resourcebot +RustSec, inline/static
+against57; wholecollectionnormalizedBEFOREverdict,31not_actionablecurrentpatched
+source. All13Rustfiles in reportednativeflows unchanged8a->57; workflowsteps
+explicitlymapped. Correct4758Nodekind/4765Nodepath/4767parent_path (NOTlanguage);
+414fs::copy is contentread/write (NOTmetadata-only). Root/database selectors are
+independently constructed; derived targets have Normal-component/freshnative
+prefixadmission. Privatecfgtest developeroverride is not TempDirconfined byclaim.
+Originalresource/advisorydefects genuineinpredecessors, not originalfalsepositives.
+Noalertdismissal/suppression, noinputdedup, no newscan/exhaustivecleanclaim. App
+RENDERED31rowsSUCCESS. No tests/builds/apps/agents/repoedits initiated during
+staticphase; already-runningnormalpushindependent. Staticphase explicitlyLEFT.
+
+Artifacts /tmp/projectatlas-739-native-scope-{normalized-inputs,complete-triage,
+rendered-triage,triage-render-receipt,static-location-map}.json plus
+*static-triage.py. Appreceipt31. Currentpublicsecuritysummary6563449602 rewritten
+for31andexactreadback. NewCodeQLcollectionafter57analysis stillneedsfullintake/
+flowreconciliation; do not claim currentnativeanalysisreviewcomplete yet.
+
+CodeQL417thread PRRT_kwDOQyFgJ86ypas- now RESOLVED after staticroot/admission
+disposition, exactpublicheadcheck and technicalreply4444055416 exactreadback.
+SevenGENUINEfixthreads remainOPEN awaiting requiredacceptance. Fullthread-aware
+read /tmp/projectatlas-739-native-scope-review-threads.json (capturedBEFORE417
+resolution); do not treat it as currentresolvedstatewithoutchecking.
+PRbody updatedapp/readbackEXACT; *native-scope-pr-body.md +*pr-readback.json.
+It qualifies predecessorcost/upgrade/artifactproof and unknownWindowscause.
+
+Next: poll SAMEsourceWindows/Macjobs; inspectnativecontext iffails; fixconfirmed
+owningcausepreservingcapabilities, causaltests+LunaMax, then normalpublish. Once
+source settles finalartifactfreeze/affectedcost+upgrade+realCLI/MCPproof; reconcile
+newheadbots/CodeQL, sevenfixthreads, implementation/fiveacceptance and normalmerge/
+native739closure BEFORE738->708->715RC1publication+independentinstallverification.
+Alltaskstates unchanged, goalACTIVE; RC1unpublished,050Latest.715staysopenuntil
+separatelyauthorizedstablepromotion. Parked738/708 andprivate715edits preserved.
+
+Fresh57 review summary6562604562 at15:22:24Z: code_review COMPLETED false/false
+(no findings), separateSecurityreview RUNNING. PartialCodeQL6exact57analyses
+saved *native-scope-analysis-snapshot.json: Actions2078116821=2(fullSARIFfetched),
+JS2078117874/Ccpp2078116547/Python2078116519/Csharp2078116426/Go2078115522=0.
+Rust125362184021 stillLIVE, analysispending; do not assignnewcollectionverdict
+beforecompleteintake/normalization. Existing31static assessment reported8a stays
+validasqualified, not evidence that newexact57collectionwas fullyreconciled.
+
+
+## Windows lifecycle follow-up — latest implementation checkpoint
+
+Public/local committed HEAD57bad541e70ff5833d25296261521e438815e0c1; PR745OPEN.
+Current UNCOMMITTED changes: policy_watch.rs TESTS ONLY, design.md, spec.md and
+memory. No product/runtime/backend/dependency change in this follow-up. Source
+41470417383 stillLIVE atlastread: Rust125362377449 andLinux125362377475SUCCESS,
+MacIntel125362377534 documentresourceproofLIVE, MacARM125362377643 lifecycleLIVE;
+Windows125362377760TERMINALFAIL. Preserve same remainingjobs while normalnewpush
+gatesrun; a genuine nextsourcefix may supersedeoldrun, never restartforobstimeout.
+
+Windows57 now20policyPASS1FAIL; priorWin32selectionfailure FIXED. Exactfailure
+/tmp/projectatlas-739-native-scope-windows-ci-clean.log: DIRECTFIRSTLAYOUTpresent
+fs::rename(base/control/current,base/retired) Os5AccessDenied while watchednested
+is below it. Not alias/setup/write. Sourceobservertestsnotreached. Nativecause
+notyetaccepteduntilnewcausalmatrixpasses. MicrosoftFILE_RENAME_INFORMATION
+remarks125describesopen-descendant renameconstraint; shareDELETEaloneisnoproof
+ancestorcanmove. OfficialURLrecordeddesign; don'tclaimsupportedautomovefrom
+legalnearesttestsalone.
+
+Currenttestfactor: original9actualhigherancestorlayoutsremainnonWindows unchanged
+viaassert_native_policy_directory_replacement. Windows7legalpositivecasesreplace
+nearestwatcheddirectoryitself(direct/externalalias/sourcealias present/missingleaf)
+plusmissingparentcreation, thenrealinstall/rebind/distinctlaterleaf. NoPermission
+Denied-as-successinreplacementtest. Sharedtestqueue drainnowpropagatesnotifyErr.
+Windows-onlynative_descendant_directory_handles_bound_ancestor_rename: nohandles
+roundtrip; targethandleonlyroundtrip; exactnotifyFILE_LIST_DIRECTORY+BACKUP|
+OVERLAPPED+READ/WRITE/DELETEsharechildhandle causesexactOs5withoutmutation; drop
+childthenroundtrip. RepeatwithrealnotifytargetthenaddnestedONLYONCE. Dropnotify
+andbounded5srenameackretryONLYrawOs5;othererror/deadlineFAIL. Freshcoldlifecycle
+movesparentwhileunwatched,recreatesrules, NEWselection+watcher realcoldinstall,
+distinctlaterleafnotification. No freshqueuederrorsdiscarded; dropfreshwatcher
+andawaitteardownusingfreshclosed-parenttarget(retiredoccupied). Nativeproofpending.
+
+Luna741caughtduplicatewatch+asyncDropandfreshwatchercleanup/drainbugs; allfixed.
+Latestactualdiff741APPROVEDFORNATIVEPUBLICATIONONLY;731boundedsource/specslice
+APPROVED, informedofsubsequentcleanupfixes. Specnowexplicituser-visibleWindows
+stop-BEFOREmove/recreate/restartfreshpath; originalWHENactualancestorreplacement
+retainedfornative-permittedmoves. NoautomaticwarmclaimforOS-refusedoperation.
+No wholeissue/platformacceptanceclaim untilnativecausalmatrix+restartproofpass.
+Local58406TERMINAL0:23policytestsPASS0.24s, affectedCLIalltargetallfeatureClippy,
+strictstringsPASS. Finalfmt/OpenSpec/scopedIssueOps/diffcheck87202runningatwrite.
+
+NewSecurityreport4444215885 fs/lib199 (ancestor.ignoreFIFO/directory aboveGit):
+inlineSTATICsingle-reportcollectionnormalizedBEFOREverdict, not_actionableunder
+acceptedinheritance/unsupportedinputcontract. Canonicalignore0.4.34loadsandmatches
+.ignoreALLparents independentlyGitcutoff; validator, singlepath,batchseed and
+sourceobservationselectsameinputs. AcceptedSpecinherited/noGit+nonregularancestor
+refusalexplicit; droppingvalidationwouldletengineopenFIFO, stoppingancestrywould
+changesupportedpolicy. No generalsharedancestoravailabilityguarantee. AppRENDERED
+1rowSUCCESS; *ancestor-policy-{normalized-input,static-triage}.json. Staticphase
+explicitlyLEFT before agents/tests/edits. Independent741agreesdisposition. Real
+CLIproof4casesPASS /tmp/projectatlas-739-ancestor-policy-compatibility.{py,json}:
+stable050+immutable57bothhonorregularaboveGit.ignore/noGit; currentdir/FIFOprompt
+refusalpreservespublication/identity/approvedpurposes/authoredrevision, regular
+policyfilesymlinkpositive. TwoHARNESSerrorspreserved *initial-harness-failure.*
+(oldstablealreadyknowndocumentreasondivergence) and *root-selection-harness-failure.*
+(CLIinitdiscoversGitroot, notnestedatlas). No newproductdefectclaimed. Existing
+Rustsubrootinheritanceunitremainsproof. Reply4444477324EXACTreadback; newthread
+PRRT_kwDOQyFgJ86yu_LD RESOLVED afterheadcheck. StillSEVENgenuinefixthreadsopen;
+CodeQL417FPthreadalreadyresolved. Public31summarynotyetupdatedfornewseparatereport.
+
+OptimizedCURRENT57artifactbuild92805TERMINAL0(41s), frozen ~/.cache/projectatlas-
+benchmarks/external-policy-739-native-scope-release: CLI64ad0bd87e2ca04c2240a0a6
+d4145473c9deeff70bbb1afce5fea8d01dacad1e,69,998,592bytes; FShelper544eb8349e6803
+c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9 byteidentical.140inputmanifest
+c082f60c9419200af526544d98d38cc00e9aafb3ea3c36ee9ec9de4db04b07cd; allcommitted57
+ANDsavedbytesmatched /tmp/projectatlas-739-native-scope-commit-source-binding.json.
+Currentlatercfgtest-onlyeditsdifferfromthatmanifest; don'tclaimequivalencewithout
+rebuild/byteidentityandnewsourcebinding. Fresh18CLIcost+4stable/mainupgradecases+
+2DER25MarkdownrepaircasesPASS89968: ordinaryinit311.27->312.21ms/noop48.37->49.47ms;
+10krulesnoop71.36->95.51ms, scopednotSLO. *native-scope-{cli-cost-proof,upgrade-
+proof,markdown-contract-upgrade-proof}.{json,log}, scriptscost/upgradecloned.
+Four64adoptimizedCLI/MCPadapters81398TERMINAL0 external1.892s/doc2.341s/Unicode-root
+ancestor+replacement16.770s/automaticstate2.354s. *native-scope-optimized-adapters
+.{py,json}, optimized-*.log. Bothruntimebinaryenvsoverridden; compiledharnesses
+fromnormalpushlog. No newprefixcomplete/coldpolicycostmeasurementfor64adyet.
+Resourcefixturesstill8a/dd15predecessorevidence; trackedcostdocsalsostill8a,
+truthfullymarkedpredecessor, notfresh57/finalsource. Nextfinalfreeze/reproofor
+exactbinaryidentityreusemustdocumentthatdistinction.
+
+57CodeQL41470411586Rust125362184021stillLIVE atlastread;6othersSUCCESSpartial
+analysissnapshotandActions2078116821SARIFsaved. No freshcomplete57nativecollection
+intake/verdictyet. 31reported8acollection/current57staticrenderremainsqualified;
+newseparateancestorreportaddsoneassessedinputbutdon'tclaimnewnativeanalysisdone.
+BothCodexreviews57COMPLETED: codefalse/false,securitytrue/truefromnewancestor
+report(nowdispositioned/resolved). Getfreshsummaryafternewhead, notquotablocked.
+
+NEXT: finish87202cheapgates; normalcommitofWindowsTEST/spec/design/memoryslice,
+normalcleanpushwithrequiredhooks(noeditsduringpush), thenactualWindowscausal/
+legal/coldrestartproof. Holdalltask/fiveacceptancecompletion/mergeuntilactual
+proof. Finishfrozenartifact/cost/upgrade/resourceCLI/MCPbindings; reconcilefresh
+fullCodeQL+code/securityfeedback; reply/resolve7genuinefixthreadswithproof; then
+normalmerge/native739CLOSED before738->708->715RC1publication+independentinstall.
+GoalACTIVE,4issuesOPEN,RC1unpublished,stable050Latest;715privateeditsandparked
+738/708preserved. Stablepromotionrequireslaterinstruction.
+
+Final87202cheapgatesTERMINAL0:fmt/strictOpenSpec/scopedPRIssueOps/diffcheckPASS. LatestactualLuna741publicationapprovalincludesallcleanup/errorpropagationanduser-visiblecontractfixes. Normalcommit/cleanpushnext; nochangeselsewhere.
