@@ -1229,6 +1229,7 @@ jobs:
           cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation observed_mcp_reconciles_document_only_target_changes -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation external_policy_ancestor_restart_preserves_cli_mcp_observation -- --exact --nocapture
 
       - name: Native source-observer teardown and MCP identity
         if: contains(matrix.contracts, 'mcp')

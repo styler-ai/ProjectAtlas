@@ -70,6 +70,7 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** native Windows observation holds an open directory handle below an ancestor selected for a move
 - **THEN** if Windows refuses the move before namespace mutation, automatic warm rebinding is not promised for that unperformed operation; the operator stops observation before moving/recreating the ancestor and restarts observation for fresh discovery
 - **AND** that fresh discovery binds the current selected policy paths and subsequent distinct policy edits remain observable, with no-handle, target-handle and descendant-handle controls establishing the native boundary and successful moves after handle release
+- **AND** real CLI and MCP lifecycle proof fully stops and reaps the prior observer before the higher move, starts fresh observation, and retains subsequent distinct policy/source edits, the explicit database binding, identity and all authored purposes; nearest-directory warm replacement remains a separate positive control
 - **AND** supported nearest-directory replacements, missing-parent creation and regular directory/file aliases retain native Windows proof; the nine ordinary higher-ancestor replacement layouts remain required on Linux and macOS
 
 #### Scenario: A selected policy parent is a regular file

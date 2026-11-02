@@ -594,3 +594,107 @@ keepdff/c431historical,neverassumebinaryidentity. Thenfreshnative/securityfull
 headreconcileand8genuinefeedback/tasks/acceptance;normal739merge/nativeclosure
 BEFORE738->708->715RC1publish/independentinstall. GoalACTIVE,RC1absent/050Latest;
 preserveparkedwork/private715edits,stablepromotionrequireslaterinstruction.
+
+
+## Sourcecommit2d16 and newly exposed Windows E2E mismatch
+
+Local sourcecommit2d16fd407da6f8973a7676ecc3ee0c2ef98bc7f2 creatednormally after
+scopedIssueOps candidate4/live4/checked1,fmt,diff PASS. Containsreviewedbounded
+fence/controlhandoff +3newunits+LinuxnativeE2E+nativeCIcontrolselector+inventory
+225/hash e8a3ffc5...e75c4 +spec/task/memory. LOCALONLY, NOTPUSHED. PublicPR745
+stillc431fdb. No live localbuild/test/push now.58578TERMINAL0;79213TERMINAL0.
+Do not repolloldcompletedhandles. 2.1staysreopened(allacceptanceunchecked).
+
+Beforeplannedoptimizedfreeze, c431Windows125425270659 TERMINALFAIL atlate
+External source policy and root replacement: externalpolicytest anddoc-transition
+precedingtestsPASS; source_root_replacement_preserves_cli_mcp_external_bindings
+FAIL16.95s with'CLI replacement failed: Access is denied. (os error 5);stdout=
+stderr='. Logs /tmp/projectatlas-739-platform-debug-windows-ci{,-clean}.log.
+CompletejoblogsavailablewhileoverallrunLIVE. Do NOT assumewholeWindowsaccepted.
+
+Exacthelpercurrente2e_navigation:14017 replace_policy unconditionallyrenames
+directory/policy/current -> directory/retired-policy whilecurrent/nested policy
+iswatched. It isfirstcalledafterCLIwatcher_ready(14150); MCPshareshelperbutwas
+notreached. ThisistheSAMEoperationclassalreadyshownOS-refused bynative1bWindows
+descendant-handle matrix. Genericcatchdoesn'tidentifywhichoperationreturnedOs5,
+so don'tclaimdirectstageproofyet. No productionWindowsbackendbugestablished.
+Currentroot/source rename also lacksstagecontext.
+
+PLAN NEXT(primaryownsallwrites, Luna741read-onlyplanreviewRUNNING): alignactual
+warmpublicCLI/MCPfixturewithalreadyacceptedWindowslimit—Windowsreplace nearest
+selectedconfigparent nested(legal target-only case); nonWindowsretainhigher
+policy/current ancestor. Addinspect_err stage/pathdiagnostics aroundpolicy/source
+rename,recreation,writes preservingrawioerror. AddseparatepermanentWindows
+realCLI+MCP stop-before-higher-move/recreate/restart positive, smallfreshfixture
+soearlierwarmphaseisnotmasked:actualprocessstop/reapbeforemutation,newdiscovery
+andsubsequentdistinctpolicy/sourceedits,allauthored/identitypreservation and
+normalMCPread/explicitrefreshsemantics. AddWindowsCIexactselector,inventorynew
+testrow/count226 andpairednormalizedsourcehashafterformatting. No countingOs5as
+success, platformskip, backendrelaxation, orclaimnearesttestproveshigherautomatic
+recovery. ExistingacceptedWindowsSpecalreadyrequiresstop/move/restart; strengthen
+explicitrealCLI/MCPproofifneeded. 2.2remainsopenfornativeinstalledacceptance.
+
+HOLDoptimizedfreeze untilthisboundedfixture/public-lifecycle slice settles.
+Thencommitslice,build/freezeexactcommitteddefaultrelease+newcost/upgrade/adapters
+(includingnewflood),cost/taskmetadata+rebinding BEFORE single NORMALcleanpush,
+requiredhooks/freshnative/securitygates. No currentartifactclaimfromhistoricaldff.
+Freezehelperavailable /tmp/projectatlas-739-freeze-native-rename.py; CLONEtofresh
+policy-fenceorfinal namespace, don'toverwriteimmutableoldfolder/receipt. Itneeds
+CargoJSONartifactlog andbuildlog withmatchingprefix; includes140trackedcrate
+inputs+Rustcosthelperlinks/frozenCLI. No newbuildstartedyet.
+
+C431SOURCE41488165395stillLIVE: Rust/repository/diagnostics/Linux/ARMfullSUCCESS;
+WindowsFAILasabove;MacIntel125425271172latepluginupdateproof(stillLIVEat18:09Z).
+LinuxinstalledreaderPASSprovespriorENOSPCfix; WindowsandMacIntelbothpassed
+resource/installedreaderbeforelatersteps. PreserveSAMEremainingrun,don'trestart
+forobstimeout. Current publicnewcode/securityreviewscomplete; Codecleanfalse/
+false,securitynewfenceconfirmed;freshfull33intakeavailablebutnoaggregateverdict
+claim. 8genuinefeedbackthreadsOPEN; alltaskstate/issuebodycurrent. Source2d16
+fixalreadyapprovedindependentlybounded; no overallacceptance.
+
+PublicPRbody+securitysummary6563449602 updatedappandexactreadbackfornewfence
+followup, prior32assessmentexplicitlydoesnotcovernew1 orclean-headclaim.
+GoalACTIVE739onlybefore738->708->715RC1;RC1absent050Latest;parked/privatework
+preserved, stablepromotionrequireslaterinstruction.
+
+
+## Reviewed public policy lifecycle coverage — ready for source commit
+
+LocalHEAD2d16(publicc431), currentdirtycoverage slice is primary's #739work.
+Luna741PLAN+actualcode/E2E/diagnostics/inventory APPROVED for nextnativepublication;
+no sourceblocker. ActualWindowslegalwarm+stoprestartproofstillrequired.
+Oldc431SOURCE41488165395 TERMINALFAIL: Windows125425270659lateknownE2Efixture
+Os5; MacIntel125425271172+Linux+ARM/Rust/repository/diagALLSUCCESS. Do not keep
+pollingoldrun. Mainremains6927ed0ca64788db6947b4d43eafce29aac5ed61.
+
+Warmreplace_policy nowcfgWindowsnearestgit_config.parent(), otherplatformshigher
+policy/current unchanged. NO product/runtimechangeinthisslice. NewPORTABLE
+external_policy_ancestor_restart_preserves_cli_mcp_observation (notWindowscfg)
+fullyreapsCLImaxcycle1orMCPshutdownbeforeactualhigherancestorrename/recreate;
+freshCLI/MCPprocessesdiscovercurrentpolicyanddistinctlaterpolicy/sourceedit;
+CLI8cycles/notify,correctMCPreadguidance+explicitrefresh,allauthoredpurposes/
+identity/revision/externalDB preserved. ExistingMCP leg provesfreshprocess/session
+reset,notassertedreleaseofaspecificMCP-heldnativehandle; nativehandleunitmatrix
+remainsWindowsOSboundaryproof. Exacttestselectoraddedall4nativeCIjobs,same5mincap.
+
+Testsper86098: restartPASS9.40s +existingwarmCLI/MCPsource/rootreplacementPASS
+39.92s onLinux. Initialinventory83selectorappendorderwaswrong, correctedto
+workfloworder; historical440symbols/facetsunchanged. Initialeprintln diagnostics
+failedClippyprint-stderr; correctedwithoutallowtoPRIVATEthiserrorfixtureerror
+recordsretainingactualioError/sourcechain+operation/path. Botholdreplacementand
+newrestartCLIerrorbranchesretainoriginalcause/stdout/stderr. No dependencychange.
+Finalsourcehash cee7788173fc1ff460b0f234c1330beca53e02da46438e6d1b190c4a2cd02847
+pairedinJSON/source_contract;226tests/83selectors. Sharedfixturepathsconstants
+keepidenticalbytesandstrictstrings; active/dormantpurposecontractsunchanged.
+
+FINAL37064TERMINAL0:CLIalltargets/allfeaturesClippy,strictstrings,3inventory
+contract/tampertests,strictOpenSpec,fmt,diffPASS. Diagnostic-onlylastchangesdon't
+alterpassingpositivecases; optimizedexactartifactadapterproofwillrerunboth.
+No localbuild/testprocesslive. Preparedfreshfreezehelper /tmp/projectatlas-739-
+freeze-policy-fence.py;immutablefolder external-policy-739-policy-fence-release
+ABSENTbeforebuild (mkdirrefusesoverwrite). Sourcecommitnextthenlockeddefault
+releaseCargoJSONbuild ->freeze ->affectedcost/upgrade+CLI/MCPinclflood/restart ->
+finalcost/taskmetadata+140inputrebinding ->SINGLEnormalcleanpushrequiredhooks.
+No freezesnapshotbuilt yet. Historicaldff/c431sourceproofnotcurrent2d16+coverage.
+2.1open/1.1checkedonly;2.2/3.1/fiveacceptanceunchecked,8genuinefeedbackOPEN.
+GoalACTIVE739onlybefore738/708/715RC1;stable050Latest andparked/privateworkpreserved.

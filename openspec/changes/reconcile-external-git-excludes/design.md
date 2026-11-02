@@ -334,7 +334,15 @@ coverage remains shared. The separate Windows stop/move/restart control construc
 a fresh selection and watcher, installs through the real cold discovery owner,
 and requires a distinct later policy event. This explicitly documents a native
 backend lifecycle limit rather than claiming automatic higher-ancestor recovery
-from tests of another operation. The isolated Windows matrix and restart control
+from tests of another operation. The public CLI/MCP replacement fixture uses the nearest selected directory on
+Windows while Linux/macOS keep the higher-ancestor move. A separate real CLI and
+MCP lifecycle fixture fully stops and reaps each prior process before moving and
+recreating the higher ancestor, then starts fresh observation and proves a
+distinct later policy edit and source edit with the same database identity and
+authored purposes. Run this portable lifecycle fixture on every native platform.
+Stage-specific rename/create/write diagnostics preserve the actual I/O error;
+a later source-root move is a distinct operation requiring its own evidence if
+it fails. The isolated Windows matrix and public restart controls
 must establish the limit natively before this acceptance is complete; no product
 backend, source witness, quota, indexing deadline or security boundary changes.
 

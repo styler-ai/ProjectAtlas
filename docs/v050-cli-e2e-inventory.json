@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "cdf0fb4f7cd8425a05fdcd49588e8ca25601261c467350a1c71e80a61e7a31d8",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "6c0c1dc753d92d90c1ed48e5c851a0163d8962ccc09e4b25f6c307d6cb477a4d",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "3f583175a078d607cbc7d7db0ac6d26361e7507e518e79e6113ae8a97e27ad08",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "e8a3ffc5634e65da75f7c7bc0214573142c70fd5d79ffd464785e156303e75c4",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "cee7788173fc1ff460b0f234c1330beca53e02da46438e6d1b190c4a2cd02847",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "ebb8c769da7d018645761bfcc4de3cda47fda0721de7c16ef1c46df413201c9a"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 225,
+  "test_count": 226,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -1989,6 +1989,13 @@
       "owner": "e2e_navigation",
       "attributes": [
         "#[cfg(target_os = \"linux\")]",
+        "#[test]"
+      ]
+    },
+    {
+      "name": "external_policy_ancestor_restart_preserves_cli_mcp_observation",
+      "owner": "e2e_navigation",
+      "attributes": [
         "#[test]"
       ]
     }
@@ -20118,6 +20125,10 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation external_policy_ancestor_restart_preserves_cli_mcp_observation -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",

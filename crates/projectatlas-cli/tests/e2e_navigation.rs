@@ -88,6 +88,8 @@ use zip::write::SimpleFileOptions as FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
 const EXTERNAL_POLICY_RULES_FILE: &str = "rules";
+const EXTERNAL_PROJECT_CONFIGURATION_FILE: &str = "external.toml";
+const UNICODE_SOURCE_ROOT_DIRECTORY: &str = "π-source-root";
 const XDG_CONFIGURATION_DIRECTORY: &str = "xdg";
 
 const OBSERVED_SOURCE_PATH: &str = "source.rs";
@@ -13918,7 +13920,6 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
 
 #[test]
 fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
-    const EXTERNAL_POLICY_DIRECTORY: &str = "policy/current/nested";
     // Native platforms may split replacement notifications into several batches.
     // Retain the replacement margin, two closure phases and two external policy phases.
     const WATCH_CYCLE_BUDGET: usize = 12;
@@ -13945,8 +13946,12 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
     fn replace_project(root: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
         let replacement = directory.join("replacement-root");
         write_project(&replacement, "replacement_target")?;
-        fs::rename(root, directory.join("retired-root"))?;
-        fs::rename(replacement, root)?;
+        fs::rename(root, directory.join("retired-root")).map_err(|source| {
+            WatchFixtureIoError::new("source-root retirement failed", root, source)
+        })?;
+        fs::rename(replacement, root).map_err(|source| {
+            WatchFixtureIoError::new("source-root replacement installation failed", root, source)
+        })?;
         Ok(())
     }
 
@@ -14013,32 +14018,49 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         Ok(())
     }
 
-    /// Replace a higher ordinary namespace while retaining the selected input spelling.
+    /// Replace a natively movable namespace while retaining the selected input spelling.
     fn replace_policy(
         directory: &Path,
         git_config: &Path,
         rules: &Path,
     ) -> Result<(), Box<dyn Error>> {
-        fs::rename(
-            directory.join("policy/current"),
-            directory.join("retired-policy"),
-        )?;
+        #[cfg(windows)]
+        let replaced = git_config
+            .parent()
+            .ok_or_else(|| io::Error::other("policy config has no parent"))?
+            .to_path_buf();
+        #[cfg(not(windows))]
+        let replaced = directory.join(EXTERNAL_POLICY_ANCESTOR_DIRECTORY);
+        fs::rename(&replaced, directory.join(RETIRED_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("live policy-directory retirement failed", &replaced, source)
+        })?;
         fs::create_dir_all(
             git_config
                 .parent()
                 .ok_or_else(|| io::Error::other("policy config has no parent"))?,
-        )?;
-        fs::write(git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
-        fs::write(rules, "policy-followup.rs\n")?;
+        )
+        .map_err(|source| {
+            WatchFixtureIoError::new(
+                "live policy-directory recreation failed",
+                git_config,
+                source,
+            )
+        })?;
+        fs::write(git_config, format!("[core]\nexcludesFile = {rules:?}\n")).map_err(|source| {
+            WatchFixtureIoError::new("live policy-config write failed", git_config, source)
+        })?;
+        fs::write(rules, "policy-followup.rs\n").map_err(|source| {
+            WatchFixtureIoError::new("live policy-rule write failed", rules, source)
+        })?;
         Ok(())
     }
 
     for surface in ["cli", "mcp"] {
         let temp = tempfile::tempdir()?;
         let directory = temp.path();
-        let root = directory.join("π-source-root");
+        let root = directory.join(UNICODE_SOURCE_ROOT_DIRECTORY);
         let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
-        let config = directory.join("external.toml");
+        let config = directory.join(EXTERNAL_PROJECT_CONFIGURATION_FILE);
         let git_config = directory
             .join(EXTERNAL_POLICY_DIRECTORY)
             .join(EXTERNAL_GIT_CONFIGURATION_FILE);
@@ -14207,11 +14229,12 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             }
             let output = child.wait_with_output()?;
             if let Err(error) = operation {
-                return Err(io::Error::other(format!(
-                    "CLI replacement failed: {error}; stdout={} stderr={}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ))
+                return Err(WatchFixtureCommandError {
+                    operation: "CLI replacement failed",
+                    source: error,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                }
                 .into());
             }
             rust_binding_require(output.status.success(), "watch refreshes failed")?;
@@ -14318,10 +14341,382 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn external_policy_ancestor_restart_preserves_cli_mcp_observation() -> Result<(), Box<dyn Error>> {
+    const CYCLES: usize = 8;
+
+    fn await_watch(
+        child: &mut Child,
+        database: &Path,
+        label: &str,
+        mut observed: impl FnMut(&AtlasStore) -> Result<bool, Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if observed(&AtlasStore::open_read_only(database)?)? {
+                return Ok(());
+            }
+            if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "restarted native watch did not observe {label}"
+                ))
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn source_target(
+        session: &mut McpContractSession,
+    ) -> Result<BTreeSet<(String, String)>, Box<dyn Error>> {
+        let arguments = json!({"view":"detailed", "file":RUST_LIBRARY_PATH, "symbol":"caller", "relation":"calls", "limit":10});
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                io::Error::other(format!("restarted MCP source rows missing: {value}"))
+            })?;
+        Ok(rust_binding_targets(rows))
+    }
+
+    fn policy_outcome(
+        session: &mut McpContractSession,
+        root: &Path,
+        database: &Path,
+    ) -> Result<String, Box<dyn Error>> {
+        let arguments =
+            json!({"view":"detailed", "file":"README.md", "relation":"documents", "limit":10});
+        let before = AtlasStore::open_read_only(database)?.index_publication()?;
+        let mut value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        if value.pointer("/error/kind").and_then(Value::as_str) == Some("refresh_required") {
+            rust_binding_equal(
+                &AtlasStore::open_read_only(database)?.index_publication()?,
+                &before,
+            )?;
+            session.call_tool("atlas_watch_once", &json!({"path":root}))?;
+            value = toon_format::decode_default(
+                &session.call_tool("atlas_symbol_relations", &arguments)?,
+            )?;
+        }
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                io::Error::other(format!("restarted MCP policy rows missing: {value}"))
+            })?;
+        rust_binding_equal(&rows.len(), &1)?;
+        let row = &rows[0];
+        if row
+            .pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            == Some("resolved")
+        {
+            Ok("resolved".to_string())
+        } else {
+            row.get("document_unresolved_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other(format!("policy outcome missing: {row}")).into())
+        }
+    }
+
+    for surface in ["cli", "mcp"] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().canonicalize()?;
+        let root = directory.join(UNICODE_SOURCE_ROOT_DIRECTORY);
+        rust_binding_project(&root, "2024")?;
+        fs::write(
+            root.join(RUST_LIBRARY_PATH),
+            "pub fn initial_target() {}\npub fn caller() { initial_target(); }\n",
+        )?;
+        fs::write(
+            root.join(OBSERVED_SOURCE_PATH),
+            "pub fn policy_target() {}\n",
+        )?;
+        fs::write(root.join("README.md"), "# Restart\n[target](source.rs)\n")?;
+        let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
+        let config = directory.join(EXTERNAL_PROJECT_CONFIGURATION_FILE);
+        let git_config = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        let rules = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_POLICY_RULES_FILE);
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY))?;
+        fs::write(&config, format!("[project]\nroot = {root:?}\n"))?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("policy config is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let command = || {
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(&root)
+                .args(["--format", "json", "--config"])
+                .arg(&config)
+                .arg("--db")
+                .arg(&database);
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            command
+        };
+        Command::from_std(command())
+            .arg("init")
+            .timeout(Duration::from_secs(60))
+            .assert()
+            .success();
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Retain restart guide responsibility",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                RUST_LIBRARY_PATH,
+                "Retain restart source responsibility",
+                PurposeSource::Agent,
+            )?;
+            rust_binding_require(
+                store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_none(),
+                "initial external rule did not exclude source",
+            )?;
+        }
+        let before = mcp_database_snapshot(&database)?;
+
+        // Fully stop and reap the observer before moving an ancestor above its
+        // watched directory. Windows need not permit that move while it is live.
+        if surface == "cli" {
+            let output = Command::from_std(command())
+                .args(["watch", "--max-cycles", "1"])
+                .timeout(Duration::from_secs(60))
+                .output()?;
+            rust_binding_require(
+                output.status.success(),
+                "initial native CLI observer did not stop",
+            )?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            require_json_string(&report, &["mode"], "notify")?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &policy_outcome(&mut session, &root, &database)?,
+                        &"ignored".to_string(),
+                    )?;
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let higher = directory.join(EXTERNAL_POLICY_ANCESTOR_DIRECTORY);
+        fs::rename(&higher, directory.join(RETIRED_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-ancestor retirement failed", &higher, source)
+        })?;
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-ancestor recreation failed", &higher, source)
+        })?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n")).map_err(
+            |source| {
+                WatchFixtureIoError::new("stopped policy-config write failed", &git_config, source)
+            },
+        )?;
+        fs::write(&rules, "").map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-rule write failed", &rules, source)
+        })?;
+
+        if surface == "cli" {
+            let mut child = command()
+                .args(["watch", "--poll-seconds", "1", "--max-cycles"])
+                .arg(CYCLES.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                await_watch(&mut child, &database, "fresh policy discovery", |store| {
+                    Ok(store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_some())
+                })?;
+                fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+                await_watch(&mut child, &database, "later policy edit", |store| {
+                    Ok(store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_none())
+                })?;
+                fs::write(
+                    root.join(RUST_LIBRARY_PATH),
+                    "pub fn edited_target() {}\npub fn caller() { edited_target(); }\n",
+                )?;
+                await_watch(&mut child, &database, "later source edit", |store| {
+                    Ok(store
+                        .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+                        .iter()
+                        .any(|symbol| symbol.name == "edited_target"))
+                })?;
+                for ordinal in 0..CYCLES {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    let name = format!("restart_finished_{ordinal}");
+                    fs::write(
+                        root.join(RUST_LIBRARY_PATH),
+                        format!("pub fn {name}() {{}}\n"),
+                    )?;
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while child.try_wait()?.is_none()
+                        && !AtlasStore::open_read_only(&database)?
+                            .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+                            .iter()
+                            .any(|symbol| symbol.name == name)
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::other(
+                                "restarted CLI did not finish its bounded cycles",
+                            )
+                            .into());
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                rust_binding_require(
+                    child.try_wait()?.is_some(),
+                    "restarted CLI exceeded its cycle drain",
+                )?;
+                Ok(())
+            })();
+            if operation.is_err() {
+                let _stopped = child.kill();
+            }
+            let output = child.wait_with_output()?;
+            if let Err(error) = operation {
+                return Err(WatchFixtureCommandError {
+                    operation: "CLI restart failed",
+                    source: error,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                }
+                .into());
+            }
+            rust_binding_require(output.status.success(), "restarted native CLI failed")?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            require_json_string(&report, &["mode"], "notify")?;
+            require_json_usize(&report, &["cycles"], CYCLES)?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                session.call_tool("atlas_watch_once", &json!({"path":root}))?;
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &policy_outcome(&mut session, &root, &database)?,
+                        &"resolved".to_string(),
+                    )?;
+                }
+                fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while policy_outcome(&mut session, &root, &database)? != "ignored" {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            io::Error::other("restarted MCP missed later policy edit").into()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                fs::write(
+                    root.join(RUST_LIBRARY_PATH),
+                    "pub fn edited_target() {}\npub fn caller() { edited_target(); }\n",
+                )?;
+                let expected =
+                    BTreeSet::from([(RUST_LIBRARY_PATH.to_string(), "edited_target".to_string())]);
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while source_target(&mut session)? != expected {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            io::Error::other("restarted MCP missed later source edit").into()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let after = mcp_database_snapshot(&database)?;
+        rust_binding_equal(&after.project_instance_id, &before.project_instance_id)?;
+        rust_binding_equal(&after.authored_purposes, &before.authored_purposes)?;
+        rust_binding_equal(&after.purpose_revision, &before.purpose_revision)?;
+        rust_binding_require(
+            !root.join(ATLAS_DIR_NAME).join("projectatlas.db").exists(),
+            "restart created an implicit database",
+        )?;
+    }
+    Ok(())
+}
+
+/// Add operation context while retaining the original native fixture I/O error.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} at {path:?}: {source}")]
+struct WatchFixtureIoError {
+    operation: &'static str,
+    path: PathBuf,
+    #[source]
+    source: io::Error,
+}
+
+impl WatchFixtureIoError {
+    fn new(operation: &'static str, path: &Path, source: io::Error) -> Self {
+        Self {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Retain child diagnostics without replacing the original fixture error chain.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}; stdout={stdout} stderr={stderr}")]
+struct WatchFixtureCommandError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error>,
+    stdout: String,
+    stderr: String,
+}
+
 /// Conventional library path shared by the Rust navigation fixtures.
 const RUST_LIBRARY_PATH: &str = "src/lib.rs";
 /// Explicit Git configuration used by the external-policy fixtures.
 const EXTERNAL_GIT_CONFIGURATION_FILE: &str = "selected.gitconfig";
+/// Selected policy namespace beneath the higher ordinary replacement ancestor.
+const EXTERNAL_POLICY_DIRECTORY: &str = "policy/current/nested";
+/// Higher policy ancestor moved only where native handles permit it or after shutdown.
+const EXTERNAL_POLICY_ANCESTOR_DIRECTORY: &str = "policy/current";
+/// Retired policy namespace kept separate from its replacement.
+const RETIRED_POLICY_DIRECTORY: &str = "retired-policy";
 /// Worker module used by the Rust binding fixtures.
 const RUST_BINDING_WORKER_PATH: &str = "src/worker.rs";
 /// Source declaration behind Rust forwarding aliases.
