@@ -21,7 +21,7 @@
   "candidate": {
     "derivation": 25,
     "semantic": 23,
-    "source_manifest_sha256": "243a8385160eb477c1670b8ee595a590b6a5968841cacd836d8c7ebadd24bf4a",
+    "source_manifest_sha256": "9c3f4ff5302fb1c3407df6ea545c94bc145d997ad8be1c491e0317a36f241172",
     "bytes": 69962536,
     "sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06"
   },
@@ -49,7 +49,7 @@
       "reuse_basis": "Exact relinked native filesystem helper byte identity; current CLI costs and upgrades measured freshly."
     },
     "cli_measurement_source_manifest_sha256": "bcd077917dd9ae3ff814603f18908c8bbc167a83cb79dfd45648c9dc0187bbea",
-    "cli_measurement_reuse_basis": "Only the macOS E2E failure-diagnostic helper changed after fresh measurements; rebuilt optimized CLI and filesystem helper are byte-identical. All fresh CLI, upgrade and real-adapter product measurements remain bound to the same executable bytes."
+    "cli_measurement_reuse_basis": "Only E2E timeout diagnostics and their matching frozen source-identity table changed after fresh measurements; rebuilt optimized CLI and filesystem helper are byte-identical. CLI, upgrade and real-adapter measurements remain bound to the same executable bytes."
   },
   "fixtures": {
     "ordinary": {

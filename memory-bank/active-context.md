@@ -11,8 +11,8 @@ noverify/selfapproval or DB reset. Primary implements; Luna Max reviewers read o
 
 Selected .worktrees/issue-739, fix/external-excludes-739, PR745OPEN/unmerged,
 base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs739. Publicheadb703f544167e452310f36ea2870c433193b78906.
-This source/continuity checkpoint is being committed as its follow-up; use Git HEAD
-for exact localcommit. Only1.1 checked;2.1/2.2/3.1 and all5acceptance rows unchecked.
+Local source fix8f057598f8bb74881cc67549ef1eee6f8b2f4a9f; subsequent metadata
+commit refreshes the frozen E2E identity pair. Use Git HEAD for exactlocalcommit. Only1.1 checked;2.1/2.2/3.1 and all5acceptance rows unchecked.
 #731/PR737 and #741/PR743 merged/CLOSED; #739/#738/#708/#715 OPEN, RC1unpublished.
 
 ## Current follow-up: prefix-probe security fix and native fixtures
@@ -74,17 +74,18 @@ lifecycle, cleanup, context and primaryerror: APPROVED. No timeoutincrease/retry
 
 ## Current immutable artifact and local adapter proof
 
-Final source folder ~/.cache/projectatlas-benchmarks/external-policy-739-prefix-admission-release:
+Final source folder ~/.cache/projectatlas-benchmarks/external-policy-739-prefix-contract-release:
 CLIe89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06,
 69,962,536bytes; FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9.
-140-input manifest243a8385160eb477c1670b8ee595a590b6a5968841cacd836d8c7ebadd24bf4a.
+140-input manifest9c3f4ff5302fb1c3407df6ea545c94bc145d997ad8be1c491e0317a36f241172.
 Built from saved dirty source; receipt preserves that truth. NEXT: bind ALL140
 saved hashes to the new committed tree and clean checkout before normalpush.
 No further source edits without rebuilding/rebinding affected proof.
 
 Fresh measured source manifestbcd077917dd9ae3ff814603f18908c8bbc167a83cb79dfd45648c9dc0187bbea
 at intermediate external-policy-739-fresh-prefix-release has EXACT SAME CLI/helper
-bytes. Only E2E failure-diagnostic source changed between those manifests. Final
+bytes. Only E2E failure diagnostics and their paired frozen source-identity table changed
+between those manifests; no production code or binary change. Final
 rebuilt byteidentity verified, so reuse these fresh product measurements explicitly.
 FShelper identical to older measured ddc component:18FSsamples reused with old
 manifest/overlap limitation.18freshCLIcost/fourupgrade+rollback PASS at e89;
@@ -222,5 +223,15 @@ has3private715proposal/design/spec edits plusmemory; never revert. Later715
 evaluatesPR744outsideRCmilestone andCodexCIgap. Source /tmp/projectatlas-rc1-test-env.sh
 forcargo+gh (PATHremovesrg). Exact installedstable050 Atlas DB preserved, most
 recent onepass refresh index-8 TERMINALcomplete; no reset. Source edits can stale
-index, do not claim stalegraphfacts. All local builds/proofs/exec sessions in this
-checkpoint are TERMINAL, no livepush currently; inspect newhandles when launched.
+index, do not claim stalegraphfacts. All local builds/proofs/exec sessions in this checkpoint are TERMINAL, no livepush
+currently. Normalpush60687 TERMINAL1 at10:33:19Z beforepublishing because changing
+E2E diagnostics required refreshing frozen lifecycle identity in both
+docs/v050-cli-e2e-inventory.json and tests/support/source_contract.rs. Primary
+missed this paired metadata refresh initially. Only those hash lines updated to
+f858e5776e88290a04d83c199cee77066d61932fb5df2a88d021eec30edeb55a; no gate/count/
+selector changes. All3positive+tamper E2Einventoryselectors nowPASS (40914terminal0,
+/tmp/projectatlas-739-prefix-inventory-contract.log). Luna741 APPROVEDpairedhash
+refresh. Newcachedrelease/freeze66221 TERMINAL0, both productbinaries e89/544 byte-
+identical. Finalcost docs source-manifest updated transparently; no expensive
+product proof invalidated by this test-contract-only refresh. Rebind140inputs to
+new committedhead before retrypush; never repoll60687 aslive.
