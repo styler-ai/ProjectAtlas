@@ -9210,11 +9210,11 @@ impl McpContractSession {
                             })();
                             match sampled {
                                 Ok((status, bytes)) => {
-                                    let _ = writeln!(io::stderr().lock(), "MCP timeout child sample: request={request_id}, method={method}, pid={}, status={status}\n{}\nreport prefix capped at 32768 bytes; owned report removed after capture",
-                                        child.id(), String::from_utf8_lossy(&bytes));
+                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample: request={request_id}, method={method}, pid={}, status={status}\n{}\nreport prefix capped at 32768 bytes; owned report removed after capture",
+                                        child.id(), String::from_utf8_lossy(&bytes)));
                                 }
                                 Err(source) => {
-                                    let _ = writeln!(io::stderr().lock(), "MCP timeout child sample unavailable: {source}");
+                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample unavailable: {source}"));
                                 }
                             }
                         }

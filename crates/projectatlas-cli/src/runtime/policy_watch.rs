@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Bound native symlink expansion before installing policy watch aliases.
@@ -20,6 +20,25 @@ const MAX_POLICY_WATCH_DIRECTORIES: usize = 256;
 const MAX_POLICY_WATCH_ATTEMPTS: usize = 3;
 /// Git's directory whose children change the registered worktree inventory.
 const REGISTRATIONS_DIRECTORY: &str = "worktrees";
+/// One uncertain event is queued until its controlled recheck consumes the wake.
+const POLICY_RECHECK_PENDING: u64 = 1;
+/// Coalesced structure still requires cold native coverage.
+const POLICY_RECHECK_STRUCTURAL: u64 = 2;
+/// Low flag bits are consumed independently from the callback generation.
+const POLICY_RECHECK_FLAGS: u64 = POLICY_RECHECK_PENDING | POLICY_RECHECK_STRUCTURAL;
+/// Advance the generation without carrying through the two flag bits.
+const POLICY_RECHECK_GENERATION_STEP: u64 = POLICY_RECHECK_FLAGS + 1;
+
+/// Native ingress can discard a known sibling or coalesce uncertain filename aliases.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PolicyEventInterest {
+    /// Proven unrelated under the existing bounded lexical comparison.
+    Ignore,
+    /// Preserve the original source/control event and structural handling.
+    Relevant,
+    /// Native Unicode equality is unknown; recheck selected inputs once in the drain.
+    Recheck,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -117,6 +136,8 @@ pub(super) struct PolicyWatchInputs {
     registrations: BTreeSet<PathBuf>,
     /// Proven immediate names for each external parent; None preserves unknown/all-child scope.
     event_children: BTreeMap<PathBuf, Option<BTreeSet<OsString>>>,
+    /// Accepted selected-input bytes for the continuous CLI's controlled sibling recheck.
+    content_witness: Option<blake3::Hash>,
 }
 
 impl PolicyWatchInputs {
@@ -145,6 +166,7 @@ impl PolicyWatchInputs {
             result.add_path(root, &path, control)?;
         }
         result.retain_alias_children(control)?;
+        result.content_witness = Some(result.current_content_witness(control)?);
         Ok(result)
     }
 
@@ -180,16 +202,17 @@ impl PolicyWatchInputs {
                 {
                     self.registrations.insert(canonical.clone());
                     if !canonical.starts_with(root) {
-                        self.record_parent(root, canonical, None);
+                        self.record_parent(root, canonical, None)?;
                     }
                 }
             }
             let mut nearest_directory_found = false;
-            // Continue above the nearest existing directory: a symlink in an
-            // earlier component can be replaced independently of its target.
+            let mut external_namespace = !path.starts_with(root);
+            // Every ordinary ancestor can be renamed independently of a watched
+            // descendant. Retain its immediate-child namespace as well as links.
             for ancestor in path.ancestors() {
                 control.check(IndexWorkStage::RepositoryTraversal)?;
-                match fs::symlink_metadata(ancestor) {
+                let is_directory = match fs::symlink_metadata(ancestor) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         // The alias entry itself is a control. Its target directory's
                         // metadata is not an event on this entry's namespace.
@@ -224,7 +247,7 @@ impl PolicyWatchInputs {
                                     source,
                                 })?;
                             if !canonical.starts_with(root) {
-                                self.record_parent(root, canonical.clone(), ancestor.file_name());
+                                self.record_parent(root, canonical.clone(), ancestor.file_name())?;
                             }
                             let namespace = policy_event_namespace(ancestor)?.ok_or_else(|| CliError::Io {
                                 path: ancestor.to_path_buf(),
@@ -234,6 +257,7 @@ impl PolicyWatchInputs {
                             self.paths.insert(namespace.clone());
                             self.record_binding_scope(ancestor, namespace);
                         }
+                        ancestor.is_dir()
                     }
                     Ok(metadata)
                         if ancestor != path && !nearest_directory_found && !metadata.is_dir() =>
@@ -249,21 +273,26 @@ impl PolicyWatchInputs {
                             ),
                         });
                     }
-                    Ok(_) => {}
-                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(metadata) => metadata.is_dir(),
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
                     Err(source) => {
                         return Err(CliError::Io {
                             path: ancestor.to_path_buf(),
                             source,
                         });
                     }
-                }
-                if !nearest_directory_found && ancestor.is_dir() {
+                };
+                if (!nearest_directory_found || external_namespace) && is_directory {
                     let canonical = ancestor.canonicalize().map_err(|source| CliError::Io {
                         path: ancestor.to_path_buf(),
                         source,
                     })?;
-                    if let Ok(suffix) = path.strip_prefix(ancestor) {
+                    if !nearest_directory_found {
+                        // A lexical root/../external selection can resolve outside;
+                        // ordinary in-root inputs retain recursive-root coverage.
+                        external_namespace |= !canonical.starts_with(root);
+                    }
+                    if !nearest_directory_found && let Ok(suffix) = path.strip_prefix(ancestor) {
                         let namespace = canonical.join(suffix);
                         self.paths.insert(namespace.clone());
                         self.record_binding_scope(&path, namespace);
@@ -274,7 +303,7 @@ impl PolicyWatchInputs {
                             .ok()
                             .and_then(|relative| relative.components().next())
                             .map(std::path::Component::as_os_str);
-                        self.record_parent(root, canonical, child);
+                        self.record_parent(root, canonical, child)?;
                     }
                     nearest_directory_found = true;
                 }
@@ -292,7 +321,19 @@ impl PolicyWatchInputs {
     }
 
     /// Record a native namespace while its selected child identity is still explicit.
-    fn record_parent(&mut self, root: &Path, parent: PathBuf, child: Option<&OsStr>) {
+    fn record_parent(
+        &mut self,
+        root: &Path,
+        parent: PathBuf,
+        child: Option<&OsStr>,
+    ) -> Result<(), CliError> {
+        if !self.directories.contains(&parent)
+            && self.directories.len() >= MAX_POLICY_WATCH_DIRECTORIES
+        {
+            return Err(CliError::Watcher(format!(
+                "external policy observation exceeds its {MAX_POLICY_WATCH_DIRECTORIES} directory capacity"
+            )));
+        }
         let root_child = root
             .strip_prefix(&parent)
             .ok()
@@ -305,7 +346,7 @@ impl PolicyWatchInputs {
             .or_insert_with(|| Some(BTreeSet::new()));
         let Some(child) = child else {
             *children = None;
-            return;
+            return Ok(());
         };
         if let Some(children) = children {
             children.insert(child.to_os_string());
@@ -314,6 +355,7 @@ impl PolicyWatchInputs {
                 children.insert(root_child.to_os_string());
             }
         }
+        Ok(())
     }
 
     /// Keep lexical path components as well as resolved targets (including meaningful `..` prefixes).
@@ -341,35 +383,81 @@ impl PolicyWatchInputs {
 
     /// Reject only proven unrelated external children, with no filesystem I/O.
     /// Unknown aliases, Unicode case relationships, directory controls and rescan stay visible.
-    fn may_affect(&self, root: &Path, event: &Event) -> bool {
+    fn interest(&self, root: &Path, event: &Event) -> PolicyEventInterest {
         if event.need_rescan() {
-            return true;
+            return PolicyEventInterest::Relevant;
         }
         if !super::event_kind_affects_index(event.kind) {
-            return false;
+            return PolicyEventInterest::Ignore;
         }
         if event.paths.is_empty() {
-            return true;
+            return PolicyEventInterest::Relevant;
         }
-        event.paths.iter().any(|candidate| {
+        let mut interest = PolicyEventInterest::Ignore;
+        for candidate in &event.paths {
             if candidate.starts_with(root) || root.starts_with(candidate) {
-                return true;
+                return PolicyEventInterest::Relevant;
             }
             let Some(parent) = candidate.parent() else {
-                return true;
+                return PolicyEventInterest::Relevant;
             };
             let Some(Some(children)) = self.event_children.get(parent) else {
-                return true;
+                return PolicyEventInterest::Relevant;
             };
             let Some(name) = candidate.file_name() else {
-                return true;
+                return PolicyEventInterest::Relevant;
             };
+            if children.contains(name) {
+                return PolicyEventInterest::Relevant;
+            }
             let name = name.as_encoded_bytes();
-            children.iter().any(|child| {
+            for child in children {
                 let child = child.as_encoded_bytes();
-                !name.is_ascii() || !child.is_ascii() || name.eq_ignore_ascii_case(child)
-            })
-        })
+                if name == child || name.eq_ignore_ascii_case(child) {
+                    return PolicyEventInterest::Relevant;
+                }
+                if !name.is_ascii() || !child.is_ascii() {
+                    interest = PolicyEventInterest::Recheck;
+                    break;
+                }
+            }
+        }
+        interest
+    }
+
+    /// Preserve eligibility while leaving uncertain names to the coalescing ingress owner.
+    fn may_affect(&self, root: &Path, event: &Event) -> bool {
+        self.interest(root, event) != PolicyEventInterest::Ignore
+    }
+
+    /// Refresh bounded bytes without interpreting arbitrary native Unicode names in callbacks.
+    fn current_content_witness(
+        &self,
+        control: &IndexWorkControl,
+    ) -> Result<blake3::Hash, CliError> {
+        let mut hasher = blake3::Hasher::new();
+        super::source_observation::hash_policy_paths(&mut hasher, &self.paths, control)?;
+        Ok(hasher.finalize())
+    }
+
+    /// Recheck only the selected native bindings, never the coalesced outside sibling paths.
+    pub(super) fn bindings_changed(&self, control: &IndexWorkControl) -> Result<bool, CliError> {
+        for (path, captured) in &self.bindings {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            if &canonical_policy_binding(path)? != captured {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Compare an installed CLI selection with current bindings and bounded policy bytes.
+    pub(super) fn policy_state_changed(
+        &self,
+        control: &IndexWorkControl,
+    ) -> Result<bool, CliError> {
+        Ok(self.bindings_changed(control)?
+            || self.content_witness != Some(self.current_content_witness(control)?))
     }
 
     /// Identify selected-input edits and missing-parent creation without admitting outside nodes.
@@ -609,6 +697,8 @@ pub(super) struct PolicyWatchSelection {
     inputs: Arc<Mutex<Arc<PolicyWatchInputs>>>,
     /// Structural native events require rebuilding recursive source coverage before reuse.
     recursive_rebind_required: Arc<AtomicBool>,
+    /// Publish pending/structural flags and generation in one atomic callback transition.
+    policy_recheck_state: Arc<AtomicU64>,
 }
 
 impl PolicyWatchSelection {
@@ -618,6 +708,7 @@ impl PolicyWatchSelection {
             root: Arc::new(root),
             inputs: Arc::new(Mutex::new(Arc::new(PolicyWatchInputs::default()))),
             recursive_rebind_required: Arc::new(AtomicBool::new(false)),
+            policy_recheck_state: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -655,8 +746,36 @@ impl PolicyWatchSelection {
     /// Retain structural coverage uncertainty independently of queue draining.
     /// This callback path performs no filesystem I/O and does not classify source bytes.
     pub(super) fn observe(&self, event: &Event) -> bool {
-        if !self.may_affect(event) {
-            return false;
+        let interest = self
+            .snapshot()
+            .map_or(PolicyEventInterest::Relevant, |inputs| {
+                inputs.interest(&self.root, event)
+            });
+        match interest {
+            PolicyEventInterest::Ignore => return false,
+            PolicyEventInterest::Recheck => {
+                let structural = if event_changes_structure(event.kind) {
+                    POLICY_RECHECK_STRUCTURAL
+                } else {
+                    0
+                };
+                let mut previous = self.policy_recheck_state.load(Ordering::Acquire);
+                loop {
+                    let next = previous.wrapping_add(POLICY_RECHECK_GENERATION_STEP)
+                        | POLICY_RECHECK_PENDING
+                        | structural;
+                    match self.policy_recheck_state.compare_exchange_weak(
+                        previous,
+                        next,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return previous & POLICY_RECHECK_PENDING == 0,
+                        Err(current) => previous = current,
+                    }
+                }
+            }
+            PolicyEventInterest::Relevant => {}
         }
         let root_depth = self.root.components().count();
         let structural = event_changes_structure(event.kind);
@@ -687,6 +806,58 @@ impl PolicyWatchSelection {
             self.require_recursive_rebind();
         }
         true
+    }
+
+    /// Consume before rechecking so a later callback arms and queues its own wake.
+    pub(super) fn take_policy_recheck(&self) -> bool {
+        self.policy_recheck_state
+            .fetch_and(!POLICY_RECHECK_PENDING, Ordering::AcqRel)
+            & POLICY_RECHECK_PENDING
+            != 0
+    }
+
+    /// Failed or cancelled rechecks retain uncertainty until the existing recovery owner runs.
+    pub(super) fn retain_policy_recheck(&self) {
+        self.policy_recheck_state
+            .fetch_or(POLICY_RECHECK_FLAGS, Ordering::AcqRel);
+    }
+
+    /// Consume only after the pending wake so a later callback retains its own wake.
+    pub(super) fn take_structural_policy_recheck(&self) -> bool {
+        self.policy_recheck_state
+            .fetch_and(!POLICY_RECHECK_STRUCTURAL, Ordering::AcqRel)
+            & POLICY_RECHECK_STRUCTURAL
+            != 0
+    }
+
+    /// Retry a continuous-CLI refresh overlapped by uncertain policy ingress.
+    /// Each retry uses the original work control and asks the existing cold owner to rebind.
+    pub(super) fn reconcile_with_policy_fence<T>(
+        &self,
+        control: &IndexWorkControl,
+        mut reconcile: impl FnMut(bool) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        let mut retry = false;
+        loop {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            let observed = self
+                .policy_recheck_state
+                .fetch_and(!POLICY_RECHECK_FLAGS, Ordering::AcqRel);
+            let before = observed & !POLICY_RECHECK_FLAGS;
+            retry |= observed & POLICY_RECHECK_FLAGS != 0;
+            let report = match reconcile(retry) {
+                Ok(report) => report,
+                Err(error) => {
+                    self.retain_policy_recheck();
+                    return Err(error);
+                }
+            };
+            let after = self.policy_recheck_state.load(Ordering::Acquire);
+            if after & !POLICY_RECHECK_FLAGS == before && after & POLICY_RECHECK_STRUCTURAL == 0 {
+                return Ok(report);
+            }
+            retry = true;
+        }
     }
 
     /// Preserve unknown native coverage until the cold owner successfully re-registers it.
@@ -764,7 +935,210 @@ mod tests {
             inputs.add_path(root, path, &control)?;
         }
         inputs.retain_alias_children(&control)?;
+        inputs.content_witness = Some(inputs.current_content_witness(&control)?);
         Ok(inputs)
+    }
+
+    #[test]
+    fn uncertain_siblings_recheck_selected_bytes_without_callback_io() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let input = base.join("π-rules");
+        fs::write(&input, "initial.rs\n")?;
+        let inputs = selected(&root, std::slice::from_ref(&input))?;
+        let control = super::super::standalone_index_work_control();
+        let selection = PolicyWatchSelection::new(root);
+        selection.publish(Arc::new(inputs.clone()))?;
+        POLICY_BINDING_RESOLUTIONS.set(0);
+        let mut wakes = 0;
+        for i in 0..4096 {
+            let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join(format!("λ-sibling-{i}")));
+            wakes += usize::from(selection.observe(&event));
+        }
+        require(
+            wakes == 1 && POLICY_BINDING_RESOLUTIONS.get() == 0,
+            "Unicode ingress did not remain bounded and filesystem-I/O-free",
+        )?;
+        require(
+            selection.take_policy_recheck() && !inputs.policy_state_changed(&control)?,
+            "unchanged Unicode sibling traffic changed policy",
+        )?;
+        require(
+            !selection.recursive_rebind_pending(),
+            "uncertain sibling invented recursive coverage loss",
+        )?;
+        let native_alias = base.join("Π-rules");
+        let aliases_selected_input = native_alias.is_file();
+        fs::write(&native_alias, "native name control\n")?;
+        require(
+            inputs.policy_state_changed(&control)? == aliases_selected_input,
+            "selected Unicode alias recheck disagreed with native filesystem lookup",
+        )?;
+        fs::write(&input, "changed.rs\n")?;
+        require(
+            inputs.policy_state_changed(&control)?,
+            "coalesced recheck lost changed selected Unicode bytes",
+        )?;
+        // Native equality remains with the filesystem; known selected spellings
+        // are always admitted even when an unrelated recheck is already pending.
+        let selected = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(input);
+        require(
+            selection.observe(&selected) && selection.observe(&selected),
+            "selected Unicode control was coalesced as an unrelated sibling",
+        )?;
+        let unrelated = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(base.join("λ-sibling"));
+        require(
+            selection.observe(&unrelated),
+            "later sibling did not queue its own wake",
+        )?;
+        let structural = Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            notify::event::RenameMode::Any,
+        )))
+        .add_path(base.join("Π-rules"));
+        require(
+            !selection.observe(&structural),
+            "later uncertain structure bypassed coalescing",
+        )?;
+        require(
+            selection.take_policy_recheck() && selection.take_structural_policy_recheck(),
+            "a later coalesced structural event lost rebind uncertainty",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_policy_fence_reconciles_a_transient_edit_during_real_refresh()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        let rules = root.join(".ignore");
+        fs::write(&rules, "transient.rs\n")?;
+        fs::write(root.join("kept.rs"), "pub fn kept() {}\n")?;
+        fs::write(root.join("transient.rs"), "pub fn transient() {}\n")?;
+        let config = base.join("external.toml");
+        fs::write(&config, "")?;
+        let inputs = selected(&root, &[rules.clone(), config])?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(base.join("π-sibling"));
+        require(
+            selection.observe(&event),
+            "initial uncertain event did not arm the marker",
+        )?;
+        let plan = super::super::ScanRuntimePlan::for_path(None, &root, None)?;
+        let mut store = super::super::open_atlas_store_for_project(
+            &root.join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+        let control = super::super::standalone_index_work_control();
+        let mut calls = 0;
+        selection.reconcile_with_policy_fence(&control, |retry| {
+            calls += 1;
+            if calls == 1 {
+                if !selection.observe(&event) {
+                    return Err(CliError::InvalidInput(
+                        "CLI fence did not consume pre-entry uncertainty".to_string(),
+                    ));
+                }
+                fs::write(&rules, "").map_err(|source| CliError::Io {
+                    path: rules.clone(),
+                    source,
+                })?;
+            } else if !retry {
+                return Err(CliError::InvalidInput(
+                    "CLI policy fence did not request cold retry".to_string(),
+                ));
+            }
+            let report =
+                super::super::refresh_index_controlled(&mut store, &plan, &options, &control)?;
+            if calls == 1 {
+                fs::write(&rules, "transient.rs\n").map_err(|source| CliError::Io {
+                    path: rules.clone(),
+                    source,
+                })?;
+                // The wake was already armed, so this callback is coalesced. Its
+                // generation must still fence the actual in-flight CLI refresh.
+                if selection.observe(&event) {
+                    return Err(CliError::InvalidInput(
+                        "pending sibling did not coalesce".to_string(),
+                    ));
+                }
+            }
+            Ok(report)
+        })?;
+        require(
+            calls == 2 && store.load_node_by_path("transient.rs")?.is_none(),
+            "CLI accepted the publication derived from transient policy",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_policy_fence_reloads_pending_selection_before_bounded_refresh()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(root.join("kept.rs"), "pub fn kept() {}\n")?;
+        fs::write(root.join("transient.rs"), "pub fn transient() {}\n")?;
+        let config = base.join("external.toml");
+        let config_text = |excluded: &str| {
+            format!("[project]\nroot = {root:?}\n[scan]\nexclude_path_prefixes = [{excluded:?}]\n")
+        };
+        fs::write(&config, config_text("transient.rs"))?;
+        let mut plan = super::super::ScanRuntimePlan::for_path(Some(&config), &root, None)?;
+        let inputs = selected(&root, std::slice::from_ref(&config))?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        fs::write(&config, config_text("kept.rs"))?;
+        require(
+            selection.observe(
+                &Event::new(notify::EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))
+                .add_path(base.join("π-sibling")),
+            ),
+            "pre-refresh marker was not queued",
+        )?;
+        let mut store = super::super::open_atlas_store_for_project(
+            &root.join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+        let control = super::super::standalone_index_work_control();
+        selection.reconcile_with_policy_fence(&control, |cold| {
+            if cold {
+                plan = plan.reload_controlled(&control)?;
+            }
+            super::super::refresh_index_controlled(&mut store, &plan, &options, &control)
+        })?;
+        require(
+            store.load_node_by_path("kept.rs")?.is_none()
+                && store.load_node_by_path("transient.rs")?.is_some(),
+            "bounded CLI refresh returned a stale pre-entry selection",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -911,8 +1285,8 @@ mod tests {
         let inputs = selected(&root, &paths)?;
         let control = super::super::standalone_index_work_control();
         require(
-            inputs.directories.len() == 1,
-            "dense inputs acquired extra watches",
+            inputs.directories == selected(&root, &paths[..1])?.directories,
+            "dense inputs acquired watches beyond the shared ancestor namespaces",
         )?;
         let event = Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(source);
         POLICY_BINDING_RESOLUTIONS.set(0);
@@ -1070,7 +1444,11 @@ mod tests {
             "alias retarget between absent leaves was hidden by an ancestor notification",
         )?;
         require(
-            selected(&root, &[input])?.directories == BTreeSet::from([aliases, second]),
+            selected(&root, &[input])?.directories
+                == [&aliases, &second]
+                    .into_iter()
+                    .flat_map(|path| path.ancestors().map(Path::to_path_buf))
+                    .collect(),
             "retargeted alias did not select the new native coverage",
         )?;
         let prospective = base.join("prospective");
@@ -1142,6 +1520,114 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_external_ancestor_replacement_rebinds_native_policy_events()
+    -> Result<(), Box<dyn Error>> {
+        for (missing, layout) in [
+            (false, "direct"),
+            (true, "direct"),
+            (false, "external-alias"),
+            (true, "external-alias"),
+            (false, "source-alias"),
+            (true, "source-alias"),
+            (false, "higher-ancestor"),
+            (true, "higher-ancestor"),
+            (true, "missing-parent"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            let root = base.join("repo");
+            let selected_parent = base.join("control/current");
+            let directory = selected_parent.join("nested");
+            fs::create_dir(&root)?;
+            fs::create_dir_all(&directory)?;
+            let selected = if matches!(layout, "external-alias" | "source-alias") {
+                let alias = if layout == "source-alias" {
+                    root.join("selected")
+                } else {
+                    base.join("selected")
+                };
+                create_policy_directory_alias(&base.join("control"), &alias)?;
+                alias.join("current/nested")
+            } else {
+                directory.clone()
+            };
+            let input = selected.join("rules");
+            let later_input = selected.join("later-rules");
+            if !missing {
+                fs::write(&input, "original.rs\n")?;
+            }
+            if layout == "missing-parent" {
+                fs::remove_dir(&directory)?;
+            }
+            let control =
+                IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)));
+            let selection = PolicyWatchSelection::new(root.clone());
+            let callback_selection = selection.clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(32);
+            let mut watcher = RecommendedWatcher::new(
+                move |result: notify::Result<Event>| {
+                    if result
+                        .as_ref()
+                        .is_ok_and(|event| !callback_selection.observe(event))
+                    {
+                        return;
+                    }
+                    drop(sender.try_send(result));
+                },
+                notify::Config::default(),
+            )?;
+            let mut registered = BTreeSet::new();
+            let install = |watcher: &mut RecommendedWatcher, registered: &mut BTreeSet<PathBuf>| {
+                PolicyWatchInputs::install_selected_with_discovery(
+                    &selection,
+                    watcher,
+                    registered,
+                    &control,
+                    || self::selected(&root, &[input.clone(), later_input.clone()]),
+                )
+            };
+            let mut inputs = install(&mut watcher, &mut registered)?;
+            let await_selected_event = |inputs: &PolicyWatchInputs,
+                                        expected: Option<&Path>|
+             -> Result<(), Box<dyn Error>> {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    let event = receiver.recv_timeout(remaining).map_err(|source| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("ordinary external ancestor replacement was not observed (missing={missing}, layout={layout}): {source}"),
+                        )
+                    })??;
+                    if inputs.affects(&event)
+                        && expected.is_none_or(|path| event.paths.iter().any(|event| event == path))
+                    {
+                        return Ok(());
+                    }
+                }
+            };
+            // The selected file and nearest watched directory are unchanged objects
+            // in the retired subtree; only an ordinary higher ancestor is renamed.
+            let replaced = if matches!(layout, "higher-ancestor" | "missing-parent") {
+                base.join("control")
+            } else {
+                selected_parent
+            };
+            fs::rename(replaced, base.join("retired"))?;
+            fs::create_dir_all(&directory)?;
+            fs::write(&input, "replacement.rs\n")?;
+            await_selected_event(&inputs, None)?;
+            inputs = install(&mut watcher, &mut registered)?;
+            while receiver.try_recv().is_ok() {}
+            // A distinct new leaf prevents a delayed replacement event from
+            // impersonating later delivery from the newly registered directory.
+            fs::write(&later_input, "later.rs\n")?;
+            await_selected_event(&inputs, Some(&directory.join("later-rules")))?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn absent_policy_parents_are_routed_without_watching_unrelated_trees()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -1149,10 +1635,16 @@ mod tests {
         let root = base.join("repo");
         fs::create_dir(&root)?;
         let path = base.join("settings/missing/rules");
+        require(
+            selected(&root, &[root.join("local.ignore")])?
+                .directories
+                .is_empty(),
+            "an ordinary in-root input acquired external ancestor watches",
+        )?;
         let inputs = selected(&root, &[path.clone(), root.join("local.ignore")])?;
         require(
-            inputs.directories == BTreeSet::from([base.clone()]),
-            "missing input did not watch its nearest external ancestor",
+            inputs.directories == base.ancestors().map(Path::to_path_buf).collect(),
+            "missing input lost an external ancestor namespace",
         )?;
         require(
             inputs.affects(
@@ -1187,7 +1679,12 @@ mod tests {
         fs::create_dir_all(base.join("settings/missing"))?;
         let updated = selected(&root, &[base.join("settings/missing/rules")])?;
         require(
-            updated.directories == BTreeSet::from([base.join("settings/missing")]),
+            updated.directories
+                == base
+                    .join("settings/missing")
+                    .ancestors()
+                    .map(Path::to_path_buf)
+                    .collect(),
             "coverage did not advance to the created parent",
         )?;
         Ok(())
@@ -1279,7 +1776,11 @@ mod tests {
         let path = link.join("child/rules");
         let inputs = selected(&root, std::slice::from_ref(&path))?;
         require(
-            inputs.directories == BTreeSet::from([aliases.clone(), first.clone()]),
+            inputs.directories
+                == [&aliases, &first]
+                    .into_iter()
+                    .flat_map(|path| path.ancestors().map(Path::to_path_buf))
+                    .collect(),
             "an earlier symlink component or its target was not watched",
         )?;
         require(
@@ -1300,7 +1801,11 @@ mod tests {
         symlink(base.join("second"), &link)?;
         let updated = selected(&root, std::slice::from_ref(&path))?;
         require(
-            updated.directories == BTreeSet::from([aliases, second]),
+            updated.directories
+                == [&aliases, &second]
+                    .into_iter()
+                    .flat_map(|path| path.ancestors().map(Path::to_path_buf))
+                    .collect(),
             "replacement target coverage was not refreshed",
         )?;
         fs::write(base.join("regular-rules"), "ignored.rs\n")?;
@@ -1453,6 +1958,34 @@ mod tests {
             "native rescan uncertainty was filtered",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn external_ancestor_discovery_refuses_before_exceeding_directory_capacity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let mut parent = base.join("external");
+        for _ in 0..=MAX_POLICY_WATCH_DIRECTORIES {
+            parent.push("p");
+        }
+        fs::create_dir_all(&parent)?;
+        let mut inputs = PolicyWatchInputs::default();
+        let control = super::super::standalone_index_work_control();
+        require(
+            matches!(
+                inputs.add_path(&root, &parent.join("rules"), &control),
+                Err(CliError::Watcher(_))
+            ),
+            "deep external policy coverage did not retain its bounded fallback",
+        )?;
+        require(
+            inputs.directories.len() == MAX_POLICY_WATCH_DIRECTORIES
+                && inputs.event_children.len() == MAX_POLICY_WATCH_DIRECTORIES,
+            "directory discovery retained a proposal beyond native capacity",
+        )
     }
 
     #[test]

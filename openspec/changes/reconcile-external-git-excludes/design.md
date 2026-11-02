@@ -108,7 +108,57 @@ Source observation records selected configuration and excludes paths, including 
 
 Cold native coverage explicitly rebinds selected nonrecursive external parents before exact source sampling, so a directory replaced at the same pathname does not inherit a dead native registration. This is not warm-read work. Prefer bounded cold re-registration over a new retained-handle/platform-identity subsystem; the old epoch is invalidated before the gap, and source sampling plus final event draining follows installation. Re-discover selected aliases/configuration after installing coverage and retry at most three times under the original caller budget until the selected namespace agrees. If selection cannot stabilize or native coverage fails, retain existing exact/polling fallback rather than admitting a partially covered epoch. Preserve actual acknowledged registrations across partial failure for retry and Windows cleanup.
 
-Native callback filtering drops only proven unrelated immediate children of selected external parents before the existing bounded queue. It performs no filesystem or policy I/O, preserves source-root, selected/control, unknown/Unicode-case/alias and rescan uncertainty, and does not special-case SQLite filenames. Relevant overflow still invalidates continuity. Preparation cleanup is serialized with reconciliation; failed/cancelled request cleanup may invalidate only its own sampled epoch, never a successor. These are causal consequences of extending external observation, not permission to weaken existing concurrency assertions or increase queues to conceal loss.
+A nonrecursive watch on the nearest external policy parent does not observe an
+ordinary higher ancestor being renamed. For each external selected spelling or
+resolved alias target, retain immediate-child namespace coverage at every existing
+directory ancestor under the existing 256 unique-directory bound. Preserve the
+nearest binding used by controlled drains and native alias/Win32 parent semantics.
+Ordinary in-root inputs continue to use recursive source coverage; a lexical
+root/../external selection is recognized by its nearest resolved parent. Existing
+source-policy inputs already cover the source-root ancestor ignore chain. This
+repair closes disconnected external branches without watching whole outside
+trees. Unrelated immediate-child filtering remains callback-only lexical work;
+failed or over-capacity installation retains the established exact/polling fallback.
+Prove native rename/recreate at more than one ancestor depth, present/missing
+leaves and intermediate parents, external and source-contained aliases, then a
+distinct new leaf after cold rebinding so delayed earlier events cannot pass.
+
+Native policy callback filtering drops only proven unrelated immediate children of selected external parents before the existing bounded queue. It performs no filesystem or policy I/O and preserves source-root, selected/control, unknown/Unicode-case/alias and rescan uncertainty. Runtime namespace routing remains with the CLI/source-observation adapters described below, rather than adding database rules to policy selection. Relevant overflow still invalidates continuity. Preparation cleanup is serialized with reconciliation; failed/cancelled request cleanup may invalidate only its own sampled epoch, never a successor. These are causal consequences of extending external observation, not permission to weaken existing concurrency assertions or increase queues to conceal loss.
+
+Unknown arbitrary Unicode names cannot be compared using the fixed ASCII managed
+name helpers or blanket Unix byte equality: supported Linux casefold and Apple
+normalization/case rules differ. Classify known-parent sibling ingress as ignored,
+relevant or requiring policy recheck. One atomic pending marker admits the first
+uncertain event as a wake; later uncertain siblings share it without filling the
+queue. Known selected/root/control and unscoped/error/rescan events retain normal
+admission. Callbacks perform no native lookup or policy read.
+
+The controlled drain consumes the marker before fresh inspection, so a later
+callback can arm and queue another wake. MCP publication and consumption share
+the receiver fence. Compare fresh selected bindings and the existing source
+contract/policy witness with the current verified epoch; absence of an epoch
+invalidates the in-flight exact candidate even if transient policy bytes reverted.
+An unchanged verified epoch can acknowledge the coalesced sibling storm. Continuous
+CLI uses the immutable installed selection's bounded content witness and native
+bindings; changed policy invokes the existing rebind/reload/reconciliation owner.
+Reuse the existing bounded policy-file hashing implementation for both witnesses,
+not a second grammar, filename table or per-sibling state. Failed/cancelled
+inspection preserves pending uncertainty and never acknowledges consumed changes.
+
+OR structural uncertainty into the coalesced state even when a data event already
+armed its wake. Unchanged canonical path strings and bytes do not prove that a
+watch still follows a replaced directory object. Such uncertainty retains the
+existing cold/full rebind owner; unrelated Unicode directory structure can still
+require conservative reconciliation, but cannot fill the queue with one entry
+per sibling. No universal hostile-local-filesystem availability guarantee is added.
+For continuous CLI refresh, advance a recheck generation on every uncertain
+callback, including those sharing an armed wake. Fence the actual initial and
+incremental/full refresh calls with that generation. If uncertain ingress overlaps
+a refresh, reload/rebind and reconcile again under the same original control
+before counting a completed watch cycle; a change-and-revert cannot leave the
+transient candidate as the final accepted result. No new timeout or retry budget
+is introduced. A causal fixture exercises real publication while policy changes
+and reverts inside this production fence.
 
 Replacing the selected source directory at the same pathname can also leave its recursive registration on the retired object, especially with an external database that survives the replacement. Retain structural uncertainty until the cold owner rebinds recursive coverage under the original work control, before exact source sampling; never add an unconditional warm-read rewatch. In the source-observation adapter, publish that uncertainty under the same receiver fence as the event and ingress sequence so final acceptance cannot acknowledge an empty queue while a rebind marker has already become visible. Ordinary access events without rescan retain their existing ignored behavior before any marker mutation; notify errors and genuine rescan/overflow still invalidate continuity. Add a deterministic callback/fence negative control and permanent CLI/MCP replacement proof with external database/config, unchanged project identity and all approved purposes, updated source results and no accidental conventional database creation. Existing root/config and registered-worktree lifecycle admission remain authoritative; this does not authorize bypassing an identity refusal or adopting a different root.
 
@@ -153,6 +203,28 @@ Do not retarget actual SQLite opens or blanket-ignore metadata descendants.
 Reuse the existing Windows literal-entry lookup, and require actual directory
 case behavior before folding a missing sidecar suffix: an 8.3 alias alone is not
 proof of case insensitivity. With no captured target, keep uncertainty observable.
+
+A Unicode selected child can make even an ASCII sibling require policy recheck.
+Therefore exact captured database and sidecar event spellings must reach ordinary
+bounded runtime ingress without first arming policy uncertainty. Otherwise SQLite's
+own WAL/SHM creation invalidates every cold MCP candidate before the drain can
+apply its established native runtime filter. Use lexical equality against the
+already captured selected/target namespace and three sidecars, with no callback
+filesystem I/O or native-name folding. This routes events; it never suppresses
+them or authorizes a stale target. Structural main-file, mixed, unknown spelling
+and rescan events keep ordinary policy observation. The controlled MCP filter
+still revalidates the selected target; a routed event retained by that filter
+preserves full reconciliation rather than disappearing as an outside source path.
+Coalesce exact runtime-only writes into one separate pending runtime wake, rather
+than filling the source queue with SQLite's own WAL updates. Clear it before the
+controlled drain (under MCP's existing receiver fence) and before exact-verification
+queue reset. Main-file replacement bypasses this pending bit and retains native
+rebind uncertainty, including in an ASCII policy parent that would otherwise
+classify the database filename as an unrelated sibling. A later sidecar event can
+arm a fresh wake after consumption. No new worker, unbounded event collection,
+policy marker reuse or callback filesystem probe is introduced.
+Prove real CLI/MCP reads and edits with a Unicode root and explicit external DB,
+alongside runtime-alias retarget, distinct source alias and real policy controls.
 
 This adds one optional path to each of at most sixteen process-local observer
 bindings, one target lookup at binding construction on each observed request
@@ -286,7 +358,7 @@ The uncached probe is another consumer of the document-policy reader covered by 
 
 Publication revalidation must discover current policy from the original plan's configured `ScanOptions`, not reuse the staged compiled matcher or feed its repository-expanded exclusions back into discovery. A selected external edit can change only an absent target's reason while the complete source inventory stays identical. Pass the original options and existing control into the publication owner, discover policy once when retained document states need validation, and refuse changed outcomes before acquiring the publication transaction. No new policy-byte contract hash, retained options clone or filesystem witness registry is required. A deterministic stage-to-publication control must flip an external exclusion without changing source nodes, prove last-valid state survives refusal, and prove retry/no-op convergence.
 
-Advance the extraction derivation contract after combining independently accepted fixes; it must be strictly newer than every exercised predecessor candidate and retain the accepted semantic contract. Accepted main now includes #731 and #741 at derivation 24 / semantic 23. The registered private-worktree inventory also has maximum derivation 24 before this change, so this policy repair uses derivation 25 and retains semantic 23. Repair omitted/excess prior source facts, not only document reasons. No query-time mutation or alternate database. Later combined release acceptance must reconcile any subsequent independent derivation changes.
+Advance the extraction derivation contract after combining independently accepted fixes; it must be strictly newer than every exercised predecessor candidate and retain the accepted semantic contract. Accepted main includes #731 and #741 at derivation 24 / semantic 23. The initial external-policy repair used derivation 25. Its required dependency gate then reported reachable RUSTSEC-2026-0433: Markdown extraction uses pulldown-cmark Options::all(), including wikilinks, so a small parser event count does not bound the vulnerable nested-image work between checkpoints. Upgrade only the locked pulldown-cmark 0.13.5 to patched 0.13.6; retain the supported options and ordinary/wiki references. The upstream deepest-embed correction changes some heading facts, so the final candidate uses derivation 26 and retains semantic 23. Repair omitted/excess prior source and heading facts, not only document reasons. No query-time mutation or alternate database. Prove the old heading outcome causally and include derivation-25 upgrade, no-op and compatible rollback/re-upgrade in final native proof. Later combined release acceptance must reconcile any subsequent independent derivation changes.
 
 The cold unresolved-document probe pages rows but previously rebuilt a lazy
 hierarchical matcher for each target. Pagination bounds row memory, not repeated
@@ -366,19 +438,6 @@ Disabling require_git(false) everywhere breaks no-Git projects. Adding excludes 
 
 Ordinary compatible refresh repairs unchanged old indexes under the existing atomic owner. Preserve root/project identity, all approved-purpose text/status, last-valid publication on failure, current-contract no-op and compatible rollback/re-upgrade. Coordinate the final contract and inventory union with #731/#738; #708 measures final combined source and #715 exercises exact RC packages on four platforms.
 
-## Architecture Disposition
-
-N/A: Existing filesystem selection and runtime publication owners remain authoritative. This repairs input interpretation and consistency within those owners without adding a service, data model or communication boundary.
-
-## Dependencies / Cross-Issue Impact
-
-#739 has no direct implementation blocker, belongs directly to #715 and blocks RC1. #738 retains its separate derived-document prefix guard; this issue restores the legitimate external policy inputs exercised by that positive workflow. #731's semantic contract is retained. #708/#715 require final combined source and exact installed selector coverage. Stable publication remains outside this goal.
-
-## Open Questions
-
-None.
-
-
 ### Fresh bounded document-prefix admission
 
 The separate security review found that cold paged document verification still
@@ -420,3 +479,15 @@ fresh alias/root retargets, outside-then-reentry, in-root aliases, missing and
 regular suffixes, cancellation and native Windows junction/reparse behavior.
 The existing no-hostile-replacement-race limitation remains; it does not justify
 caching a positive admission across targets before a later policy read.
+
+## Architecture Disposition
+
+N/A: Existing filesystem selection and runtime publication owners remain authoritative. This repairs input interpretation and consistency within those owners without adding a service, data model or communication boundary.
+
+## Dependencies / Cross-Issue Impact
+
+#739 has no direct implementation blocker, belongs directly to #715 and blocks RC1. #738 retains its separate derived-document prefix guard; this issue restores the legitimate external policy inputs exercised by that positive workflow. #731's semantic contract is retained. #708/#715 require final combined source and exact installed selector coverage. Stable publication remains outside this goal.
+
+## Open Questions
+
+None.

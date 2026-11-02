@@ -16,6 +16,7 @@ The broader audit also reproduced targeted matching losing ancestor rules when a
 - Restore recursive coverage when a supported source directory is replaced at its selected pathname while the database/config remain external. Serialize structural uncertainty with event ingress before accepting a warm result; preserve existing root/lifecycle admission and ignore ordinary access events without triggering a rebind.
 - Apply the already specified document-prefix admission boundary to the shared uncached policy inspector used by this issue's freshness probe and ordinary projection. Check each existing native prefix before per-target policy reads, using the caller's cooperative control; retain explicit global/shared policy inputs and typed source outcomes. #738 retains its separate complete acceptance and closure.
 - Reuse one bounded native ignore matcher per document-resolution pass, including every keyset page of a cold probe. Bound cumulative hierarchical policy parsing and retained directory contexts without a document-row cutoff; preserve fresh policy at the next pass and final publication revalidation.
+- Pass the required dependency/security gate with the patched Markdown parser for reachable RUSTSEC-2026-0433. Preserve ordinary and wiki references, use upstream nested-image handling rather than disabling wikilinks, and repair changed heading facts through the existing derivation/publication owner.
 
 ## Capabilities
 

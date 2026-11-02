@@ -268,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "25";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "26";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -8075,6 +8075,7 @@ pub(crate) fn read_indexed_file_content(
 /// Run the watcher refresh loop.
 pub(crate) fn run_watch_loop(
     store: &mut AtlasStore,
+    database: &Path,
     plan: &ScanRuntimePlan,
     once: bool,
     poll_seconds: u64,
@@ -8090,7 +8091,16 @@ pub(crate) fn run_watch_loop(
         poll_seconds,
         max_cycles,
         symbol_options,
-        |store| run_notify_watch_loop(store, plan, poll_seconds, max_cycles, symbol_options),
+        |store| {
+            run_notify_watch_loop(
+                store,
+                database,
+                plan,
+                poll_seconds,
+                max_cycles,
+                symbol_options,
+            )
+        },
     )
 }
 
@@ -8148,6 +8158,7 @@ pub(crate) fn run_single_watch_refresh_controlled(
 /// Run an event-backed watcher loop with `notify`.
 pub(crate) fn run_notify_watch_loop(
     store: &mut AtlasStore,
+    database: &Path,
     plan: &ScanRuntimePlan,
     poll_seconds: u64,
     max_cycles: usize,
@@ -8167,10 +8178,17 @@ pub(crate) fn run_notify_watch_loop(
     let callback_continuity_lost = Arc::clone(&continuity_lost);
     let policy_selection = policy_watch::PolicyWatchSelection::new(watch_root.clone());
     let callback_selection = policy_selection.clone();
+    let runtime_ingress =
+        source_observation::RuntimeEventIngress::new(source_observation::SourceBinding::new(
+            database,
+            &watch_root,
+            current_plan.selected_config_path.as_deref(),
+        )?);
+    let callback_runtime = runtime_ingress.clone();
     let mut watcher = RecommendedWatcher::new(
         move |result: notify::Result<Event>| {
             if let Ok(event) = &result
-                && !callback_selection.observe(event)
+                && !callback_runtime.observe(&callback_selection, event)
             {
                 return;
             }
@@ -8204,10 +8222,25 @@ pub(crate) fn run_notify_watch_loop(
     )?;
     let debounce = Duration::from_secs(poll_seconds.max(1));
     let mut cycles = 0;
-    let mut last_refresh =
-        refresh_index_controlled(store, &current_plan, symbol_options, &control)?;
+    let mut last_refresh = policy_selection.reconcile_with_policy_fence(&control, |retry| {
+        if retry {
+            current_plan = plan.reload_controlled(&control)?;
+            policy_selection.require_recursive_rebind();
+            policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
+            policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+                &watch_root,
+                current_plan.selected_config_path.as_deref(),
+                &policy_selection,
+                &mut watcher,
+                &mut registered_policy_directories,
+                &control,
+            )?;
+        }
+        refresh_index_controlled(store, &current_plan, symbol_options, &control)
+    })?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
+        runtime_ingress.begin_drain();
         let mut changes = wait_for_index_event_with_continuity(
             &receiver,
             &watch_root,
@@ -8230,13 +8263,30 @@ pub(crate) fn run_notify_watch_loop(
                 &mut registered_policy_directories,
                 &control,
             )?;
-            last_refresh = refresh_index_for_changes_controlled(
-                store,
-                &current_plan,
-                &changes,
-                symbol_options,
-                &control,
-            )?;
+            last_refresh = policy_selection.reconcile_with_policy_fence(&control, |retry| {
+                if retry {
+                    current_plan = plan.reload_controlled(&control)?;
+                    policy_selection.require_recursive_rebind();
+                    policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
+                    policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+                        &watch_root,
+                        current_plan.selected_config_path.as_deref(),
+                        &policy_selection,
+                        &mut watcher,
+                        &mut registered_policy_directories,
+                        &control,
+                    )?;
+                    refresh_index_controlled(store, &current_plan, symbol_options, &control)
+                } else {
+                    refresh_index_for_changes_controlled(
+                        store,
+                        &current_plan,
+                        &changes,
+                        symbol_options,
+                        &control,
+                    )
+                }
+            })?;
             cycles += 1;
         }
     }
@@ -8331,6 +8381,20 @@ fn wait_for_index_event_with_continuity(
     }
     if continuity_lost.swap(false, Ordering::AcqRel) {
         changes.requires_full_scan = true;
+    }
+    if policy_selection.take_policy_recheck() {
+        let structural = policy_selection.take_structural_policy_recheck();
+        match policy_inputs.policy_state_changed(&control) {
+            Ok(changed) if changed || structural => {
+                policy_selection.require_recursive_rebind();
+                changes.requires_full_scan = true;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                policy_selection.retain_policy_recheck();
+                return Err(error);
+            }
+        }
     }
     Ok(changes)
 }

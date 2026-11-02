@@ -38,6 +38,8 @@ const SOURCE_OBSERVATION_QUEUE_CAPACITY: usize = 1_024;
 const VERIFIED_READ_ATTEMPTS: usize = 3;
 /// Maximum bytes read from any one external source-selection policy input.
 const MAX_POLICY_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
+/// Fixed SQLite sidecar names belonging to one captured database namespace.
+const DATABASE_RUNTIME_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Whether exact verification may repair a bounded delta before returning a read.
 #[derive(Clone, Copy)]
@@ -332,7 +334,7 @@ enum ObservedAcceptance {
 
 /// Exact root/database/config identity used to isolate one observer.
 #[derive(Clone, Debug, Eq)]
-struct SourceBinding {
+pub(super) struct SourceBinding {
     /// Canonical source root watched by this observer.
     root: PathBuf,
     /// Database excluded from source-change invalidation.
@@ -363,7 +365,11 @@ impl Hash for SourceBinding {
 
 impl SourceBinding {
     /// Resolve one root, database, and optional configuration into a stable binding.
-    fn new(database: &Path, root: &Path, config: Option<&Path>) -> Result<Self, CliError> {
+    pub(super) fn new(
+        database: &Path,
+        root: &Path,
+        config: Option<&Path>,
+    ) -> Result<Self, CliError> {
         let root = root.canonicalize().map_err(|source| CliError::Io {
             path: root.to_path_buf(),
             source,
@@ -377,6 +383,116 @@ impl SourceBinding {
             database_target,
             config,
         })
+    }
+
+    /// Queue exact runtime spellings for the controlled drain instead of coalescing policy uncertainty.
+    /// This is lexical routing, not authority to suppress the event or reuse a retargeted binding.
+    fn queues_database_event(&self, event: &Event) -> bool {
+        if event.need_rescan() || event.paths.is_empty() || self.database_target.is_none() {
+            return false;
+        }
+        let structural_main = matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(notify::event::ModifyKind::Name(_))
+        );
+        event.paths.iter().all(|path| {
+            let candidate = super::absolute_watch_path(&self.root, path);
+            [
+                Some(self.database.as_path()),
+                self.database_target.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|database| {
+                if candidate == database {
+                    return !structural_main;
+                }
+                DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
+                    let mut sidecar = database.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    candidate == Path::new(&sidecar)
+                })
+            })
+        })
+    }
+
+    /// Recognize only captured literal names, without consulting the filesystem in a callback.
+    fn has_database_path(&self, event: &Event) -> bool {
+        event.paths.iter().any(|path| {
+            let candidate = super::absolute_watch_path(&self.root, path);
+            [
+                Some(self.database.as_path()),
+                self.database_target.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|database| {
+                candidate == database
+                    || DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
+                        let mut sidecar = database.as_os_str().to_os_string();
+                        sidecar.push(suffix);
+                        candidate == Path::new(&sidecar)
+                    })
+            })
+        })
+    }
+}
+
+/// One bounded runtime wake, independent of policy uncertainty and source continuity.
+#[derive(Clone)]
+pub(super) struct RuntimeEventIngress {
+    /// Captured paths route events but never authorize suppressing a changed native binding.
+    binding: SourceBinding,
+    /// One representative runtime notification remains queued until the controlled drain.
+    pending: Arc<AtomicBool>,
+}
+
+impl RuntimeEventIngress {
+    /// Capture one runtime namespace and its independent wake state.
+    pub(super) fn new(binding: SourceBinding) -> Self {
+        Self {
+            binding,
+            pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Preserve captured database events even when they are unrelated to policy filenames.
+    fn may_affect(&self, event: &Event) -> bool {
+        self.binding.has_database_path(event)
+    }
+
+    /// Publish ordinary runtime work without arming a policy recheck or overflowing on self-writes.
+    pub(super) fn observe(&self, selection: &PolicyWatchSelection, event: &Event) -> bool {
+        if !super::event_kind_affects_index(event.kind) && !event.need_rescan() {
+            return false;
+        }
+        if self.binding.queues_database_event(event) {
+            return !self.pending.swap(true, Ordering::AcqRel);
+        }
+        let selected = selection.observe(event);
+        let main_replaced = !event.need_rescan()
+            && matches!(
+                event.kind,
+                EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            )
+            && event.paths.iter().any(|path| {
+                let candidate = super::absolute_watch_path(&self.binding.root, path);
+                candidate == self.binding.database
+                    || self.binding.database_target.as_ref() == Some(&candidate)
+            });
+        if main_replaced {
+            selection.require_recursive_rebind();
+        }
+        selected || self.may_affect(event)
+    }
+
+    /// Clear before consuming the representative event; MCP callers hold the receiver fence.
+    pub(super) fn begin_drain(&self) {
+        self.pending.store(false, Ordering::Release);
     }
 }
 
@@ -416,6 +532,8 @@ struct SourceObservationEntry {
     binding: SourceBinding,
     /// Policy namespace shared with the callback without coupling it to epoch locks.
     policy_selection: PolicyWatchSelection,
+    /// Coalesced runtime wake shared with callback publication.
+    runtime_ingress: RuntimeEventIngress,
     /// Native watcher kept alive for the entry lifetime.
     watcher: Mutex<SourceWatchCoverage>,
     /// Bounded receiver whose lock serializes callback publication with drain acknowledgment.
@@ -490,7 +608,9 @@ impl SourceObservationEntry {
         let ingress_sequence = Arc::new(AtomicU64::new(0));
         let continuity_lost = Arc::new(AtomicBool::new(false));
         let policy_selection = PolicyWatchSelection::new(binding.root.clone());
+        let runtime_ingress = RuntimeEventIngress::new(binding.clone());
         let watcher = notify::recommended_watcher(selected_watcher_callback(
+            &runtime_ingress,
             policy_selection.clone(),
             sender,
             Arc::clone(&receiver),
@@ -503,6 +623,7 @@ impl SourceObservationEntry {
         let mut entry = Self {
             binding,
             policy_selection,
+            runtime_ingress,
             watcher: Mutex::new(SourceWatchCoverage {
                 watcher,
                 directories: BTreeSet::new(),
@@ -643,6 +764,7 @@ impl SourceObservationEntry {
             })?;
             self.invalidate();
             self.continuity_lost.store(false, Ordering::Release);
+            self.runtime_ingress.begin_drain();
             loop {
                 control.check(IndexWorkStage::RepositoryTraversal)?;
                 match receiver.try_recv() {
@@ -680,6 +802,7 @@ impl SourceObservationEntry {
         scan_options: &projectatlas_fs::ScanOptions,
         control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
+        self.runtime_ingress.begin_drain();
         #[cfg(test)]
         if self
             .drain_continuity_invalidations
@@ -708,6 +831,7 @@ impl SourceObservationEntry {
         loop {
             match receiver.try_recv() {
                 Ok(event) => {
+                    let runtime_candidate = self.binding.has_database_path(&event);
                     let Some(filtered) = filtered_observer_event(&self.binding, &event) else {
                         continue;
                     };
@@ -733,7 +857,8 @@ impl SourceObservationEntry {
                             policy,
                         );
                         let mut event_changes = self.preserve_consumed_event(classified)?;
-                        event_changes.requires_full_scan |= inputs.affects(&filtered)
+                        event_changes.requires_full_scan |= runtime_candidate
+                            || inputs.affects(&filtered)
                             || self.preserve_consumed_event(
                                 inputs.ancestor_bindings_changed(&filtered, control),
                             )?;
@@ -758,6 +883,30 @@ impl SourceObservationEntry {
                     return Ok(true);
                 }
             }
+        }
+        if self.policy_selection.take_policy_recheck() {
+            let structural = self.policy_selection.take_structural_policy_recheck();
+            let inspected = (|| -> Result<bool, CliError> {
+                if structural {
+                    // Canonical names and bytes can stay equal after replacing
+                    // the directory object to which a native watch was bound.
+                    return Ok(true);
+                }
+                let Some(epoch) = self.current_epoch()? else {
+                    // A transient policy edit may have affected an in-flight
+                    // exact candidate even if its bytes have already reverted.
+                    return Ok(true);
+                };
+                let inputs = self.policy_selection.snapshot()?;
+                let current = exact_source_policy(&self.binding, control)?;
+                Ok(inputs.bindings_changed(control)?
+                    || current.0 != epoch.contract_fingerprint
+                    || current.1 != epoch.policy_witness)
+            })();
+            if inspected.is_err() {
+                self.policy_selection.retain_policy_recheck();
+            }
+            changes.requires_full_scan |= self.preserve_consumed_event(inspected)?;
         }
         let changed = changes.has_changes();
         if changed {
@@ -891,7 +1040,7 @@ fn is_database_runtime_path(candidate: &Path, binding: &SourceBinding, kind: Eve
     for database in namespaces.into_iter().flatten() {
         let main = same_native_namespace_entry(candidate, database);
         let runtime = main
-            || ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
+            || DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
                 let mut sidecar = database.as_os_str().to_os_string();
                 sidecar.push(suffix);
                 let sidecar = Path::new(&sidecar);
@@ -1669,6 +1818,7 @@ type IngressFenceGate = (SyncSender<()>, Receiver<()>);
 
 /// Exclude proven unrelated parent-directory traffic before it can consume source queue capacity.
 fn selected_watcher_callback(
+    runtime: &RuntimeEventIngress,
     selection: PolicyWatchSelection,
     sender: SyncSender<Event>,
     receiver: Arc<Mutex<Receiver<Event>>>,
@@ -1682,12 +1832,15 @@ fn selected_watcher_callback(
         ingress_sequence,
         continuity_lost,
         Some(selection.clone()),
+        Some(runtime.clone()),
         #[cfg(test)]
         before_fence,
     );
+    let runtime = runtime.clone();
     move |result| {
         if let Ok(event) = &result
             && !selection.may_affect(event)
+            && !runtime.may_affect(event)
         {
             return;
         }
@@ -1702,6 +1855,7 @@ fn watcher_callback(
     ingress_sequence: Arc<AtomicU64>,
     continuity_lost: Arc<AtomicBool>,
     selection: Option<PolicyWatchSelection>,
+    runtime: Option<RuntimeEventIngress>,
     #[cfg(test)] before_fence: Option<IngressFenceGate>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |result| match result {
@@ -1726,7 +1880,14 @@ fn watcher_callback(
             };
             if let Some(selection) = &selection {
                 match &result {
-                    Ok(event) if !selection.observe(event) => return,
+                    Ok(event)
+                        if !runtime.as_ref().map_or_else(
+                            || selection.observe(event),
+                            |runtime| runtime.observe(selection, event),
+                        ) =>
+                    {
+                        return;
+                    }
                     Ok(_) => {}
                     Err(_) => selection.require_recursive_rebind(),
                 }
@@ -1765,32 +1926,45 @@ fn source_policy_witness(
         .encode()
         .map_err(|error| CliError::InvalidInput(error.to_string()))?;
     hash_field(&mut hasher, "root", &root_identity_bytes);
-    for path in source_policy_paths(plan, control)? {
+    hash_policy_paths(&mut hasher, &source_policy_paths(plan, control)?, control)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Hash selected native inputs with the same bounded file and cancellation policy.
+pub(super) fn hash_policy_paths<'a>(
+    hasher: &mut Hasher,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for path in paths {
         control.check(IndexWorkStage::Publication)?;
-        hash_field(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
+        hash_field(hasher, "path", path.as_os_str().as_encoded_bytes());
         match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
-                let file = File::open(&path).map_err(|source| CliError::Io {
+                let file = File::open(path).map_err(|source| CliError::Io {
                     path: path.clone(),
                     source,
                 })?;
-                hash_policy_file(&mut hasher, path.as_path(), file, control)?;
+                hash_policy_file(hasher, path.as_path(), file, control)?;
             }
             Ok(metadata) if metadata.is_dir() => {
-                hash_field(&mut hasher, "state", b"directory");
+                hash_field(hasher, "state", b"directory");
             }
             Ok(_metadata) => {
-                hash_field(&mut hasher, "state", b"other");
+                hash_field(hasher, "state", b"other");
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                hash_field(&mut hasher, "state", b"absent");
+                hash_field(hasher, "state", b"absent");
             }
             Err(source) => {
-                return Err(CliError::Io { path, source });
+                return Err(CliError::Io {
+                    path: path.clone(),
+                    source,
+                });
             }
         }
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(())
 }
 
 /// Capture the scanner contract and dynamic policy for one exact source binding.
@@ -2232,6 +2406,30 @@ mod tests {
             )
             .has_changes(),
             "local ignore policy was filtered with runtime database state",
+        )?;
+        let entry = SourceObservationEntry::start(binding.clone())?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let mut previous_sidecar = binding
+            .database_target
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("fixture has no captured database target"))?
+            .as_os_str()
+            .to_os_string();
+        previous_sidecar.push("-wal");
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from(previous_sidecar))));
+        require(
+            entry.changed_since_exact_verification(&options, &test_control())?
+                && entry.policy_selection.recursive_rebind_pending(),
+            "coalesced previous-target sidecar acknowledged a retargeted database binding",
         )
     }
 
@@ -2596,8 +2794,171 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_external_parent_flood_never_consumes_the_source_queue()
-    -> Result<(), Box<dyn Error>> {
+    fn database_notifications_do_not_arm_unicode_policy_rechecks() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("π-root");
+        fs::create_dir(&root)?;
+        let database = base.join("atlas.db");
+        fs::write(&database, "runtime fixture")?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let inputs = PolicyWatchInputs::discover(&root, Some(&config), &test_control())?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        let (sender, receiver) = sync_channel(8);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let runtime_ingress =
+            RuntimeEventIngress::new(SourceBinding::new(&database, &root, Some(&config))?);
+        let mut callback = selected_watcher_callback(
+            &runtime_ingress,
+            selection.clone(),
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+        );
+        let binding = SourceBinding::new(&database, &root, Some(&config))?;
+        for (index, event) in [
+            Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(base.join("atlas.db-wal")),
+            Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(base.join("atlas.db-shm")),
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(database.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            require(
+                binding.queues_database_event(&event),
+                "exact runtime spelling was not routed",
+            )?;
+            callback(Ok(event));
+            require(
+                sequence.load(Ordering::Acquire) == index as u64 + 1
+                    && !selection.take_policy_recheck()
+                    && !selection.recursive_rebind_pending()
+                    && !lost.load(Ordering::Acquire),
+                "SQLite notification armed Unicode policy uncertainty before runtime filtering",
+            )?;
+            require(
+                receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .try_recv()
+                    .is_ok(),
+                "runtime notification was discarded instead of reaching controlled native filtering",
+            )?;
+            runtime_ingress.begin_drain();
+        }
+        for event in [
+            Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(database.clone()),
+            Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(database.clone()),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(database.clone()),
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(config),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(binding.root.join("source-alias.rs")),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(database.clone())
+                .add_path(base.join("π-rules")),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(database)
+                .set_flag(notify::event::Flag::Rescan),
+        ] {
+            require(
+                !binding.queues_database_event(&event),
+                "runtime routing hid structural, policy, alias or rescan uncertainty",
+            )?;
+        }
+        for _ in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join("atlas.db-wal"))));
+        }
+        require(
+            !lost.load(Ordering::Acquire),
+            "SQLite write burst exhausted source continuity instead of sharing a runtime wake",
+        )?;
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(binding.database)));
+        require(
+            selection.take_policy_recheck() && selection.take_structural_policy_recheck(),
+            "main-file replacement lost structural policy uncertainty",
+        )
+    }
+
+    #[test]
+    fn runtime_wake_rearms_after_verified_epoch_drains() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        registry.with_verified_read(&database, &root, None, &test_control(), |_store, stamp| {
+            Ok(stamp)
+        })?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let epoch = entry
+            .current_epoch()?
+            .ok_or_else(|| std::io::Error::other("fixture has no epoch"))?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        for _ in 0..2 {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(database.with_file_name("projectatlas.db-wal"))));
+            let receiver = entry
+                .receiver
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            require(
+                entry.runtime_ingress.pending.load(Ordering::Acquire),
+                "runtime event did not arm its wake",
+            )?;
+            require(
+                matches!(
+                    entry.drain_epoch_events(
+                        &receiver,
+                        &epoch,
+                        &projectatlas_fs::ScanOptions::default(),
+                        &test_control()
+                    )?,
+                    ObservedAcceptance::Accepted
+                ),
+                "runtime drain invalidated a verified source epoch",
+            )?;
+            require(
+                !entry.runtime_ingress.pending.load(Ordering::Acquire),
+                "verified epoch drain consumed its representative without rearming runtime ingress",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_external_parent_flood_preserves_bounded_source_queue() -> Result<(), Box<dyn Error>>
+    {
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let root = base.join("repo");
@@ -2613,6 +2974,7 @@ mod tests {
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
         let mut callback = selected_watcher_callback(
+            &RuntimeEventIngress::new(SourceBinding::new(&root.join("unused.db"), &root, None)?),
             selection,
             sender,
             Arc::clone(&receiver),
@@ -2630,12 +2992,31 @@ mod tests {
             sequence.load(Ordering::Acquire) == 0 && !lost.load(Ordering::Acquire),
             "unrelated external traffic consumed observation continuity",
         )?;
+        for i in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join(format!("π-unrelated-{i}")))));
+        }
+        require(
+            sequence.load(Ordering::Acquire) == 1 && !lost.load(Ordering::Acquire),
+            "uncertain Unicode sibling traffic overflowed instead of coalescing one policy recheck",
+        )?;
+        {
+            let receiver = receiver
+                .lock()
+                .map_err(|source| std::io::Error::other(source.to_string()))?;
+            require(
+                receiver.try_iter().count() == 1,
+                "Unicode sibling wake was not bounded",
+            )?;
+        }
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
             notify::event::DataChange::Any,
         )))
         .add_path(config)));
         require(
-            sequence.load(Ordering::Acquire) == 1 && !lost.load(Ordering::Acquire),
+            sequence.load(Ordering::Acquire) == 2 && !lost.load(Ordering::Acquire),
             "selected external input was not admitted",
         )?;
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
@@ -2649,6 +3030,99 @@ mod tests {
     }
 
     #[test]
+    fn unicode_sibling_rechecks_preserve_only_a_verified_policy_epoch() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let first = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let sibling = || {
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join("π-unrelated"))
+        };
+        for _ in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(sibling()));
+        }
+        require(
+            !entry.continuity_lost.load(Ordering::Acquire),
+            "Unicode sibling storm lost source continuity",
+        )?;
+        require(
+            !entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "unchanged sibling storm invalidated a verified policy",
+        )?;
+        let warm = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        require(
+            warm.value == first.value && warm.work.exact_verifications == 0,
+            "Unicode sibling storm repeated exact source work",
+        )?;
+        callback(Ok(sibling()));
+        let cancellation = IndexCancellation::new();
+        let cancelled = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(5)));
+        cancellation.cancel();
+        require(
+            matches!(
+                entry.changed_since_exact_verification(
+                    &projectatlas_fs::ScanOptions::default(),
+                    &cancelled
+                ),
+                Err(CliError::IndexWork(_) | CliError::Fs(projectatlas_fs::FsError::IndexWork(_)))
+            ),
+            "policy recheck ignored cancellation",
+        )?;
+        require(
+            entry.current_epoch()?.is_none() && entry.policy_selection.take_policy_recheck(),
+            "cancelled recheck acknowledged pending uncertainty",
+        )?;
+        entry.policy_selection.retain_policy_recheck();
+        registry.with_verified_read(&database, &root, None, &test_control(), |_store, stamp| {
+            Ok(stamp)
+        })?;
+        entry.invalidate();
+        callback(Ok(sibling()));
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "uncertain event certified an in-flight candidate without an epoch",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn native_rescan_flag_survives_access_filtering() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -2658,6 +3132,7 @@ mod tests {
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
         let mut callback = selected_watcher_callback(
+            &RuntimeEventIngress::new(SourceBinding::new(&root.join("unused.db"), &root, None)?),
             selection,
             sender,
             receiver,
@@ -2686,16 +3161,67 @@ mod tests {
     #[test]
     fn rebind_marker_and_event_share_the_callback_ingress_fence() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        for result in [
-            Ok(
-                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
-                    .add_path(root.clone()),
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let database = base.join("atlas.db");
+        fs::write(&database, "runtime fixture")?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let inputs = Arc::new(PolicyWatchInputs::discover(
+            &root,
+            Some(&config),
+            &test_control(),
+        )?);
+        for (result, rebind, recheck, runtime_pending) in [
+            (
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                        .add_path(root.clone()),
+                ),
+                true,
+                false,
+                false,
             ),
-            Err(notify::Error::generic("fixture native observation failure")),
+            (
+                Err(notify::Error::generic("fixture native observation failure")),
+                true,
+                false,
+                false,
+            ),
+            (
+                Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))
+                .add_path(base.join("π-unrelated"))),
+                false,
+                true,
+                false,
+            ),
+            (
+                Ok(
+                    Event::new(EventKind::Create(notify::event::CreateKind::File))
+                        .add_path(base.join("atlas.db-wal")),
+                ),
+                false,
+                false,
+                true,
+            ),
+            (
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                        .add_path(database.clone()),
+                ),
+                true,
+                false,
+                false,
+            ),
         ] {
             let is_error = result.is_err();
             let selection = PolicyWatchSelection::new(root.clone());
+            selection.publish(Arc::clone(&inputs))?;
+            let runtime =
+                RuntimeEventIngress::new(SourceBinding::new(&database, &root, Some(&config))?);
             let (sender, receiver) = sync_channel(1);
             let receiver = Arc::new(Mutex::new(receiver));
             let sequence = Arc::new(AtomicU64::new(0));
@@ -2703,6 +3229,7 @@ mod tests {
             let (arrived, arrival) = sync_channel(1);
             let (release, released) = sync_channel(1);
             let mut callback = selected_watcher_callback(
+                &runtime,
                 selection.clone(),
                 sender,
                 Arc::clone(&receiver),
@@ -2719,6 +3246,8 @@ mod tests {
                 let worker = scope.spawn(move || callback(result));
                 let reached = arrival.recv_timeout(Duration::from_secs(5));
                 let premature_marker = selection.recursive_rebind_pending();
+                let premature_recheck = selection.take_policy_recheck();
+                let premature_runtime = runtime.pending.load(Ordering::Acquire);
                 let premature_sequence = sequence.load(Ordering::Acquire);
                 let premature_loss = lost.load(Ordering::Acquire);
                 let queue_empty = matches!(held.try_recv(), Err(TryRecvError::Empty));
@@ -2731,11 +3260,18 @@ mod tests {
                     std::io::Error::other(format!("native callback panicked: {payload:?}"))
                 })?;
                 require(
-                    !premature_marker && premature_sequence == 0 && !premature_loss && queue_empty,
-                    "acceptance fence observed a rebind marker without its event/sequence",
+                    !premature_marker
+                        && !premature_recheck
+                        && !premature_runtime
+                        && premature_sequence == 0
+                        && !premature_loss
+                        && queue_empty,
+                    "acceptance fence observed a marker without its event/sequence",
                 )?;
                 require(
-                    selection.recursive_rebind_pending()
+                    selection.recursive_rebind_pending() == rebind
+                        && selection.take_policy_recheck() == recheck
+                        && runtime.pending.load(Ordering::Acquire) == runtime_pending
                         && sequence.load(Ordering::Acquire) == 1
                         && lost.load(Ordering::Acquire) == is_error,
                     "callback did not publish structural uncertainty with ingress",
@@ -2766,6 +3302,7 @@ mod tests {
             Arc::clone(&lost),
             None,
             None,
+            None,
         );
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
             RenameMode::Any,
@@ -2792,6 +3329,7 @@ mod tests {
             receiver,
             Arc::clone(&sequence),
             Arc::clone(&lost),
+            None,
             None,
             None,
         );
@@ -2969,6 +3507,7 @@ mod tests {
             .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
             .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
         let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
             entry.policy_selection.clone(),
             entry.test_sender.clone(),
             Arc::clone(&entry.receiver),

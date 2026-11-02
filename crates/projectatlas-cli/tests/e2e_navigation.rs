@@ -13699,9 +13699,10 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
 
 #[test]
 fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
+    const EXTERNAL_POLICY_DIRECTORY: &str = "policy/current/nested";
     // Native platforms may split replacement notifications into several batches.
-    // Keep the original replacement margin plus two closure reconciliation phases.
-    const WATCH_CYCLE_BUDGET: usize = 10;
+    // Retain the replacement margin, two closure phases and two external policy phases.
+    const WATCH_CYCLE_BUDGET: usize = 12;
     // The large closure includes complete parser/graph publication in debug CI.
     // This fixture bound is not an indexing or warm-read performance SLO.
     const WATCH_PHASE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -13765,14 +13766,72 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         }
     }
 
+    /// Observe a policy-only source addition through durable read-only state.
+    fn await_watch_policy_source(
+        child: &mut Child,
+        database: &Path,
+        path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + WATCH_PHASE_TIMEOUT;
+        while AtlasStore::open_read_only(database)?
+            .load_node_by_path(path)?
+            .is_none()
+        {
+            if let Some(status) = child.try_wait()? {
+                return Err(
+                    io::Error::other(format!("watch exited before {path}: {status}")).into(),
+                );
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("watch missed external policy source {path}"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    /// Replace a higher ordinary namespace while retaining the selected input spelling.
+    fn replace_policy(
+        directory: &Path,
+        git_config: &Path,
+        rules: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        fs::rename(
+            directory.join("policy/current"),
+            directory.join("retired-policy"),
+        )?;
+        fs::create_dir_all(
+            git_config
+                .parent()
+                .ok_or_else(|| io::Error::other("policy config has no parent"))?,
+        )?;
+        fs::write(git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        fs::write(rules, "policy-followup.rs\n")?;
+        Ok(())
+    }
+
     for surface in ["cli", "mcp"] {
         let temp = tempfile::tempdir()?;
         let directory = temp.path();
-        let root = directory.join("source-root");
+        let root = directory.join("π-source-root");
         let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
         let config = directory.join("external.toml");
-        let git_config = directory.join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        let git_config = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        let rules = directory.join(EXTERNAL_POLICY_DIRECTORY).join("rules");
         write_project(&root, "initial_target")?;
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY))?;
+        fs::write(root.join("policy-target.rs"), "pub fn policy_target() {}\n")?;
+        fs::write(
+            root.join("policy-followup.rs"),
+            "pub fn policy_followup() {}\n",
+        )?;
+        fs::write(&rules, "policy-target.rs\npolicy-followup.rs\n")?;
         if surface == "cli" {
             let mut expanded = String::from("pub fn initial_target() {}\n");
             for ordinal in 0..=projectatlas_core::graph::GraphLimits::MAX_ROWS {
@@ -13784,7 +13843,7 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             .to_str()
             .ok_or_else(|| io::Error::other("fixture root is not UTF-8"))?;
         fs::write(&config, format!("[project]\nroot = {root_text:?}\n"))?;
-        fs::write(&git_config, "[core]\nexcludesFile = \"\"\n")?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
         let git_config_text = git_config
             .to_str()
             .ok_or_else(|| io::Error::other("fixture config is not UTF-8"))?;
@@ -13868,6 +13927,10 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             let mut child = command.spawn()?;
             let operation = (|| -> Result<(), Box<dyn Error>> {
                 await_watch_symbol(&mut child, &database, "watcher_ready")?;
+                replace_policy(directory, &git_config, &rules)?;
+                await_watch_policy_source(&mut child, &database, "policy-target.rs")?;
+                fs::write(&rules, "")?;
+                await_watch_policy_source(&mut child, &database, "policy-followup.rs")?;
                 // One ordinary file event can exceed incremental graph limits even
                 // though native queue overflow never occurred. Recover through the
                 // same controlled production owner, then shrink the persisted closure.
@@ -13963,6 +14026,32 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
                             "initial_target".to_string(),
                         )]),
                     )?;
+                }
+                replace_policy(directory, &git_config, &rules)?;
+                for path in ["policy-target.rs", "policy-followup.rs"] {
+                    if path == "policy-followup.rs" {
+                        fs::write(&rules, "")?;
+                    }
+                    let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+                    let summary_arguments = json!({"file": path, "limit": 10});
+                    let mut admitted: Value = toon_format::decode_default(
+                        &session.call_tool("atlas_file_summary", &summary_arguments)?,
+                    )?;
+                    if admitted.pointer("/error/kind").and_then(Value::as_str)
+                        == Some("refresh_required")
+                    {
+                        // Exact fallback may require the explicit refresh owner;
+                        // ordinary observed source refresh can already be current.
+                        rust_binding_equal(
+                            &AtlasStore::open_read_only(&database)?.index_publication()?,
+                            &before,
+                        )?;
+                        session.call_tool("atlas_watch_once", &refresh)?;
+                        admitted = toon_format::decode_default(
+                            &session.call_tool("atlas_file_summary", &summary_arguments)?,
+                        )?;
+                    }
+                    require_json_string(&admitted, &["file_summary", "file_path"], path)?;
                 }
                 replace_project(&root, directory)?;
                 session.call_tool("atlas_watch_once", &refresh)?;

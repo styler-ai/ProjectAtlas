@@ -61,6 +61,11 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a supported selected config changes the effective excludes pathname
 - **THEN** accepted reconciliation updates external watch coverage, including absent paths, and discovers later edits to the newly selected input without per-event-path reconstruction of global policy
 
+#### Scenario: Ordinary external ancestor replacement
+- **WHEN** an existing ordinary ancestor above the selected policy input's nearest parent is renamed and recreated, including a missing selected leaf or a resolved alias target
+- **THEN** bounded nonrecursive namespace coverage observes the replacement without a source edit, reconciliation rebinds the same selected pathnames to the replacement directories, and subsequent distinct policy edits remain observable
+- **AND** immediate-child filtering retains unrelated outside-event suppression without filesystem I/O in callbacks; unavailable or over-capacity coverage retains the existing exact or polling fallback instead of certifying a partially watched epoch
+
 #### Scenario: A selected policy parent is a regular file
 - **WHEN** a selected policy pathname requires traversing an existing regular file as a directory, directly or through a symlink target
 - **THEN** watch admission refuses the impossible parent and releases partial native coverage on every supported platform, even when the operating system reports the child as missing
@@ -81,6 +86,14 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a source or document watch batch exceeds incremental bounds, or another full-refresh caller has no captured document check, and source nodes remain unchanged while an excluded target changes its unresolved reason
 - **THEN** full reconciliation publishes the current document outcome instead of discarding it as a source-only no-op, reuses unchanged parses and preserves project identity and approved purposes
 - **AND** unchanged outcomes remain a no-op, changed-source captures avoid a repeated document probe, and verification, generation change or cancellation failure retains the last complete publication under the original bounded work control
+
+#### Scenario: Uncertain Unicode siblings do not overflow source observation
+- **WHEN** unrelated native Unicode or non-UTF-8 sibling events reach a known external policy namespace whose arbitrary-name equivalence is uncertain
+- **THEN** callback ingress coalesces them into one pending controlled policy recheck rather than queuing every sibling or inventing a platform-independent filename comparison
+- **AND** fresh selected bindings and bounded policy bytes detect real selected aliases or edits, while unchanged policy retains a verified warm epoch without repeated source reconciliation
+- **AND** an uncertain event during exact verification cannot certify a candidate without an accepted epoch; callback/recheck publication remains receiver-fenced, later ingress cannot be cleared by an older drain, and cancellation or inspection failure preserves uncertainty
+- **AND** known source/root/control, unknown-parent, rescan and native-error events retain their existing bounded admission and coverage behavior
+- **AND** exact captured SQLite runtime notifications reach controlled runtime filtering without first arming policy uncertainty, so a Unicode source-root name and explicit external database preserve cold/warm reads and source edits; structural main-file changes, alias retarget uncertainty and genuine policy events remain observable
 
 #### Scenario: Selected source directory is replaced
 - **WHEN** a supported selected source directory is replaced at the same canonical pathname during CLI/MCP observation while its explicit external database and configuration remain available
@@ -165,6 +178,11 @@ The existing derivation fingerprint and atomic publication owner SHALL repair bo
 #### Scenario: Exact MCP root and read-only boundary
 - **WHEN** CLI/MCP navigation selects another root, lacks initialized state or only queries a stale index
 - **THEN** exact root/database isolation and existing typed recovery apply without implicitly mutating, initializing or substituting a sibling database
+
+#### Scenario: Patched nested image wikilinks retain parser compatibility
+- **WHEN** untrusted Markdown or admitted MDX contains nested image wikilinks under the existing enabled parser options
+- **THEN** the patched upstream parser retains the deepest embed without repeated enclosing-body parsing, ordinary and wiki source references remain available, and images remain explicitly unsupported as source-document identities
+- **AND** unchanged compatible indexes repair any changed heading facts through derivation 26 while retaining semantic 23, project identity, approved purposes, no-op and compatible rollback/re-upgrade behavior
 
 
 #### Scenario: Document prefix work stays fresh and bounded

@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 505,576 bytes (0.73%) to the optimized
+The derivation-26 policy repair adds 538,912 bytes (0.78%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -53,7 +53,7 @@ loading across distinct targets, while the next pass and final revalidation
 remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
 source manifest. The rebuilt filesystem helper is byte-identical to the prior
 measured helper, so its 18 component samples are reused with their original
-manifest and overlap limitation. All 18 CLI cost samples and four upgrade cases
+manifest and overlap limitation. All 18 CLI cost samples and six upgrade cases
 were rerun against the current frozen CLI without overlapping builds.
 
 The controlled watcher retains full reconciliation under its original control.
@@ -80,9 +80,9 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 308.9 → 306.8 | 48.3 → 49.7 | 32,492 → 29,408 | 21,752 → 19,272 |
-| Large config | 306.4 → 317.7 | 48.5 → 54.3 | 32,756 → 32,468 | 21,528 → 22,104 |
-| 10,000 rules | 381.1 → 392.0 | 70.9 → 98.4 | 44,452 → 41,232 | 33,676 → 32,088 |
+| Ordinary | 312.8 → 310.1 | 48.3 → 49.9 | 32,092 → 31,276 | 20,660 → 20,384 |
+| Large config | 305.6 → 314.5 | 49.2 → 53.3 | 31,924 → 33,312 | 20,984 → 23,628 |
+| 10,000 rules | 392.9 → 394.8 | 69.6 → 97.3 | 44,412 → 41,700 | 32,212 → 32,984 |
 
 The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
@@ -101,9 +101,9 @@ predecessor is PR head 634cf78, not accepted main. Every read succeeds and leave
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the current repair median is 0.06849
-seconds, about 63.9 times faster in this fixture. Initialization is
-10.21149 to 0.27392 seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06877
+seconds, about 63.6 times faster in this fixture. Initialization is
+10.21149 to 0.27031 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
 The unisolated desktop host and separately measured predecessor/candidate groups
 limit causal timing precision. The predecessor samples retain their verified
@@ -132,7 +132,7 @@ root freshly, inspects each component without following its leaf, and
 canonicalizes symlink/reparse components immediately. It refuses the first escape,
 including outside-then-reentry paths. There is no cross-target allow-cache.
 
-| Operation | Preceding artifact → current repair |
+| Operation | Preceding artifact → derivation-25 prefix repair |
 | --- | ---: |
 | Initialization | 5.320 → 0.735 s |
 | Cold CLI summary | 2.600 → 0.322 s |
@@ -147,12 +147,16 @@ timings are not compared with the quiet timings. This is affected-work evidence,
 not a general speedup or persistent-MCP latency claim. Exact identities and sample
 data are in the compact result.
 
+The 512-link timing and syscall samples above are retained historical measurements
+of the identified derivation-25 artifact. Its CLI bytes differ from the current
+candidate; no equivalence or fresh syscall measurement is claimed.
+
 The reported-scale check uses 1,000 links beneath 200 existing components.
 Two documents with 500 links each keep extraction complete under the existing
 intermediate-byte limit; a single 1,000-link document at that depth correctly
 retained only 614 links with explicit partial coverage and is excluded from the
 complete comparison. On the complete fixture, initialization is
-191.48 → 7.22 s and a cold summary is 95.71 → 3.43 s.
+191.48 → 7.13 s and a cold summary is 95.71 → 3.43 s.
 Both retain all 1,000 missing relations with complete document coverage and leave
 publication unchanged. These are one-sample, quiet-process, warm-cache local
 measurements on distinct identical-input roots, subject to the same host/SLO
@@ -193,7 +197,7 @@ cached projection and the new uncached probe; #738 still owns its full acceptanc
 
 ## Upgrade and remaining release proof
 
-The exact optimized candidate passes four native upgrade cases: published 0.5.0
+The exact optimized candidate passes six native upgrade cases. Four cover published 0.5.0
 and accepted-main derivation 24, each with an ordinary and linked Git worktree.
 Each predecessor reproduces incorrect exclusion results; ordinary refresh repairs
 them while preserving project identity and every approved purpose, including a
@@ -204,9 +208,17 @@ compatible rollback and re-upgrade preserve authored state and corrected results
 The early deadline does not claim mid-publication cancellation; owning controlled
 tests separately cover cancellation and publication revalidation.
 
+Two further ordinary/linked-worktree cases start at derivation 25 and prove the
+patched Markdown heading changes from `dog.png` to `![[cat.png|dog.png]]`,
+with semantic contract 23 retained. They preserve approved purposes, identity and
+ordinary/wiki document references, verify no-op and early-deadline state, and
+prove compatible rollback and re-upgrade. The locked pulldown-cmark 0.13.6 fixes
+reachable RUSTSEC-2026-0433 without disabling supported wikilinks.
+
 Actual CLI/MCP external-policy and source-root-replacement tests also pass against
 this frozen optimized binary. Their causal controls establish the old failure
-and, for replacement coverage, require later child-event delivery without an
+and, for replacement coverage, use a Unicode root and require later child/policy
+event delivery without an
 unconditional MCP refresh masking a missing watcher. Native platform CI, complete
 issue review and exact RC package verification remain required before closure
 and release. Keep stable 0.5.0 Latest until separately authorized.
