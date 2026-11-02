@@ -1,4 +1,54 @@
-# New Ec3 security finding — cumulative document rows (supersedes gate-only status)
+# Source907 row-budget fix — local packet approved, normal publication next
+
+SOURCE90719d9149c175c6f48fd80dfeafcd9271be141e committed; publicPR745 stillEc3 OPEN.
+Clean defaultrelease55444 TERMINAL0(40.91s), frozen at
+~/.cache/projectatlas-benchmarks/external-policy-739-document-rows-release.
+140manifest7e767ae5332ae90ff8dffb42b2f489338a981fb484c763e6346e93bf1bbe5cab;
+CLI090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488/70000320B.
+FShelper544eb834.../8234512B BYTEIDENTICAL. All140 saved/Git907inputs verified;
+only3 inputs changed vsfrozenA5: runtime.rs,graph_projection.rs,mcp.rs. Existing
+navigation/lifecycle fixture/support/build inputs unchanged; explicit executable
+overrides invoke fresh090CLI. Source receipt source_dirty:false. No DB reset.
+
+Fresh18CLIcostsamples,4stable050/acceptedmain ordinary+linked upgrade/rollback,
+2DER25->26Markdown upgrades,2resourcefixtures and6optimized adapters ALLPASS.
+No build overlap in measurements. Initial73000 TERMINAL1 ONLY at adapter harness
+identityguard BEFOREexecution: allfeature normalpush navhash differs from the
+knownconcurrent54b. Selected exactconcurrentlog54b, preserved hashguard; reran
+ONLYadapters43987TERMINAL0; lifecycleb6cc575... fromnormalpush log. No product/test
+sourcechange. 72412 TERMINAL0 actualCLI10801rows positive coldread/noop+later
+targetresolution andverifiedcomplete1000links/2guides×500/depth200 coverage;
+cold1024links/2000rules countverified. Logs/receipts document-rows-* under/tmp.
+Freshcosts main→candidate ordinaryinit309.05→312.71ms/noop48.27→49.71ms,
+10krulesnoop70.95→97.89ms; completeprefixcold3.44444s, coldpolicy median.069673s.
+Size+543360B/.7823%. LocalLinuxwarmcacheunisolated, NOT#708SLO/#715fourplatform.
+ONLY18FScomponent samples reused viaexacthelperidentity +originaloverlaplimit.
+
+Luna741 source, spec/read-ahead wording, oneexactnewCIselector and finalcostpacket
+APPROVED. New rowtest addedunderexisting4nativecompile step withunchanged10min
+cap/features/matrix; currentnativeproof stillpending. Keep2.1/2.2/3.1+fiveacceptance
+OPEN;1.1checked, mitigationsunchecked. Liveissueupdated+exactreadback.
+UPDATEDhand off715comment6589398173 EXACTreadback and708pointer6589401634 EXACT.
+https://github.com/styler-ai/ProjectAtlas/issues/715#issuecomment-6589398173
+https://github.com/styler-ai/ProjectAtlas/issues/708#issuecomment-6589401634
+CostMD/JSON/proposal/currentworkflow areowned dirtymetadata since907; committhem
+withthismemory afterfmt/diff/strictOpenSpec/scopedIssueOps. Verify140inputbinding
+againstnewmetadataGitHEAD, thenNORMALcleanpush(document-rows-push.py). No edits
+inselectedcheckoutwhilehookslive. Preserve sibling/parked/private715work.
+
+Ec3QL41528385905 nowALL7SUCCESS (Rust2081059056=26/Actions2080931487=2/others0).
+WholeEc3RESTintake37039 TERMINAL0 normalized35 BEFOREverdict:28native+6security
+reports+RustSec. RawcompleteSARIF/instances/comments preserved under
+/tmp/projectatlas-739-child-signal-exact-*; normalizationrecordsCURRENT907target
+andREPORTEDEc3native. No newnativeverdict or render fromthisarchivalcollection;
+newreportedrowfinding separatelyconfirmed/fixed asbelow. Ec3source41528395756
+lastLIVE withRust/repository/plan/diagnosticPASS and4nativepending, no failure.
+Theseoldsourcegates aren't current907proof. Freshpublishedhead wholeintake/static
+reconciliation/render mandatory afterallnativeQL/bots; no tests/edits/agents in
+staticassessment phase. Current21threads includesNEWrowfindingunresolved;
+previous20resolved. No merge/closure yet; goalACTIVE739then738/708/715RC1.
+
+# New Ec3 security finding — cumulative document rows (historical detail)
 
 Public/local HEAD ec3d5cf remains PR745 OPEN/unmerged. Codex code review completed
 without findings; security review completed with NEW report4448000523:

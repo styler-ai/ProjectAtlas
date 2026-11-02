@@ -1,24 +1,12 @@
 # External source-policy costs and release handoff
 
-Measurement status: the corrected flood fixture and rebuilt default artifacts bind
-source `a5ac54628aac866549841b5a083ac45526d63f3f`. Its 140-input manifest differs
-from measured source `76d01f054c25925c0f8cf6ea5cbc6c07935023ba` only in the navigation
-test and paired test-source identity. The rebuilt CLI and filesystem helper are
-byte-identical, so the existing scoped cost, upgrade, resource and unchanged
-adapter results are retained. The corrected flood scenario passed freshly against
-the optimized artifact and within all 59 concurrent debug navigation tests. Its
-child-signal helper rejects a reaped child before launching a signal command; a
-harmless before/after witness proves this error path without signalling a PID.
-Native Windows lifecycle and complete hosted/issue/release acceptance remain
-required. The separately labelled 512-link syscall samples retain their historical
-derivation-25 identity.
+Measurement status: current artifact identities and fresh CLI, upgrade, adapter,
+complete-prefix and cold-policy results bind source `90719d9149c175c6f48fd80dfeafcd9271be141e`.
+All 140 build inputs match its committed and saved source. Native Windows lifecycle
+and complete hosted/issue/release acceptance remain required. The separately labelled
+512-link syscall samples retain their historical derivation-25 identity.
 
-Six optimized public-adapter scenarios include bounded continuous-CLI policy-fence
-fallback and fresh CLI/MCP observation after a stopped ancestor move. Their run
-times record functional execution, not a sustained-flood latency SLO or native
-Windows acceptance; exact hosted platform proof remains separate.
-
-The derivation-26 policy repair adds 543,800 bytes (0.78%) to the optimized
+The derivation-26 policy repair adds 543,360 bytes (0.78%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -71,10 +59,22 @@ loading across distinct targets, while the next pass and final revalidation
 remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
 source manifest. The rebuilt filesystem helper is byte-identical to the prior
 measured helper, so its 18 component samples are reused with their original
-manifest and overlap limitation. The 18 CLI cost samples and six upgrade cases were measured at source76 without
-overlapping builds, then retained after sourcea5 rebuilt the CLI byte-identically.
-Only the corrected flood fixture was rerun against the sourcea5 artifact; no
-fresh cost or upgrade timing is claimed for that test-only correction.
+manifest and overlap limitation. The 18 CLI cost samples, six upgrade cases,
+six public-adapter scenarios and two resource fixtures were rerun against the
+recorded source's optimized CLI without overlapping builds. Adapter durations establish
+functional execution rather than a sustained-flood or native-platform SLO.
+
+Cold verification now charges every returned document row before normalization
+or any shortcut, with a separate 1,000,000-row allowance under the original work
+control. Each 256-row query retains its single continuation lookahead; repeated
+sentinels and at most one final over-limit page bound decode overhead. Exhaustion
+preserves typed incomplete guidance and cannot restart through refresh fallback.
+The causal low-limit regression covers normalization failures, indexed-heading
+and case-conflict shortcuts, exact and exceeded limits across pages, cancellation
+and authored/publication state. A real optimized CLI fixture also admits 10,801
+relations, preserves state on cold reads and no-op refresh, then resolves a later
+target while retaining all 10,800 outside-root relations. This is compatibility
+proof, not a million-row latency or denial experiment.
 
 The controlled watcher retains full reconciliation under its original control.
 Its native regression exercises a large single-file graph closure, compaction
@@ -100,11 +100,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 310.8 → 310.5 | 48.7 → 49.0 | 32,848 → 32,028 | 22,144 → 21,476 |
-| Large config | 304.2 → 315.1 | 49.5 → 53.5 | 33,036 → 34,552 | 21,976 → 24,792 |
-| 10,000 rules | 387.1 → 395.0 | 70.4 → 98.2 | 45,036 → 43,184 | 32,924 → 34,200 |
+| Ordinary | 309.1 → 312.7 | 48.3 → 49.7 | 32,836 → 31,352 | 21,840 → 20,524 |
+| Large config | 301.2 → 319.7 | 49.2 → 54.4 | 32,964 → 34,156 | 21,896 → 23,976 |
+| 10,000 rules | 385.0 → 397.8 | 70.9 → 97.9 | 45,452 → 42,208 | 32,920 → 33,196 |
 
-The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
@@ -121,9 +121,9 @@ predecessor is PR head 634cf78, not accepted main. Every read succeeds and leave
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the current repair median is 0.06748
-seconds, about 64.9 times faster in this fixture. Initialization is
-10.21149 to 0.26834 seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06967
+seconds, about 62.8 times faster in this fixture. Initialization is
+10.21149 to 0.26568 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
 The unisolated desktop host and separately measured predecessor/candidate groups
 limit causal timing precision. The predecessor samples retain their verified
@@ -176,7 +176,7 @@ Two documents with 500 links each keep extraction complete under the existing
 intermediate-byte limit; a single 1,000-link document at that depth correctly
 retained only 614 links with explicit partial coverage and is excluded from the
 complete comparison. On the complete fixture, initialization is
-191.48 → 7.18 s and a cold summary is 95.71 → 3.46 s.
+191.48 → 7.19 s and a cold summary is 95.71 → 3.44 s.
 Both retain all 1,000 missing relations with complete document coverage and leave
 publication unchanged. These are one-sample, quiet-process, warm-cache local
 measurements on distinct identical-input roots, subject to the same host/SLO
