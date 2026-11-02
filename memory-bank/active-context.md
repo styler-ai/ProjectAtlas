@@ -698,3 +698,57 @@ finalcost/taskmetadata+140inputrebinding ->SINGLEnormalcleanpushrequiredhooks.
 No freezesnapshotbuilt yet. Historicaldff/c431sourceproofnotcurrent2d16+coverage.
 2.1open/1.1checkedonly;2.2/3.1/fiveacceptanceunchecked,8genuinefeedbackOPEN.
 GoalACTIVE739onlybefore738/708/715RC1;stable050Latest andparked/privateworkpreserved.
+
+
+## Current frozen source76 and complete affected proof — metadata publication next
+
+LocalsourceHEAD76d01f054c25925c0f8cf6ea5cbc6c07935023ba includesreviewed
+Windowswarmnearest/allplatformrealCLI+MCPstoprestart/diagnostics/226inventoryslice
+after2d16boundedfencefix. BothLOCALONLY; publicPR745stillc431. Sourcecommit8720
+TERMINAL0; defaultlockedreleasebuild40.91s+freezeSUCCESSsamecell. Sourceclean
+atfreeze. CLI0358e60aec4b7a58d5861cf8c0c501091286d33ce71fa78f731939b0c96be55f
+70,000,760B,140inputmanifestc6be854bd05c8d6c401c65407fbe5d6a6cf9113d1fb07970cd71305b64027323
+allGit+savedmatch /tmp/projectatlas-739-policy-fence-commit-source-binding.json.
+Immutable ~/.cache/projectatlas-benchmarks/external-policy-739-policy-fence-release.
+FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9 byteidentical
+->18historicalcomponent samplesEXPLICITLYreused,no freshFS timingclaim.
+
+Freshproof68314TERMINAL0 allPASS onexact0358:18CLIcostsamples,4stable050/main24
+ordinary+linkedupgrade/rollbackcases,2DER25->26Markdownrepairs,6optimizedreal
+CLI/MCPadaptercases(external/document/rootreplacement/state/newflood/newrestart),
+1000links/depth200 complete500/500documentsperguide+unchangedpublication and
+1024links/2000rulescold3samples+unchangedpublication. Prefixinit7.178818s,
+cold3.458142s; coldpolicy median.06747713s/init.2683382s,all1024missingverified.
+Artifacts /tmp/projectatlas-739-policy-fence-{cli-cost-proof,upgrade-proof,markdown-
+contract-upgrade-proof,optimized-adapters,prefix-complete,cold-policy-cost}.{json,log}.
+BothCLIbinaryenvsoverridden; currentCargoJSONno-runbuiltNavharness7fb5d3819da4c5d3
+a3fb78c7a9f3b3b91ecd38ac8f7d39ac8476f9f7ffa70324/lifecyclee8a6edb9eb1f5d3511ec7fd
+4a6a2b41914458721571ed96ce55820000296fdbf.6casesexplicitlyassertONEtestexecuted.
+No localproof/buildprocesslive now38832/68314completed.
+
+Updateddirtydocs/benchmarks/external-policy-cost.{md,json} reviewedAPPROVEDby
+Luna741 actualpacket: source76/0358 provenance,18helperreuseonly, freshCLI/6
+upgrade/6adapter/2resource, historicalDER25syscallseparate,notWindows/SLOclaim.
++543,800B/.782930897%vsmain. Ordinaryinit310.831->310.468ms/noop48.697->49.047ms;
+10krulesnoop70.363->98.219ms,scopedunisolatedhost. SameDER26/semantic23.
+
+Luna741 explicitlyseesNO2.1gap; owningselection/observation/fence/causal/dependency/
+costworkcomplete. 2.1nowCHECKEDlocally+live739,both2.1mitigationschecked,
+1.1checked,2.2/3.1/all5acceptanceUNCHECKED. LivebodyrequirementsrealCLI/MCP
+Windowsstop/reapandlegalseparatenearestcontrolupdatedapp+EXACTreadback. Native
+Windowsandremaininghostedacceptancebelongs2.2,notwaived. ProposalReleaseScope
+synchronizedcompleted2.1/pendingnativeinstalled/finalacceptance.8genuinefeedback
+threadsremainOPEN untilrequiredproof. Currentnative/fullCodeQLnewsourcepending.
+
+NEXTfinalcheapOpenSpec/scopedIssueOps/fmt/diff, metadataONLYcommit(costdocs/tasks/
+proposal/memory), verify140inputsagainstthatcommit thenNORMALcleanSINGLEpush
+(requiredhooks,nowrapbypass). Normalpushsourcefixesactualbugs,oldc431sourcerun
+ALREADYTERMINALFAIL(Winlateinvalidhigher-movefixture);3otherplatforms+Rustsuccess.
+No polling/restartingoldterminalrun. AfterpushverifyexactpublicHEAD, newsource/
+CodeQL/bots;rewritePRbodyaroundfinalchange+0358/provenance andrequiredgates.
+FreshnativeWindowsmustpasslegalwarm+stoprestart; laterrootmoveownfailureifany.
+Currentfinaltaskmetadatawillneednormalchecksafteracceptance, notpreclosed.
+Source/binaryallaffectedproofsreuseonlyafter140identicalrebind; don'trebuild
+0358forcost/taskmetadataalone. No otherissueuntil739normalmerge/nativeCLOSED.
+Then738->708->715RC1nonDraftprereleaseLatestfalse/independentinstall;050Latest.
+GoalACTIVE,parked/privateworkpreserved,stablepromotionneedslaterinstruction.

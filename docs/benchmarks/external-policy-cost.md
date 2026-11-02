@@ -1,12 +1,17 @@
 # External source-policy costs and release handoff
 
 Measurement status: current artifact identities and fresh CLI, upgrade, adapter,
-complete-prefix and cold-policy results bind source `1b7880c46105d18b7b93043dea5e5e71c1589c0c`.
+complete-prefix and cold-policy results bind source `76d01f054c25925c0f8cf6ea5cbc6c07935023ba`.
 All 140 build inputs match its committed and saved source. Native Windows lifecycle
 and complete hosted/issue/release acceptance remain required. The separately labelled
 512-link syscall samples retain their historical derivation-25 identity.
 
-The derivation-26 policy repair adds 541,232 bytes (0.78%) to the optimized
+Six optimized public-adapter scenarios include bounded continuous-CLI policy-fence
+fallback and fresh CLI/MCP observation after a stopped ancestor move. Their run
+times record functional execution, not a sustained-flood latency SLO or native
+Windows acceptance; exact hosted platform proof remains separate.
+
+The derivation-26 policy repair adds 543,800 bytes (0.78%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -86,11 +91,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 306.4 → 314.1 | 47.8 → 47.7 | 32,872 → 32,144 | 21,792 → 21,768 |
-| Large config | 306.3 → 309.0 | 48.5 → 53.3 | 32,764 → 34,708 | 21,892 → 24,784 |
-| 10,000 rules | 382.4 → 394.9 | 70.3 → 97.5 | 45,256 → 43,576 | 33,412 → 34,244 |
+| Ordinary | 310.8 → 310.5 | 48.7 → 49.0 | 32,848 → 32,028 | 22,144 → 21,476 |
+| Large config | 304.2 → 315.1 | 49.5 → 53.5 | 33,036 → 34,552 | 21,976 → 24,792 |
+| 10,000 rules | 387.1 → 395.0 | 70.4 → 98.2 | 45,036 → 43,184 | 32,924 → 34,200 |
 
-The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
@@ -107,9 +112,9 @@ predecessor is PR head 634cf78, not accepted main. Every read succeeds and leave
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the current repair median is 0.06779
-seconds, about 64.6 times faster in this fixture. Initialization is
-10.21149 to 0.28014 seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06748
+seconds, about 64.9 times faster in this fixture. Initialization is
+10.21149 to 0.26834 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
 The unisolated desktop host and separately measured predecessor/candidate groups
 limit causal timing precision. The predecessor samples retain their verified
@@ -162,7 +167,7 @@ Two documents with 500 links each keep extraction complete under the existing
 intermediate-byte limit; a single 1,000-link document at that depth correctly
 retained only 614 links with explicit partial coverage and is excluded from the
 complete comparison. On the complete fixture, initialization is
-191.48 → 7.10 s and a cold summary is 95.71 → 3.45 s.
+191.48 → 7.18 s and a cold summary is 95.71 → 3.46 s.
 Both retain all 1,000 missing relations with complete document coverage and leave
 publication unchanged. These are one-sample, quiet-process, warm-cache local
 measurements on distinct identical-input roots, subject to the same host/SLO
