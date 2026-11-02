@@ -13711,6 +13711,92 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         atomic::{AtomicBool, Ordering},
     };
 
+    /// Pause only this owned child at a verified native receive or polling sleep.
+    /// Comparing the stopped syscall closes the observation-to-stop race: an
+    /// intervening capture must finish before an edit can be admitted here.
+    fn during_watch_wait(
+        child: &mut Child,
+        polling: bool,
+        edit: impl FnOnce() -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        fn signal(child: &Child, signal: &str) -> Result<(), Box<dyn Error>> {
+            let status = StdCommand::new("kill")
+                .args([signal, "--"])
+                .arg(child.id().to_string())
+                .status()?;
+            rust_binding_require(status.success(), "owned watch signal failed")
+        }
+
+        fn has_inotify(descriptors: &Path) -> io::Result<bool> {
+            for entry in fs::read_dir(descriptors)? {
+                match fs::read_link(entry?.path()) {
+                    Ok(target) if target == Path::new("anon_inode:inotify") => return Ok(true),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(false)
+        }
+
+        let process = Path::new("/proc").join(child.id().to_string());
+        let descriptors = process.join("fd");
+        let wait_channel = process.join("wchan");
+        let syscall = process.join("syscall");
+        let status = process.join("status");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                return Err(io::Error::other("watch did not reach its required idle phase").into());
+            }
+            let is_wait = |channel: &str| {
+                if polling {
+                    channel.trim() == "hrtimer_nanosleep"
+                } else {
+                    channel.trim().starts_with("futex")
+                }
+            };
+            if has_inotify(&descriptors)? == polling
+                || !is_wait(&fs::read_to_string(&wait_channel)?)
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            let sampled_syscall = fs::read_to_string(&syscall)?;
+            if !is_wait(&fs::read_to_string(&wait_channel)?) {
+                continue;
+            }
+            signal(child, "-STOP")?;
+            // Resume before returning any error; the caller additionally kills
+            // and reaps the owned process on every unsuccessful operation.
+            let stopped = (|| -> Result<bool, Box<dyn Error>> {
+                while !fs::read_to_string(&status)?.lines().any(|line| {
+                    line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+                }) {
+                    if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                        return Err(io::Error::other("owned watch did not stop").into());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(fs::read_to_string(&syscall)? == sampled_syscall
+                    && has_inotify(&descriptors)? != polling)
+            })();
+            match stopped {
+                Ok(true) => {
+                    let result = edit();
+                    let resumed = signal(child, "-CONT");
+                    result?;
+                    return resumed;
+                }
+                result => {
+                    let resumed = signal(child, "-CONT");
+                    result?;
+                    resumed?;
+                }
+            }
+        }
+    }
+
     for later_handoff in [false, true] {
         let temp = tempfile::tempdir()?;
         let directory = temp.path().canonicalize()?;
@@ -13778,16 +13864,47 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         if later_handoff {
             fs::write(root.join("src/ready.rs"), "pub fn ready() {}\n")?;
         }
-        let mut child = command()
-            .arg("watch")
-            .arg(&root)
-            .args(["--poll-seconds", "1", "--max-cycles", "4"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
         let stop = Arc::new(AtomicBool::new(false));
+        let start_noise = || {
+            let stop = Arc::clone(&stop);
+            let noise = directory.join("λ-sibling");
+            let (sender, ready) = mpsc::sync_channel(1);
+            let actor = thread::spawn(move || -> io::Result<usize> {
+                let mut writes = 0;
+                while !stop.load(Ordering::Acquire) {
+                    fs::write(&noise, writes.to_string())?;
+                    writes += 1;
+                    if writes == 1 {
+                        sender.send(()).map_err(io::Error::other)?;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(writes)
+            });
+            (actor, ready)
+        };
         let mut actor = None;
+        let mut watch = None;
         let operation = (|| -> Result<(), Box<dyn Error>> {
+            if !later_handoff {
+                // Establish noise before spawning the CLI, so a descheduled
+                // test thread cannot accidentally exercise only a later fence.
+                let (spawned, ready) = start_noise();
+                actor = Some(spawned);
+                ready.recv_timeout(Duration::from_secs(60))?;
+            }
+            watch = Some(
+                command()
+                    .arg("watch")
+                    .arg(&root)
+                    .args(["--poll-seconds", "1", "--max-cycles", "4"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?,
+            );
+            let child = watch
+                .as_mut()
+                .ok_or_else(|| io::Error::other("watch child missing"))?;
             if later_handoff {
                 let deadline = Instant::now() + Duration::from_secs(60);
                 while AtlasStore::open_read_only(&database)?.index_publication()? == generation {
@@ -13799,37 +13916,22 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                // No flood is active during the initial publication fence.
-                thread::sleep(Duration::from_millis(250));
-            }
-            let stop = Arc::clone(&stop);
-            let noise = directory.join("λ-sibling");
-            let rules = rules.clone();
-            let later = root.join("src/later.rs");
-            actor = Some(thread::spawn(move || -> io::Result<usize> {
-                let started = Instant::now();
-                let mut writes = 0;
-                let mut policy_changed = false;
-                let mut source_added = false;
-                while !stop.load(Ordering::Acquire) {
-                    fs::write(&noise, writes.to_string())?;
-                    writes += 1;
-                    // Separate legitimate operator edits must survive the flood.
-                    if !policy_changed && started.elapsed() >= Duration::from_millis(400) {
-                        fs::write(&rules, "src/file0000.rs\n")?;
-                        policy_changed = true;
-                    }
-                    if !source_added && started.elapsed() >= Duration::from_millis(1_400) {
-                        fs::write(&later, "pub fn later() {}\n")?;
-                        source_added = true;
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Ok(writes)
-            }));
-            if later_handoff {
+                // Publication precedes the final ingress fence. Confirm the
+                // main thread has returned to native receive before flooding.
+                during_watch_wait(child, false, || Ok(()))?;
+                let (spawned, ready) = start_noise();
+                actor = Some(spawned);
+                ready.recv_timeout(Duration::from_secs(60))?;
                 fs::write(root.join("src/trigger.rs"), "pub fn trigger() {}\n")?;
             }
+            // Native observation must be released and the immediate polling
+            // capture complete before operator edits. Keep sibling noise active
+            // throughout, and retain the production refusal for capture drift.
+            during_watch_wait(child, true, || {
+                fs::write(&rules, "src/file0000.rs\n")?;
+                fs::write(root.join("src/later.rs"), "pub fn later() {}\n")?;
+                Ok(())
+            })?;
             let deadline = Instant::now() + Duration::from_secs(60);
             while child.try_wait()?.is_none() {
                 if Instant::now() >= deadline {
@@ -13850,11 +13952,17 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
                 .and_then(|result| result),
             None => Ok(0),
         };
-        if child.try_wait()?.is_none() {
-            child.kill()?;
-        }
-        let output = child.wait_with_output()?;
+        let output = match watch {
+            Some(mut child) => {
+                if child.try_wait()?.is_none() {
+                    child.kill()?;
+                }
+                Some(child.wait_with_output()?)
+            }
+            None => None,
+        };
         operation?;
+        let output = output.ok_or_else(|| io::Error::other("watch output missing"))?;
         rust_binding_require(writes? > 0, "native policy flood produced no callbacks")?;
         rust_binding_require(
             output.status.success(),

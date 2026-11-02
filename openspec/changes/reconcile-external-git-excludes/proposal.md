@@ -34,7 +34,7 @@ Filesystem policy selection, WalkBuilder setup, policy-source observation, extra
 
 ## Release Scope
 
-High-priority #739 is a direct child/blocker of #715 for v0.5.1-rc1. It starts at accepted main with no direct implementation blocker and can proceed independently of #738's document admission guard and #731's binding fix. Combined contracts, inventories and exact installed/performance proof belong to #708/#715 before RC1. Planning was independently approved. Policy selection, source observation, bounded continuous-CLI polling handoff and their owning causal/dependency/cost proof are complete. Compatible-index, installed/platform and final acceptance remain in progress, including native Windows legal replacement and process restart proof. The broader selection/watch findings are not deferred.
+High-priority #739 is a direct child/blocker of #715 for v0.5.1-rc1. It starts at accepted main with no direct implementation blocker and can proceed independently of #738's document admission guard and #731's binding fix. Combined contracts, inventories and exact installed/performance proof belong to #708/#715 before RC1. Planning was independently approved. Policy selection, source observation and bounded continuous-CLI polling handoff are implemented. Task 2.1 is reopened until its flood fixture uses phase coordination and passes concurrency proof; its wall-clock edits raced an active source capture under the full suite. Existing focused dependency/cost proof is retained with its exact source/artifact scope. Compatible-index, installed/platform and final acceptance remain in progress, including native Windows legal replacement and process restart proof. The broader selection/watch findings are not deferred.
 
 ## Non-Goals
 

@@ -1,3 +1,57 @@
+## Phase-coordinated Linux flood fixture: local proof passed
+
+Normal push failure remains the previous TERMINAL1; publicPR745 stillc431.
+Primary removed wallclock400/1400ms operator edits and250ms later-fence delay.
+Linux-only owned-child helper checks inotify phase + main wait channel, SIGSTOP,
+confirmed stopped T/exact sampled syscall, then edits between polling captures
+and SIGCONT; outer error cleanup stops/joins actor and kills/reaps child. No
+production/dependency/workflow changes. Native laterwait follows changed initial
+publication; initial actor is running before CLIspawn with first-write readiness.
+Noise continues through polling; final mode/reason/4cycles/docoutcomes/allauthored/
+identity/revision assertions retained. Source-validation refusal is unchanged.
+
+Final full concurrent navigation96318 TERMINAL0:59PASS/0FAIL/0ignored233.38s,
+includingnewflood. Focused1PASS9.26s.25774TERMINAL0:CLIalltarget/allfeature
+ClippyPASS,strictstringsPASS,3inventorycontract/tampertestsPASS. fmt/diff/strict
+OpenSpec/scopedIssueOps4candidate4live1checkedPASS. Navnormalizedhash
+98dd0183596157290e991a2587b3d91e917d8d71be6ae83e9d53a1d0dec1c0ce paired.
+Logs /tmp/projectatlas-739-flood-phase-{focused-final,concurrent,clippy,strings,
+inventory}.log. No proof process active.
+
+Luna741 actual helper/laterphase/cleanup approved; initial actor preregistration
+backlog concern is under reassessment: inotify does not queue events for future
+watches; prestarting continuous noise removes parent-scheduling dependency.
+Primary supplied Linux man7/inotify +man2/inotify_add_watch counterevidence and
+fallback_reason rejects overflow-only success. No reviewer claim silentlyignored.
+2.1REOPENED locally/live and both mitigationsunchecked; pending final bounded
+review + fresh byteidentity/optimized fixture proof before rechecking. Next commit
+this test-only correction, rebuild/freeze defaultCLI to establish whether bytes
+match0358; reuse only unchanged artifact proof, rerun affected optimizedflood.
+Then normalcleanpush/fullrequiredhooks+freshhosted/securityacceptance.739only;
+738/708/715parked,goalACTIVE,RC1absent/050Latest,stablepromotionrequiresinstruction.
+
+## Current blocker: normal push failed in the new Linux flood fixture
+
+Local HEAD 2f763b171e9e012b9f3d36838886072b7dae0606; public PR745 remains
+c431fdb39bcf75b7c95ec788a6ca146f832a750b, OPEN/unmerged. Normal push74738 /
+wrapper650984/git651131 is TERMINAL1 at2026-11-02T18:59:03.743737Z, not live.
+9 completed suites:782PASS/1FAIL/6ignored, partial. New permanent Linux
+continuous_cli_policy_flood_preserves_polling_and_later_edits failed under full
+concurrent e2e_navigation load: actor added src/later.rs during active capture,
+correctly returning refresh_required paths_changed. Wall-clock400/1400ms fixture
+edits are faulty synchronization; retain production source-validation refusal.
+Previous standalone/optimized passes do not cover this concurrent failure.
+
+Primary fixing test phase coordination only; Luna741 read-only plan review
+requested. Continuous unrelated noise must still force initial/later handoff;
+legitimate edits must happen after native watcher release between polling
+captures, with same-process finite cycles and all authored/identity assertions.
+No new proof/process active; no public push occurred. After bounded fix, exact
+concurrent suite and affected lint/inventory proof, independent review, normal
+clean push + fresh hosted/security acceptance still required. Reassess task2.1
+proof before any publication. Prior LIVE push entry below is superseded.
+Goal ACTIVE739 then738 then708 then715RC1; no RC published,050 stays Latest.
+
 # Active context — #739, v0.5.1-rc1
 
 ## Goal, ownership and checkout
