@@ -1,3 +1,60 @@
+# Latest cleanup fix: reviewed and local concurrency proof passed
+
+CurrentDIRTY source/test/inventory/task/memory is primary739work overpublic6f9.
+Luna741 PLAN+actual signal-boundary/witness diff APPROVED. signal nowonelexical
+scopeupinside sameLinux #[test], &mutChild+concreteprogramPath. Immediately
+before everySTOP/CONT, try_wait Some returnsErrBEFORE constructingcommand/using
+PID; None keepschildunreaped during synchronousexecution. Real uses literalkill.
+Harmless local0700witness records$0.called butNEVERsignalsPID. Alreadywaited/reaped
+Child MUSTrejectbeforelaunch: unguardedfocused BEFOREfixFAILS exactmessage
+'an exited child must be rejected before launching its signal command', running1
+/tmp/projectatlas-739-child-signal-before-fix.log. Fixedfocused1PASS9.31s, then
+fullconcurrent59PASS/0FAIL/0ignored231.20s,26162TERMINAL0. No globalenv/PATHmutation,
+newdependency/API/schema/derivationchange. Existingreal STOP/CONT initial/later
+flood workflow andpolicy/source/stateassertions remainpassing.
+
+55916TERMINAL0: CLIalltargets/allfeaturesClippyPASS,strictstringsPASS,
+3inventorycontract/tampertestsPASS,fmt/diff/strictOpenSpec/scopedIssueOps4/4/1PASS.
+Navhashfff2c5cee3b67897da68be0ed34052788fd4fee3cbd51314f8a86ee5a5739ee9 paired;
+226tests/83selectors/historical440 unchanged. Logs child-signal-{focused,concurrent,
+clippy,strings,inventory}.log. No localtest/buildprocessactive now.
+Task2.1stillREOPENED local/live until freshartifact/optimizedproof andsourcebinding;
+1.1checkedonly, both2.1mitigationsunchecked,2.2/3.1/fiveacceptanceunchecked.
+PRbody exactupdatequalifiesunpublishedtestcleanup andretains6f9-scoped proof.
+NEXTsourcecommitonlyowned6files, defaultreleasebuild/freshfreezechild-signal prefix,
+verifyCLI0358/helper544 byteidentity +onlytestinputdifferences andrerunoptimized
+correctedflood; keepcost/upgrade/resource/unaffectedadaptermeasurementsqualified.
+Then2.1recheckmetadatareview/normalcleanpushgates. Do notduplicateoldmeasurements.
+Keep SAMEcurrentGitHubSOURCE41511865530/metadata41511995173 jobs whilelocalwork;
+Linux/Rust/ARM/7CodeQL success,Windows+Intelstillrunning. No newpublicpushyet.
+34securityclaimdispositions remainexact6f9, notnewdirtysourcecleanclaim. Static
+phase LEFT beforecleanupfix. New419reply/resolution asbelow,8genuinethreadsOPEN.
+GoalACTIVE739only before738/708/715RC1;050Latest;preserveparked/privatework.
+
+# Current blocker: owned-child test cleanup race
+
+Final34securityassessment is complete/LEFT and supplied419pathclaim remains
+notactionable. Separate PRIMARY-confirmed TEST safety gap in current6f9 helper:
+STOPwait may child.try_wait()->Some (reap) then signalCONT uses rawChild.id
+without checking cachedexit; PIDreservation lost. Harmless LinuxPython probe
+confirmed SIGSTOPzombie returns0 and poll/reap removes/procPID. No unrelated
+process signalled. Production code unchanged.
+
+Task2.1 REOPENED locally/live (bothmitigationsunchecked);1.1checkedonly.
+Primary fix plan: signal helper&mutChild checks try_wait BEFORE every command,
+reject exited/cachedreaped child. ReturnNone keepsPIDunreaped until synchronous
+signal execution finishes. Concrete executablePath arg permits SAFEcausalnegative
+fake signal script (recordsmarker, never real signal) againstalreadywaited child;
+beforeguard mustfail, fixedErr+nomarker. Move helperonelexicalscopeupinside same
+Linux#[test], no globalPATH/envmutation/dependency/API/schema changes. Luna741
+read-only PLANreview requested. Primaryownsallwrites. Preserveparkedothers.
+Need causalnegative +focused/full59concurrent/Clippy/strings/inventory/optimized
+proof, independentreview, sourcebinding/costreuse and normalgates before newpush.
+Keep SAME current SOURCE41511865530 andmetadata41511995173 live; Win/Intel still
+running. No push/restart/cancel solelyforobservationtimeout. Old34claimdispositions
+stillvalid; no sourcefixedclaimfornewtestcleanupuntilproof. Oldercompletionnotes
+below are superseded on2.1. GoalACTIVE739only then738/708/715RC1.
+
 # Active RC1 checkpoint
 
 Read this checkout's README and this file after compaction; older detailed
@@ -17,12 +74,33 @@ Preserve parked738/708 and three private715 spec edits in integration.
 ## Exact source and publication
 
 Checkout .worktrees/issue-739, branch fix/external-excludes-739.
-Local source93d4f2c9cf984a4156803becbd10c5f5a77e9be3 follows source2d16fd4,
-coverage76d01f0 and metadata2f763b1. PublicPR745 stillc431fdb39bcf75b7c95ec788a6ca146f832a750b,
-OPEN/unmerged; main6927ed0ca64788db6947b4d43eafce29aac5ed61 last verified.
-Normal push74738/wrapper650984/git651131 TERMINAL1 at18:59:03Z Nov2; it did NOT
-publish2f. Receipt /tmp/projectatlas-739-policy-fence-push-session.json. Do not
-repoll as live. New source/metadata normal push is next; no force/admin/noverify.
+Public/local HEAD6f9f63cc74a677db134ba8e80b28b216a26a3551, PR745 OPEN/unmerged;
+reviewed testsource93d4f2c9cf984a4156803becbd10c5f5a77e9be3, production76d01f0/2d16fd4.
+Main6927ed0ca64788db6947b4d43eafce29aac5ed61 last verified. Normal push66406 /
+wrapper896291/git896457 TERMINAL0 at19:38:42Z Nov2. Exact remote6f9 confirmed,
+clean immediately after push. Receipt/log /tmp/projectatlas-739-flood-phase-path-fix-
+push{-session.json,.log}. ALL1819 localtests PASS/0FAIL/12ignored across34 targets,
+workspace check/Clippy/fmt, doctests/rustdoc, dependency/security/string/OpenSpec/
+IssueOps and real projectscan/lint PASS. Older74738 and55453 push failures are
+historical, not live. No localtest/build/push process active. Only this subsequent
+owned memory update is dirty; do not reset it or create a metadata push prematurely.
+
+Current native SOURCE41511865530 LIVE, exact6f9:
+Linux125505570151, Rust125505570248 and ARM125505570270 SUCCESS;
+Intel125505570278 and Windows125505570297 stillLIVE. HostedRust log confirms1819PASS,
+0FAIL,12ignored incl correctedflood: /tmp/projectatlas-739-flood-phase-rust-ci.log.
+Plan/repository125505570290/diagnostics125505570097 PASS.
+PRstates41511861675/41511996422 PASS. PRbody edit created METADATA41511995173
+LIVE waiting on SAME SOURCE41511865530; monitor both, no fresh source restart. CodeQL41511859128 TERMINALSUCCESS all7analyses,
+includingRust125505439393. Complete exacthead intake/finalstatic assessment DONE below. Early aggregateCodeQL check125505791618
+said3missingconfigs whileanalyseswerepending +2highActions; do not treat early
+aggregation as terminalanalysisfailure or claimclean. Waitall7actualanalyses.
+Fresh Codex code_review6f9 COMPLETEDfalse/false, security_review6f9 COMPLETEDnull/null.
+REST allreviewcomments/reviews AFTER completion found ZEROnewreports sincepush;
+/tmp/projectatlas-739-flood-phase-completed-bot-reports.json. RESTsummary6562604562 snapshot flood-phase-codex-review-summary.json.
+No new CODEX report sincepush; NEWnativeCodeQL419 is dispositioned below.
+Oldcomments canhaveupdated
+commit_id6f9, so useoriginal_commit_id/created_at toidentifyactualnewreports.
 
 Task1.1 and2.1 CHECKED local/live, both2.1 mitigations checked;2.2/3.1 and allfive
 acceptance UNCHECKED. 2.1 was reopened after flood fixture failed the full push,
@@ -111,39 +189,63 @@ Never overwrite immutable artifact folders or old receipts.
 policyresource4438307216, fullnoop4439249685, prefix4440644526,
 ancestor4441758314, Unicode4441784180, fence4445386019. Two falsepositive threads
 resolved (CodeQL417 reply4444055416, ancestorpolicy reply4444477324). Do not resolve
-fix threads before required proof. Publicsecuritysummary6563449602/PRbody correctly
-qualify historical32 findings and separate new fence; final body template
-/tmp/projectatlas-739-policy-fence-final-pr-body.md NOTPOSTED, needs currentheads.
+fix threads before required proof. Publicsecuritysummary6563449602 stillqualifies historical32 +separatefence.
+Current PRbody rewrittenaround finalbehavior/source93d+6f9/0358/retained76proof,
+all1819localpass/nativepending; POSTED viaapp and EXACTreadback. Template
+/tmp/projectatlas-739-flood-phase-final-pr-body.md. No currentcleansecurityclaim.
 
-C431 CodeQL41488159691 TERMINALSUCCESS7:Rust2079171492=25,Actions2079021320=2,
-fiveothers0. Full REST inputs /tmp/projectatlas-739-platform-debug-exact-*:27native
-plus6existing reports=33 WHOLE normalized BEFORE verdict; no whole33 final-source
-assessment/render yet. Fence newreport individually confirmed/rendered then fixed;
-prior32 historicalassessment qualified. Sourceidentity/Actions exact5line mappings
-recorded platform-debug-*. Native IDs418,417,415,414,413,412,411,410,408,407,406,405,
-404,372,316,237,236,204,203,202,201,200,199,151,150,149,148. Final intake prepared
-/tmp/projectatlas-739-policy-fence-exact-intake.py expects2f (MUSTUPDATE actual
-publicHEAD/newnamespace). Wait all7 actual analyses; retain ANYnew reports/alerts,
-fullfacts/flows notcount-only equivalence, normalize whole then static verdict.
-Security static phase forbids repo edits/tests/builds/apps/agents; explicitly leave
-before fixes/dynamic work. Existing fixed inputs trustedoperator/test roots and
-explicit capabilities are not blanket security defects. Read SECURITY.md and
-triage references; preserve positive indexing/navigation capabilities.
+## Complete current security assessment — final static phase LEFT
 
-Normal push55453/wrapper895582 TERMINAL1 early: refreshed memory OpenSpec path
-violated private-absolute-path string policy. Replaced it with a home-relative
-path; no code/artifact change. Previous flood-phase push receipt is historical;
-next attempt uses flood-phase-path-fix-push prefix.
-Luna741 bounded metadata packet APPROVED after clarifying retained measurements.
-StrictOpenSpec/scopedIssueOps4candidate4live2checked/fmt/diff PASS. Normal push
-next uses /tmp/projectatlas-739-flood-phase-push{.py,.log,-session.json}; its
-external receipt is process authority. Keep selected checkout clean while live.
+Exact6f9 CodeQL41511859128 all7 SUCCESS; Rust2080285011=26,
+Actions2080156021=2, fiveothers0. FullREST/SARIF/instances and allsecurity-marker
+comments retained in /tmp/projectatlas-739-flood-phase-exact-*; WHOLE34 normalized
+BEFORE verdict (28native+5securityreports+RUSTSEC). Newnative419 is additional,
+not assumedcoveredbyold27. CodeQL aggregate canremainredforvisiblealerts; no
+suppression/dismissal. No cleanrepo/exhaustive or generalavailabilityclaim.
 
-NEXT: commit only owned docs/tasks/
-proposal/memory, verify140inputs unchanged vs93d, normal clean push (fresh logs/
-receipt). After success verify exact publicHEAD, rewrite PRbody, monitor SAME new
-native/CodeQL/bot runs, finish33+ current security assessment +all8threads and
-2.2/3.1/fiveacceptance. Then normal merge/native739CLOSED BEFORE738→708→715RC1.
+All34 assessed inline byprimary oncurrentcode andRENDERED34not_actionable in
+CodexSecurity app. Genuine historical resource/advisory defects remain explicitly
+confirmed/fixed; not relabelledfalsepositives. Full canonicalresult
+/tmp/projectatlas-739-flood-phase-complete-triage.json; UI rendered-triage.json
+uses12explicit sinkexcerpts tofit1200charfieldcap, FULLclaims/flows retained.
+Successreceipt /tmp/projectatlas-739-flood-phase-triage-render-success-receipt.json.
+Earlierfailedrenderreceipt is historical UIboundsrejection, notunassessedfindings.
+
+27continuingnative alerts haveequalcompletefacts/orderedflows afterexactsource-
+line mapping +verifiedrendererreference reconciliation. ExplicitURIs retained
+whenartifactarrayoffsetschanged. RelatedsourceIDs/order reconciledONLY forfully
+referenced, identicallylabelledsources; anonymousmetadata/order andallflows/
+messages/rules/regions/properties retained. NOTcount-onlyequivalence.
+Source-map12of13Rustfilesunchanged;2709citedregionsmappreciselytounchangedlines.
+Old85guard/locationanchors16sources allmappedto6f9 (no missinganchors).
+Artifacts flood-phase-{reported-source-map,native-reconciliation,actions-
+reconciliation,assessment-location-map}.json and generation.py scripts retained.
+
+419 fulltwo-location/onerelatedsourceflow is privateLinux #[test] nested
+has_inotify at e2e_navigation13732: read_link(DirEntry::path()) onlyunder
+/proc/<decimalownedChild::id>/fd; compareslinkvaluetoanon_inode:inotify,
+NEVERopens/followstargetfile. DescriptornamespaceisnotproductCLI/MCPinput;
+Cargo productentrypoints excludeintegrationtests. No testweakening/codechange.
+Reply4447237134 to4447070010 EXACTreadback; threadPRRT_kwDOQyFgJ86y1sD7
+RESOLVEDtrue verifiedGraphQL. 20threads/8genuineunresolved, asbefore419.
+
+Publicsecuritysummary6563449602 rewrittenforcurrent34/fullfacts/new419/fixedfence,
+EXACTreadback. Codexcode completedfalse/false; securitycompletednull/null and
+allRESTcomments/reviews confirmNOnewCodexreport; do not inferfromnullalone.
+Finalstaticphase COMPLETE/LEFT: no repoedits/tests/builds/apps/agents duringit.
+OnlyAFTER phase completion didprimaryupdatethissummary/posttechnicalreply/resolve
+419. Futureindependentacceptance/code review mayresume; no fixcurrentlyrequired.
+
+Luna741 bounded source/test and metadata packet APPROVED. Final acceptance-gap
+review found no additional implementation gap beyond the stated native/security/
+readiness gates; no premature wholeissueapproval. Task2.1complete,2.2/3.1 pending.
+
+NEXT: monitor SAME SOURCE41511865530 (Windows/IntelmacOS stilllive), plus
+metadata41511995173. Linux/Rust/ARM/7CodeQL/bothCodexreviews complete. Finish
+actualWindows legalwarmnearest+stop/reap/ancestorrestart andIntelmacOS fulljob.
+Then8genuinefeedbackthreads,2.2/3.1/fiveacceptance andnormalmetadatarequiredchecks,
+normalmerge/native739CLOSED BEFORE738→708→715RC1. Preserve this owneddirtymemory;
+no selectedsourcechanges unless a concrete newfinding requires them.
 
 ## Tools and parked state
 

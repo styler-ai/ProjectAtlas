@@ -13706,10 +13706,25 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
 #[cfg(target_os = "linux")]
 #[test]
 fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    /// Signal only through the owned child boundary; tests can use a harmless witness.
+    fn signal(child: &mut Child, signal: &str, executable: &Path) -> Result<(), Box<dyn Error>> {
+        // A cached exit must not release a PID and then signal a possible
+        // successor. None keeps this child unreaped during the synchronous command.
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::other("owned watch exited before signal").into());
+        }
+        let status = StdCommand::new(executable)
+            .args([signal, "--"])
+            .arg(child.id().to_string())
+            .status()?;
+        rust_binding_require(status.success(), "owned watch signal failed")
+    }
 
     /// Pause only this owned child at a verified native receive or polling sleep.
     /// Comparing the stopped syscall closes the observation-to-stop race: an
@@ -13719,14 +13734,6 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         polling: bool,
         edit: impl FnOnce() -> Result<(), Box<dyn Error>>,
     ) -> Result<(), Box<dyn Error>> {
-        fn signal(child: &Child, signal: &str) -> Result<(), Box<dyn Error>> {
-            let status = StdCommand::new("kill")
-                .args([signal, "--"])
-                .arg(child.id().to_string())
-                .status()?;
-            rust_binding_require(status.success(), "owned watch signal failed")
-        }
-
         fn has_inotify(descriptors: &Path) -> io::Result<bool> {
             for entry in fs::read_dir(descriptors)? {
                 match fs::read_link(entry?.path()) {
@@ -13739,6 +13746,7 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             Ok(false)
         }
 
+        let signal_program = Path::new("kill");
         let process = Path::new("/proc").join(child.id().to_string());
         let descriptors = process.join("fd");
         let wait_channel = process.join("wchan");
@@ -13766,7 +13774,7 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             if !is_wait(&fs::read_to_string(&wait_channel)?) {
                 continue;
             }
-            signal(child, "-STOP")?;
+            signal(child, "-STOP", signal_program)?;
             // Resume before returning any error; the caller additionally kills
             // and reaps the owned process on every unsuccessful operation.
             let stopped = (|| -> Result<bool, Box<dyn Error>> {
@@ -13784,18 +13792,36 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             match stopped {
                 Ok(true) => {
                     let result = edit();
-                    let resumed = signal(child, "-CONT");
+                    let resumed = signal(child, "-CONT", signal_program);
                     result?;
                     return resumed;
                 }
                 result => {
-                    let resumed = signal(child, "-CONT");
+                    let resumed = signal(child, "-CONT", signal_program);
                     result?;
                     resumed?;
                 }
             }
         }
     }
+
+    // The witness never signals a PID, even on the unguarded regression path.
+    // A reaped child must be rejected before any signal command is launched.
+    let signal_fixture = tempfile::tempdir()?;
+    let witness = signal_fixture.path().join("signal");
+    fs::write(&witness, "#!/bin/sh\n: > \"$0.called\"\n")?;
+    fs::set_permissions(&witness, fs::Permissions::from_mode(0o700))?;
+    let mut exited = StdCommand::new("/bin/sh").args(["-c", "exit 0"]).spawn()?;
+    rust_binding_require(exited.wait()?.success(), "signal fixture did not exit")?;
+    let rejected = signal(&mut exited, "-CONT", &witness);
+    rust_binding_require(
+        rejected.is_err(),
+        "an exited child must be rejected before launching its signal command",
+    )?;
+    rust_binding_require(
+        !witness.with_extension("called").exists(),
+        "signal command ran after the child was reaped",
+    )?;
 
     for later_handoff in [false, true] {
         let temp = tempfile::tempdir()?;
