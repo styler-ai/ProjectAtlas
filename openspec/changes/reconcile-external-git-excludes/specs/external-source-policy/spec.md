@@ -66,6 +66,11 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **THEN** watch admission refuses the impossible parent and releases partial native coverage on every supported platform, even when the operating system reports the child as missing
 - **AND** regular-file leaves, genuinely absent parent chains and native ordinary Win32 parent normalization retain their supported behavior
 
+#### Scenario: Full fallback changes only document outcomes
+- **WHEN** a source or document watch batch exceeds incremental bounds, or another full-refresh caller has no captured document check, and source nodes remain unchanged while an excluded target changes its unresolved reason
+- **THEN** full reconciliation publishes the current document outcome instead of discarding it as a source-only no-op, reuses unchanged parses and preserves project identity and approved purposes
+- **AND** unchanged outcomes remain a no-op, changed-source captures avoid a repeated document probe, and verification, generation change or cancellation failure retains the last complete publication under the original bounded work control
+
 #### Scenario: Selected source directory is replaced
 - **WHEN** a supported selected source directory is replaced at the same canonical pathname during CLI/MCP observation while its explicit external database and configuration remain available
 - **THEN** structural uncertainty invalidates the prior warm epoch, recursive coverage is restored before cold source sampling, and accepted refresh/read results reflect the replacement source while preserving database/project identity and all approved purposes

@@ -238,3 +238,68 @@ native branches and remaining epoch failures are UNVERIFIED; next ordinary
 commit/push must obtain fresh native trace. Prior ddc performance/artifact proofs
 remain historical; do not claim new-head artifact/cost equivalence without proof.
 All acceptance rows remain unchecked and three real fix threads stay open.
+
+
+### Follow-up68cb2fd public; native diagnosis pending
+
+Normal clean push TERMINAL0 at2026-11-02T05:37:17.446280Z; unifiedexec63564
+is finished (do not repoll). Wrapper3186463/git3186467 exited. Log
+/tmp/projectatlas-739-policy-parent-push.log:1794PASS/34suites/0FAIL/12ignored,
+plus required locked Rust/docs/dependency/repository/OpenSpec/IssueOps/native
+ProjectAtlas scan and low-purpose lint gates. Exact public/local HEAD
+68cb2fd3e7d68c36a1e41414241098dc4ef71a32. Selected worktree was CLEAN afterpush.
+
+Fresh exacthead source run41395102219 IN_PROGRESS, pr-state41395099825
+IN_PROGRESS, CodeQL41395098627 QUEUED at initial check. Jobs snapshot
+/tmp/projectatlas-739-68cb-source-jobs.json; poll same run/jobs, never restart
+merely for observation timeout. PR745OPEN/BLOCKED, base6927ed0.
+PRbody updated/readbackexact, clearly marks predecessor cost/artifact proofs
+and unresolved native epoch cause; do not claim739accepted or merge-ready.
+
+Prior ddc macOS Intel125094349957 now SUCCESS, completing its three non-Windows
+platforms (Linux/MacARM/MacIntel). Full terminal Intel log
+/tmp/projectatlas-739-ddc90-macos-intel-ci.log confirms externalCLI/MCP,
+document-onlyMCP, nativeingress and DBalias regressions pass. Old ddc Windows
+failure remains the diagnostic trigger; the current Windows source run must
+prove guard/fixtures and reveal remaining epoch events. No speculative production
+event-classification change was made. All acceptance rows remain unchecked.
+
+
+### Additional code-review no-op defect repaired locally
+
+New automated code-review4439249685 on68cb found full fallback discarding
+updated document reasons when source nodes were identical and capture=None.
+Both Codex code and separate security reviews COMPLETED for68cb; code true/true
+reflects this new finding; security flagsnull. Sourcegap independentlyconfirmed.
+Public technicalreply4439288172 readbackEXACT, thread stillOPEN. There are now
+four genuine fix threads awaiting final acceptance (prior3plus thisnewone).
+
+Primary added production-path regression full_refresh_preserves_document_changes_
+without_source_node_changes; beforefix FAIL expectedMissing gotIgnored, log
+/tmp/projectatlas-739-full-document-noop-before.log. Owning fix strengthens
+staged_full_refresh_is_unchanged with fresh existing bounded document-policy
+probe for every source-equal candidate, followed by generationrecheck. Known
+capturedtrue still forcespublication; false/absence never authorize no-op.
+No newSQL/schema/scans/transactions/graphcopies. Current captured source deltas
+exit sourcecomparison before another probe; falsecapture is not a policysnapshot.
+Design/spec updated to this minimal mechanism (initialOptionplan superseded).
+
+Newtest PASS1.40s across oversizedsource/document/directfull, Ignored↔Missing
+and supported native Ignored↔OutsideRoot, parsed0, exactgeneration/noop, purpose/
+identity, cancellation. Extra actualfalsecapture-beforepolicyedit passes;
+stagedprobe canceled/deadline refusal preserves publication (existing nested
+Db::IndexWork also propagated). Nine related refresh/publication tests PASS.
+AffectedallfeatureClippy/strictstrings/fmt/strictOpenSpec/plannedIssueOps PASS.
+Luna731 independent code/spec APPROVED; post-probe generationfence is statically
+verified but no deterministic inter-page concurrent-publisher test was added.
+
+Current source delta is UNCOMMITTED, do not overwrite. Original68cb Windows
+job125114655655 remains LIVE and progressed to Document resource proof at
+05:58:13Z; preserve that same run to obtain observer diagnostics before another
+push. No restart. CodeQL41395098627 nowSUCCESS; exacthead analyses saved
+/tmp/projectatlas-739-68cb-analyses.json. Actions2074560814 completefacts/flows
+matchddc exactly (/tmp/...68cb-actions-reconciliation.json). Full current
+security intake/triage remains unfinished pending RustSARIF/finalsource; no
+new current-collection verdict/render or clean-scan claim. Securitytriagephase
+was left explicitly before ordinary code-fix edits/tests. All tasks/acceptance
+remain unchecked except1.1;739only, RC1unpublished, goalACTIVE.

@@ -194,6 +194,24 @@ aliases are a separate input spelling, not the backend's event producer.
 
 Policy-only proof includes absent-document classification with an unchanged source inventory: no source-node delta is not evidence that document admission/reasons are unchanged. Reproduce any mismatch through real CLI/MCP before choosing a repair, then reuse the existing bounded reconciliation/projection owner rather than hashing every external edit into an unconditional all-source reparse. Preserve last-valid state on failed observation/reconciliation.
 
+Full-refresh no-op admission must retain the distinction between a captured
+document check and no captured check. An oversized document-only watch batch can
+select full staging without a captured inventory; identical source nodes then
+do not prove that its newly staged document reasons are unchanged. A known
+captured document change can still bypass no-op admission; a false or absent
+captured check is not a fresh policy snapshot. At the existing staged no-op
+owner, first reject changed contracts, generations, authored imports and source
+nodes; for every source-equal candidate, reuse the existing bounded keyset
+document-policy probe over the staged source inventory before returning a no-op.
+Recheck the publication generation after the paged reads and propagate the
+existing generation-change refusal if it differs. Keep one pass-local policy
+matcher, the original work control and quota/error propagation. Do not rescan
+source, materialize another graph or open a publication transaction for this
+check. Captured full-refresh source deltas exit at the source comparison without
+a repeated probe. Prove oversized source/document batches and direct full-refresh
+callers, unchanged-source reason transitions, no-op, unchanged parse reuse,
+identity/purpose preservation and refusal without publication.
+
 Selected external configuration and excludes must be repeatable file inputs. Reject unsupported non-regular inputs promptly under existing typed failure semantics while retaining regular files and symlinks to regular files. Unix config opens avoid waiting on a FIFO replaced between metadata and open; do not claim hard kernel-I/O preemption or universal adversarial race freedom from cooperative controls. Cover failure and positive operator workflows before declaring the guard complete.
 
 The native ignore parser also opens .ignore, .gitignore and common info/exclude paths. Static FIFO reproductions in installed0.5.0 block those reads. Validate root/ancestor policy inputs before matcher construction, and admitted nested-directory inputs in the traversal admission filter before its worker opens local rules; propagating an error after workers finish must never return a partial successful scan. Retain only the first parallel guard failure and stop further policy I/O/queued work. For targeted matching, first match each parent with its already validated ancestors and preserve ignored-parent pruning before inspecting rules inside that parent. Legacy Git-only helpers validate only their enabled family. Missing/non-directory prospective ancestors and regular-file symlinks retain compatibility. This adds no preflight whole-tree traversal or replacement ignore grammar and does not claim immunity to every replacement race between metadata checks and library open.

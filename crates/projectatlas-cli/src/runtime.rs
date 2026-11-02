@@ -8719,7 +8719,9 @@ fn refresh_full_index_from_source_controlled(
         None,
         control,
     )?;
-    if !document_projection_changed && staged_full_refresh_is_unchanged(store, &batch)? {
+    if !document_projection_changed
+        && staged_full_refresh_is_unchanged(store, &batch, &plan.scan_options, control)?
+    {
         return Ok(empty_index_refresh_report(plan.text_options));
     }
     let outcome = publish_index_batch(store, batch, &plan.scan_options, control)?;
@@ -8734,6 +8736,8 @@ fn refresh_full_index_from_source_controlled(
 fn staged_full_refresh_is_unchanged(
     store: &AtlasStore,
     batch: &IndexPublicationBatch,
+    scan_options: &ScanOptions,
+    control: &IndexWorkControl,
 ) -> Result<bool, CliError> {
     let NodePublicationBatch::Full { nodes: expected } = &batch.nodes else {
         return Ok(false);
@@ -8755,11 +8759,34 @@ fn staged_full_refresh_is_unchanged(
         .into_iter()
         .map(|indexed| indexed.node)
         .collect::<Vec<_>>();
-    Ok(current.len() == expected.len()
-        && current
+    if current.len() != expected.len()
+        || !current
             .iter()
             .zip(expected)
-            .all(|(current, expected)| same_indexed_source(current, expected)))
+            .all(|(current, expected)| same_indexed_source(current, expected))
+    {
+        return Ok(false);
+    }
+    // Equal source nodes do not prove equal document policy. A missing capture,
+    // or a prior unchanged capture, cannot authorize a no-op after full staging.
+    let (document_projection_changed, _) =
+        graph_projection::nonindexed_document_projection_changed(
+            store,
+            &batch.root,
+            expected,
+            scan_options,
+            control,
+        )?;
+    // The bounded pages use separate reads; do not accept a mixed-generation view.
+    let current_generation = publication_base_generation(store)?;
+    if current_generation != batch.base_generation {
+        return Err(projectatlas_db::DbError::PublicationBaseGenerationChanged {
+            expected: batch.base_generation,
+            found: current_generation,
+        }
+        .into());
+    }
+    Ok(!document_projection_changed)
 }
 
 /// Build the stable report for a verified watcher no-op.
@@ -14799,6 +14826,205 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                 "fallback preserves approved purpose",
             )?;
             verify_index_freshness(&store, root, None)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_refresh_preserves_document_changes_without_source_node_changes()
+    -> Result<(), Box<dyn Error>> {
+        #[derive(Clone, Copy)]
+        enum RefreshRoute {
+            SourceBatch,
+            DocumentBatch,
+            Full,
+        }
+        for route in [
+            RefreshRoute::SourceBatch,
+            RefreshRoute::DocumentBatch,
+            RefreshRoute::Full,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            run_git_fixture(StdCommand::new("git").arg("init").arg("--quiet").arg(root))?;
+            let exclusions = root.join(".git/info/exclude");
+            fs::write(&exclusions, "ghost.rs\n")?;
+            fs::write(root.join("README.md"), "[target](ghost.rs)\n")?;
+            fs::write(root.join("lib.rs"), "pub fn stable() {}\n")?;
+            let plan = ScanRuntimePlan::for_path(None, root, Some(100_000))?;
+            let options = SymbolBuildOptions::new(100_000, Some(1), None);
+            let mut store =
+                open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+            run_scan_pipeline(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "lib.rs",
+                "Keep the reviewed library purpose",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let event_paths = (0..=MAX_INCREMENTAL_CHANGED_PATHS)
+                .map(|index| plan.root.join(format!("absent-{index}.rs")))
+                .collect();
+            let changes = match route {
+                RefreshRoute::DocumentBatch => WatchChangeSet {
+                    document_paths: event_paths,
+                    ..WatchChangeSet::default()
+                },
+                RefreshRoute::SourceBatch | RefreshRoute::Full => WatchChangeSet {
+                    paths: event_paths,
+                    ..WatchChangeSet::default()
+                },
+            };
+            let refresh = |store: &mut AtlasStore, control: &IndexWorkControl| match route {
+                RefreshRoute::SourceBatch | RefreshRoute::DocumentBatch => {
+                    refresh_index_for_changes_controlled(store, &plan, &changes, &options, control)
+                }
+                RefreshRoute::Full => {
+                    refresh_full_index_controlled(store, &plan, &options, true, control)
+                }
+            };
+            let verify_transition =
+                |store: &mut AtlasStore, expected| -> Result<(), Box<dyn Error>> {
+                    let before = publication_base_generation(store)?;
+                    let cancelled = index_work_control(&options);
+                    cancelled.cancel();
+                    require_eq(
+                        &matches!(refresh(store, &cancelled), Err(CliError::IndexWork(_))),
+                        &true,
+                        "stopped document-only full refresh is refused",
+                    )?;
+                    require_eq(
+                        &publication_base_generation(store)?,
+                        &before,
+                        "stopped generation",
+                    )?;
+                    let control = index_work_control(&options);
+                    let report = refresh(store, &control)?;
+                    let page = store.repository_unresolved_documents_page(None, 10, &control)?;
+                    require_eq(&page.rows.len(), &1, "full refresh document count")?;
+                    require_eq(
+                        &page.rows[0].reason,
+                        &expected,
+                        "full refresh current document reason",
+                    )?;
+                    require_eq(
+                        &report.symbols.parsed,
+                        &0,
+                        "document-only refresh reuses parses",
+                    )?;
+                    require_eq(
+                        &publication_base_generation(store)?,
+                        &before
+                            .checked_next()
+                            .ok_or_else(|| io::Error::other("generation overflow"))?,
+                        "document-only full refresh publishes once",
+                    )?;
+                    require_eq(
+                        &store.project_instance_id()?,
+                        &identity,
+                        "document refresh identity",
+                    )?;
+                    require_eq(
+                        &store
+                            .load_node_by_path("lib.rs")?
+                            .and_then(|node| node.purpose.purpose),
+                        &Some("Keep the reviewed library purpose".to_string()),
+                        "document refresh approved purpose",
+                    )?;
+                    let publication = store.index_publication()?;
+                    let unchanged = refresh(store, &control)?;
+                    require_eq(
+                        &unchanged.symbols.parsed,
+                        &0,
+                        "unchanged full refresh parse count",
+                    )?;
+                    require_eq(
+                        &store.index_publication()?,
+                        &publication,
+                        "unchanged full refresh publication",
+                    )?;
+                    Ok(())
+                };
+            for (rules, expected) in [
+                ("", DocumentTargetUnresolvedReason::Missing),
+                ("ghost.rs\n", DocumentTargetUnresolvedReason::Ignored),
+            ] {
+                fs::write(&exclusions, rules)?;
+                verify_transition(&mut store, expected)?;
+            }
+            let outside = tempfile::tempdir()?;
+            let outside_target = outside.path().join("target.rs");
+            fs::write(&outside_target, "pub fn outside() {}\n")?;
+            let target = root.join("ghost.rs");
+            if create_document_target_symlink(&outside_target, &target)? {
+                verify_transition(&mut store, DocumentTargetUnresolvedReason::OutsideRoot)?;
+                fs::remove_file(&target)?;
+                verify_transition(&mut store, DocumentTargetUnresolvedReason::Ignored)?;
+            }
+            if matches!(route, RefreshRoute::Full) {
+                let control = index_work_control(&options);
+                let assessment = detect_index_freshness_controlled(
+                    &store,
+                    &plan,
+                    ScanLimits::default(),
+                    &control,
+                )?;
+                require_eq(
+                    &assessment.source.document_projection_changed,
+                    &false,
+                    "captured unchanged document policy",
+                )?;
+                let batch =
+                    stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+                let publication = store.index_publication()?;
+                let cancelled = index_work_control(&options);
+                cancelled.cancel();
+                let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+                for stopped in [cancelled, expired] {
+                    let result = staged_full_refresh_is_unchanged(
+                        &store,
+                        &batch,
+                        &plan.scan_options,
+                        &stopped,
+                    );
+                    require_eq(
+                        &matches!(
+                            result,
+                            Err(CliError::IndexWork(_) | CliError::Db(DbError::IndexWork(_)))
+                        ),
+                        &true,
+                        &format!("document no-op probe retains original stop control: {result:?}"),
+                    )?;
+                }
+                require_eq(
+                    &store.index_publication()?,
+                    &publication,
+                    "refused document no-op probe retains publication",
+                )?;
+                drop(batch);
+                // A prior false capture is not a policy snapshot: rules may
+                // change without changing any of its captured source nodes.
+                fs::write(&exclusions, "")?;
+                let report = refresh_full_index_from_source_controlled(
+                    &mut store,
+                    &plan,
+                    &options,
+                    true,
+                    Some(assessment.source),
+                    &control,
+                )?;
+                let page = store.repository_unresolved_documents_page(None, 10, &control)?;
+                require_eq(
+                    &page.rows[0].reason,
+                    &DocumentTargetUnresolvedReason::Missing,
+                    "prior false capture does not hide later document drift",
+                )?;
+                require_eq(
+                    &report.symbols.parsed,
+                    &0,
+                    "captured full refresh reuses parses",
+                )?;
+            }
         }
         Ok(())
     }
