@@ -1,12 +1,14 @@
 # External source-policy costs and release handoff
 
 Measurement status: the corrected flood fixture and rebuilt default artifacts bind
-source `93d4f2c9cf984a4156803becbd10c5f5a77e9be3`. Its 140-input manifest differs
+source `a5ac54628aac866549841b5a083ac45526d63f3f`. Its 140-input manifest differs
 from measured source `76d01f054c25925c0f8cf6ea5cbc6c07935023ba` only in the navigation
 test and paired test-source identity. The rebuilt CLI and filesystem helper are
 byte-identical, so the existing scoped cost, upgrade, resource and unchanged
 adapter results are retained. The corrected flood scenario passed freshly against
-the optimized artifact and within all 59 concurrent debug navigation tests.
+the optimized artifact and within all 59 concurrent debug navigation tests. Its
+child-signal helper rejects a reaped child before launching a signal command; a
+harmless before/after witness proves this error path without signalling a PID.
 Native Windows lifecycle and complete hosted/issue/release acceptance remain
 required. The separately labelled 512-link syscall samples retain their historical
 derivation-25 identity.
@@ -70,8 +72,8 @@ remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
 source manifest. The rebuilt filesystem helper is byte-identical to the prior
 measured helper, so its 18 component samples are reused with their original
 manifest and overlap limitation. The 18 CLI cost samples and six upgrade cases were measured at source76 without
-overlapping builds, then retained after source93d rebuilt the CLI byte-identically.
-Only the corrected flood fixture was rerun against the source93d artifact; no
+overlapping builds, then retained after sourcea5 rebuilt the CLI byte-identically.
+Only the corrected flood fixture was rerun against the sourcea5 artifact; no
 fresh cost or upgrade timing is claimed for that test-only correction.
 
 The controlled watcher retains full reconciliation under its original control.
