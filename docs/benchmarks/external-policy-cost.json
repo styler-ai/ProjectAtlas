@@ -21,7 +21,7 @@
   "candidate": {
     "derivation": 26,
     "semantic": 23,
-    "source_manifest_sha256": "c6be854bd05c8d6c401c65407fbe5d6a6cf9113d1fb07970cd71305b64027323",
+    "source_manifest_sha256": "d396f0a411c8ac283283c8a8a7b5534e13e3acdc92b33e4afa8bd20e64f85a60",
     "bytes": 70000760,
     "sha256": "0358e60aec4b7a58d5861cf8c0c501091286d33ce71fa78f731939b0c96be55f"
   },
@@ -46,10 +46,10 @@
       "reused_samples": 18,
       "sha256": "544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9",
       "measurement_source_manifest_sha256": "bb9bf24ff9cec0522faf05df21edaa8648772e8138e7a6ef7c3d9d1b0a456d00",
-      "reuse_basis": "Exact relinked native filesystem helper byte identity; current CLI costs and upgrades measured freshly."
+      "reuse_basis": "Exact relinked native filesystem helper byte identity. CLI costs and upgrades were measured at source76; source93d rebuild identity permits retention after the test-only correction."
     },
     "cli_measurement_source_manifest_sha256": "c6be854bd05c8d6c401c65407fbe5d6a6cf9113d1fb07970cd71305b64027323",
-    "cli_measurement_reuse_basis": "All 18 CLI samples freshly measured against this exact frozen artifact; only byte-identical native filesystem component samples are reused.",
+    "cli_measurement_reuse_basis": "The 18 CLI samples were measured at source76 against exact frozen0358. After test-only phase coordination, source93d rebuilt the default CLI and helper byte-identically; retain the scoped costs, upgrades, resource cases and unchanged adapters. The corrected flood case is rerun with its current harness.",
     "runtime_event_ingress": "One separate pending runtime wake per observer/CLI loop coalesces exact selected/resolved SQLite notifications without policy uncertainty or callback filesystem I/O. Main structural changes remain observable; MCP drains revalidate target authority and rearm at the shared receiver-fenced owner. Real ASCII/Unicode-root CLI/MCP and source-edit proof is separate from these fresh-process timings."
   },
   "fixtures": {
@@ -1212,8 +1212,10 @@
       "test": "continuous_cli_policy_flood_preserves_polling_and_later_edits",
       "passed": true,
       "binary_sha256": "0358e60aec4b7a58d5861cf8c0c501091286d33ce71fa78f731939b0c96be55f",
-      "harness_sha256": "7fb5d3819da4c5d3a3fb78c7a9f3b3b91ecd38ac8f7d39ac8476f9f7ffa70324",
-      "seconds": 9.720619433966931
+      "harness_sha256": "17da5bf5d94a5159e5de8b398e8203aa47a829baac9818f9452a4248ab0695a9",
+      "seconds": 8.20546878798632,
+      "source_commit": "93d4f2c9cf984a4156803becbd10c5f5a77e9be3",
+      "coordination": "Linux owned-child native receive/polling sleep checkpoints; 400/1400ms edits removed. Full concurrent debug navigation:59passed/0failed/0ignored233.38s."
     },
     {
       "test": "external_policy_ancestor_restart_preserves_cli_mcp_observation",
@@ -1224,8 +1226,13 @@
     }
   ],
   "measurement_status": {
-    "source_commit": "76d01f054c25925c0f8cf6ea5cbc6c07935023ba",
-    "status": "current_frozen_source_evidence",
+    "source_commit": "93d4f2c9cf984a4156803becbd10c5f5a77e9be3",
+    "status": "byte_identical_production_artifact_with_corrected_flood_proof",
+    "measurement_source_commit": "76d01f054c25925c0f8cf6ea5cbc6c07935023ba",
+    "changed_measurement_inputs": [
+      "crates/projectatlas-cli/tests/e2e_navigation.rs",
+      "crates/projectatlas-cli/tests/support/source_contract.rs"
+    ],
     "limitation": "Local Linux artifact and affected-work proof; native Windows lifecycle, exact hosted/review gates and final issue/release acceptance remain separately required. Historical 512-link syscall samples are not current-artifact measurements."
   }
 }

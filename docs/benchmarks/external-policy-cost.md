@@ -1,10 +1,15 @@
 # External source-policy costs and release handoff
 
-Measurement status: current artifact identities and fresh CLI, upgrade, adapter,
-complete-prefix and cold-policy results bind source `76d01f054c25925c0f8cf6ea5cbc6c07935023ba`.
-All 140 build inputs match its committed and saved source. Native Windows lifecycle
-and complete hosted/issue/release acceptance remain required. The separately labelled
-512-link syscall samples retain their historical derivation-25 identity.
+Measurement status: the corrected flood fixture and rebuilt default artifacts bind
+source `93d4f2c9cf984a4156803becbd10c5f5a77e9be3`. Its 140-input manifest differs
+from measured source `76d01f054c25925c0f8cf6ea5cbc6c07935023ba` only in the navigation
+test and paired test-source identity. The rebuilt CLI and filesystem helper are
+byte-identical, so the existing scoped cost, upgrade, resource and unchanged
+adapter results are retained. The corrected flood scenario passed freshly against
+the optimized artifact and within all 59 concurrent debug navigation tests.
+Native Windows lifecycle and complete hosted/issue/release acceptance remain
+required. The separately labelled 512-link syscall samples retain their historical
+derivation-25 identity.
 
 Six optimized public-adapter scenarios include bounded continuous-CLI policy-fence
 fallback and fresh CLI/MCP observation after a stopped ancestor move. Their run
@@ -64,8 +69,10 @@ loading across distinct targets, while the next pass and final revalidation
 remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
 source manifest. The rebuilt filesystem helper is byte-identical to the prior
 measured helper, so its 18 component samples are reused with their original
-manifest and overlap limitation. All 18 CLI cost samples and six upgrade cases
-were rerun against the current frozen CLI without overlapping builds.
+manifest and overlap limitation. The 18 CLI cost samples and six upgrade cases were measured at source76 without
+overlapping builds, then retained after source93d rebuilt the CLI byte-identically.
+Only the corrected flood fixture was rerun against the source93d artifact; no
+fresh cost or upgrade timing is claimed for that test-only correction.
 
 The controlled watcher retains full reconciliation under its original control.
 Its native regression exercises a large single-file graph closure, compaction
