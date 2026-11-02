@@ -1180,5 +1180,10 @@
       "test": "automatic_state_admission_preserves_cli_mcp_navigation",
       "passed": true
     }
-  ]
+  ],
+  "measurement_status": {
+    "source_commit": "8a276a885086fd4a0afb386d053d517898f4785e",
+    "status": "predecessor_evidence",
+    "limitation": "Subsequent native watch-scope and CI follow-up is under verification. Recorded identities and results do not establish current-head artifact equivalence or final release acceptance; freeze and revalidate the final source before completing #739."
+  }
 }

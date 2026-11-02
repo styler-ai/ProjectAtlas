@@ -12,8 +12,8 @@ noverify/selfapproval, DB reset or silent confirmed self-hosting-bug deferral.
 
 Selected .worktrees/issue-739, fix/external-excludes-739, PR745 OPEN/unmerged,
 Refs739/base6927ed0ca64788db6947b4d43eafce29aac5ed61. Public/local committed
-HEAD34d515ab56e56893c76d67d45d7cba65dcbc25e6. Current substantial follow-up
-is UNCOMMITTED, with source/spec/tests/cost/memory changes preserved.
+HEAD8a276a885086fd4a0afb386d053d517898f4785e. Native watch-scope/CI follow-up
+is UNCOMMITTED; see current checkpoint below. Older sections are predecessor evidence.
 Live731/PR737 and741/PR743 merged/CLOSED;739/738/708/715 OPEN; RC1 absent.
 Only OpenSpec1.1 checked;2.1/2.2/3.1 and all five acceptance rows remain open.
 
@@ -174,3 +174,61 @@ preserve DB, no orientation reset/scan. Normal hooks own required refresh/gates.
 Read complete version-matched installedAtlas skill after compaction before calls;
 custom Rust+cognition/workspace and database/SQLite skills apply. Current build,
 proof and check sessions above TERMINAL; no normalpush started for newfollowup yet.
+
+
+## Current checkpoint — native CI follow-up after 8a276a8
+
+Normal push74848 TERMINAL0 at2026-11-02T13:36:46.975731Z;1813PASS/34suites/
+0FAIL/12ignored plus required gates. No push currently live. PR745 remains
+OPEN/unmerged/Refs739 at8a276a8. Source41454506360 TERMINALFAIL: plan,repository,
+Rust,Linux,MacARM,Windowsdiagnostics PASS; MacIntel125307725189 cold CLI build
+timeout before CLI units execute; Windows125307725199 two policy-unit failures.
+
+Uncommitted owning fix: cfgWindows std::path::absolute on each watch-snapshot
+selection, preserving raw source-policy opens/verbatim and Unix traversal. Native
+canonical nearest parent decides Win root authority; a real outside alias parent
+enables higher namespace coverage even when targeting inside root. Additional
+Unix root/../external alias->inside analogue confirmed causally: removing only
+the external_namespace setter FAILS; fixed generic regression passes. No callback
+I/O or extra filesystem probes. Existing native parent-selection fixture must
+pass on Windows; local Linux cannot prove its Win32 branch.
+
+Second Windows failure is unresolved Os5AccessDenied in the nine-layout ordinary
+ancestor replacement test. Added operation/layout/path context to every fixture
+mutation and watch install/rebind without skips, swallowed errors or deadlines
+changes. Need actual native rerun to locate failing operation; do NOT invent a
+watcher-locking diagnosis from teardown events. Notify shares delete access.
+
+MacIntel fix moves UNCHANGED ten-minute native-policy commands after existing
+twenty-minute PHP cold-build owner. Feature-specific compile remains capped and
+needs actual hosted proof; no full-warm guarantee or product SLO/deadline change.
+Luna731/741 plans approved; actual-diff independent follow-ups requested.
+
+Latest local batch66383 is TERMINAL (handle missing; all saved logs pass):
+23policy tests, affected CLI alltarget/allfeature Clippy, strictstrings, quality
+gate workflow contract1 and frozen E2E inventory3. Earlier eprintln Clippy failure
+was fixed by contextual errors. Source mutant used for causal test restored.
+
+All dd15/140input/cost/sixupgrade/optimized adapter results above bind committed
+8a276a8, NOT current changed source. Benchmark docs explicitly label predecessor
+evidence. Publish this reviewed diagnostic/native follow-up, then obtain actual
+Windows cause and final source before final artifact freeze/reproof; no claim of
+final acceptance based on old artifact identity. All issue task states unchanged.
+
+Current exact8a CodeQL41454498482 all7SUCCESS: Rust2077380626=25,Actions2077297197=2,
+other5zero. Full SARIF/scoped27instances retained. Whole31input collection normalized
+at /tmp/projectatlas-739-8a276-normalized-inputs.json (27native,3resourcebot,RustSec).
+Static triage explicitly left before native CI repairs; NO completed current31
+verdict/render/clean-scan claim. Prior18publicsummary is historical. Reconcile
+all full facts/flows and render complete currentcollection after source settles.
+Do not suppress/dismiss alerts or resolve genuine threads before proof.
+
+Next: independent actual-diff review; cheap fmt/OpenSpec/IssueOps; normal commit
+and clean push with required hooks; preserve same hosted run and inspect native
+results.739only before738->708->715RC1publication/installedverification.
+GoalACTIVE. Preserve parked work and three private715specification edits.
+
+Both actual-diff independent Luna Max reviews APPROVE this bounded follow-up
+for native rerun. Not whole-issue acceptance, and Os5cause remains unresolved.
+Final fmt/strictOpenSpec/scopedPRIssueOps/diffcheck PASS. Normalcommit/push next;
+no selected-checkout edits during required hooks.

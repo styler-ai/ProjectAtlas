@@ -1,5 +1,12 @@
 # External source-policy costs and release handoff
 
+Measurement status: all artifact identities, costs and optimized upgrade/adapter
+results below describe committed source `8a276a885086fd4a0afb386d053d517898f4785e`.
+They are predecessor evidence while the subsequent native watch-scope and CI
+follow-up is under verification. They do not establish current-head artifact
+equivalence or final release acceptance; freeze and revalidate the final source
+before completing #739.
+
 The derivation-26 policy repair adds 538,912 bytes (0.78%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics

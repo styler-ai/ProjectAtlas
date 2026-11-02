@@ -469,17 +469,6 @@ jobs:
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi
 
-      - name: Native source-policy unit regressions
-        if: contains(matrix.contracts, 'compile')
-        # Full mode can require a cold unit-test build at this earlier boundary.
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p projectatlas-fs --lib --all-features
-          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
-          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
-
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
         # Includes cold compilation of the symbol, CLI, and navigation test targets.
@@ -489,6 +478,18 @@ jobs:
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
+      - name: Native source-policy unit regressions
+        if: contains(matrix.contracts, 'compile')
+        # Reuse shared cold dependencies built by the preceding PHP regression.
+        # All-feature-specific compilation and execution retain this separate cap.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-fs --lib --all-features
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
 
       - name: Managed project-state ownership platform regressions
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')

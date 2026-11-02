@@ -181,6 +181,12 @@ impl PolicyWatchInputs {
         let mut expanded = BTreeSet::new();
         while let Some(path) = pending.pop() {
             control.check(IndexWorkStage::RepositoryTraversal)?;
+            // Ordinary Win32 lookup cancels parent components before opening.
+            // Normalize watch scopes only; source-policy opens retain their selector.
+            // The native standard API leaves verbatim paths and symlinks unresolved.
+            #[cfg(windows)]
+            let path =
+                std::path::absolute(&path).map_err(|source| CliError::Io { path, source })?;
             if !expanded.insert(path.clone()) {
                 continue;
             }
@@ -207,6 +213,11 @@ impl PolicyWatchInputs {
                 }
             }
             let mut nearest_directory_found = false;
+            // Ordinary and verbatim Win32 spellings can name the same in-root
+            // parent. Native containment below decides its recursive authority.
+            #[cfg(windows)]
+            let mut external_namespace = false;
+            #[cfg(not(windows))]
             let mut external_namespace = !path.starts_with(root);
             // Every ordinary ancestor can be renamed independently of a watched
             // descendant. Retain its immediate-child namespace as well as links.
@@ -247,6 +258,9 @@ impl PolicyWatchInputs {
                                     source,
                                 })?;
                             if !canonical.starts_with(root) {
+                                // A real outside alias remains independently
+                                // replaceable even when its target is in-root.
+                                external_namespace = true;
                                 self.record_parent(root, canonical.clone(), ancestor.file_name())?;
                             }
                             let namespace = policy_event_namespace(ancestor)?.ok_or_else(|| CliError::Io {
@@ -1533,13 +1547,22 @@ mod tests {
             (true, "higher-ancestor"),
             (true, "missing-parent"),
         ] {
+            let fixture_io = |operation: &str, path: &Path, result: std::io::Result<()>| {
+                result.map_err(|source| std::io::Error::new(source.kind(), format!(
+                    "ancestor replacement (missing={missing}, layout={layout}): {operation} at {path:?}: {source:?}"
+                )))
+            };
             let temp = tempfile::tempdir()?;
             let base = temp.path().canonicalize()?;
             let root = base.join("repo");
             let selected_parent = base.join("control/current");
             let directory = selected_parent.join("nested");
-            fs::create_dir(&root)?;
-            fs::create_dir_all(&directory)?;
+            fixture_io("create source root", &root, fs::create_dir(&root))?;
+            fixture_io(
+                "create selected directory",
+                &directory,
+                fs::create_dir_all(&directory),
+            )?;
             let selected = if matches!(layout, "external-alias" | "source-alias") {
                 let alias = if layout == "source-alias" {
                     root.join("selected")
@@ -1554,10 +1577,18 @@ mod tests {
             let input = selected.join("rules");
             let later_input = selected.join("later-rules");
             if !missing {
-                fs::write(&input, "original.rs\n")?;
+                fixture_io(
+                    "write initial policy",
+                    &input,
+                    fs::write(&input, "original.rs\n"),
+                )?;
             }
             if layout == "missing-parent" {
-                fs::remove_dir(&directory)?;
+                fixture_io(
+                    "remove prospective parent",
+                    &directory,
+                    fs::remove_dir(&directory),
+                )?;
             }
             let control =
                 IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)));
@@ -1586,7 +1617,9 @@ mod tests {
                     || self::selected(&root, &[input.clone(), later_input.clone()]),
                 )
             };
-            let mut inputs = install(&mut watcher, &mut registered)?;
+            let mut inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
+                "ancestor replacement (missing={missing}, layout={layout}): install initial watches for {input:?}: {source:?}"
+            )))?;
             let await_selected_event = |inputs: &PolicyWatchInputs,
                                         expected: Option<&Path>|
              -> Result<(), Box<dyn Error>> {
@@ -1613,18 +1646,71 @@ mod tests {
             } else {
                 selected_parent
             };
-            fs::rename(replaced, base.join("retired"))?;
-            fs::create_dir_all(&directory)?;
-            fs::write(&input, "replacement.rs\n")?;
+            let retired = base.join("retired");
+            fixture_io(
+                &format!("rename to {retired:?}"),
+                &replaced,
+                fs::rename(&replaced, &retired),
+            )?;
+            fixture_io(
+                "recreate selected directory",
+                &directory,
+                fs::create_dir_all(&directory),
+            )?;
+            fixture_io(
+                "write replacement policy",
+                &input,
+                fs::write(&input, "replacement.rs\n"),
+            )?;
             await_selected_event(&inputs, None)?;
-            inputs = install(&mut watcher, &mut registered)?;
+            inputs = install(&mut watcher, &mut registered).map_err(|source| std::io::Error::other(format!(
+                "ancestor replacement (missing={missing}, layout={layout}): rebind replacement watches for {input:?}: {source:?}"
+            )))?;
             while receiver.try_recv().is_ok() {}
             // A distinct new leaf prevents a delayed replacement event from
             // impersonating later delivery from the newly registered directory.
-            fs::write(&later_input, "later.rs\n")?;
+            fixture_io(
+                "write later policy",
+                &later_input,
+                fs::write(&later_input, "later.rs\n"),
+            )?;
             await_selected_event(&inputs, Some(&directory.join("later-rules")))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn external_alias_into_root_keeps_its_ancestor_namespaces() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let parent = base.join("external/current");
+        fs::create_dir(&root)?;
+        fs::create_dir_all(&parent)?;
+        let alias = parent.join("selected");
+        create_policy_directory_alias(&root, &alias)?;
+        let input = root.join("../external/current/selected/rules");
+        #[cfg(not(windows))]
+        require(
+            input.starts_with(&root)
+                && input
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir)),
+            "fixture lost its meaningful lexical root/parent spelling",
+        )?;
+        let inputs = selected(&root, std::slice::from_ref(&input))?;
+        require(
+            inputs.directories.contains(&base.join("external"))
+                && inputs.directories.contains(&parent)
+                && inputs.paths.contains(&alias)
+                && inputs.affects(
+                    &Event::new(notify::EventKind::Modify(ModifyKind::Name(
+                        notify::event::RenameMode::From,
+                    )))
+                    .add_path(parent),
+                ),
+            "external alias into the source root lost higher replacement coverage",
+        )
     }
 
     #[test]
@@ -1641,6 +1727,30 @@ mod tests {
                 .is_empty(),
             "an ordinary in-root input acquired external ancestor watches",
         )?;
+        #[cfg(windows)]
+        {
+            let ordinary_root =
+                PathBuf::from(projectatlas_core::lossless_native_path_display(&root)?);
+            require(
+                selected(&root, &[ordinary_root.join("local.ignore")])?
+                    .directories
+                    .is_empty(),
+                "ordinary Win32 spelling lost in-root recursive authority",
+            )?;
+            let alias = base.join("external-selection");
+            create_policy_directory_alias(&root, &alias)?;
+            let alias_inputs = selected(&root, &[alias.join("local.ignore")])?;
+            require(
+                alias_inputs.directories.contains(&base)
+                    && alias_inputs.paths.contains(&alias)
+                    && alias_inputs.may_affect(
+                        &root,
+                        &Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
+                            .add_path(alias),
+                    ),
+                "external junction into the source root lost its control or parent coverage",
+            )?;
+        }
         let inputs = selected(&root, &[path.clone(), root.join("local.ignore")])?;
         require(
             inputs.directories == base.ancestors().map(Path::to_path_buf).collect(),

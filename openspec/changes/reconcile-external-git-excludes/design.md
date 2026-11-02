@@ -264,6 +264,34 @@ compatibility alongside observer startup cleanup. Synthetic Windows events that
 model notify must use the exact registered root; temporary-directory DOS short
 aliases are a separate input spelling, not the backend's event producer.
 
+Ordinary Win32 policy spellings must use native lexical normalization before
+watch-scope capture, including each resolved alias target queued for expansion.
+Reuse std::path::absolute under cfg(windows): it does not read the filesystem or
+resolve symlinks, and leaves verbatim spellings unchanged. This removes canceled
+intermediate/.. components from watch scopes without changing source-policy opens,
+Unix traversal semantics, supported aliases, missing leaves or verbatim refusals.
+The existing native control proves the rules file remains readable after deleting
+the canceled intermediate, and that events on it cannot change policy selection.
+Ordinary versus verbatim prefix spelling must not invent an external namespace
+for an in-root file. Windows derives this from the already-resolved nearest
+parent; a real outside junction/control parent still enables external ancestor
+coverage even when the target is inside the source root. Keep Unix lexical
+containment because its intermediate parent traversal can remain meaningful.
+A lexical root/../external alias that resolves back inside the root is another
+manifestation: the alias parent is an independently replaceable external control
+on Unix too. Its real outside parent must enable higher ancestor coverage even
+when the nearest target directory is in-root; retain a causal native selection
+control for this case rather than relying on the target path alone.
+
+Native source-policy CI remains required under its existing ten-minute cap.
+Place its unchanged commands after the existing twenty-minute PHP regression,
+which owns cold symbol/CLI dependency compilation in this job. Full-mode Intel
+macOS otherwise reaches the early unit step without a test build and can exhaust
+its budget compiling shared dependencies before any CLI unit executes. This
+ordering reuses the existing cold-build owner without relaxing a test deadline,
+product indexing budget, feature matrix or selector. All-feature-only compilation
+can still consume the retained native-step cap and needs actual hosted proof.
+
 Windows native traces show repeated `Modify(Any)` notifications on the containing
 Temp directory, not source edits: all 77 recursive-rebind traces at public
 68cb2fd named that strict ancestor. Namespace spelling alone must not turn an
