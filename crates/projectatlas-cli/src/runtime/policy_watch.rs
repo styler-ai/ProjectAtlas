@@ -729,7 +729,7 @@ mod tests {
             "retired sibling stayed selected",
         )?;
         fs::create_dir(base.join("intermediate"))?;
-        fs::write(base.join("rules"), "")?;
+        fs::write(base.join("rules"), "selected-rule\n")?;
         #[cfg(windows)]
         {
             let normalized = base.join("intermediate/../rules");
@@ -775,10 +775,30 @@ mod tests {
                 .any(|component| matches!(component, std::path::Component::ParentDir)),
             "fixture normalized away the selected parent component",
         )?;
+        #[cfg(windows)]
+        {
+            // Ordinary Win32 parsing removes `intermediate/..` before lookup;
+            // changing that sibling cannot change the selected rules file.
+            fs::remove_dir(base.join("intermediate"))?;
+            require(
+                fs::read_to_string(&parent_path)? == "selected-rule\n",
+                "ordinary Win32 parent syntax unexpectedly depends on the removed sibling",
+            )?;
+        }
         selection.publish(Arc::new(selected(&root, &[parent_path])?))?;
+        require(
+            selection.may_affect(&event(base.join("rules"))),
+            "selected rules file was filtered",
+        )?;
+        #[cfg(not(windows))]
         require(
             selection.may_affect(&event(base.join("intermediate"))),
             "structural parent component was filtered",
+        )?;
+        #[cfg(windows)]
+        require(
+            !selection.may_affect(&event(base.join("intermediate"))),
+            "normalized Win32 selection retained an unrelated lexical component",
         )?;
         require(
             selection.may_affect(

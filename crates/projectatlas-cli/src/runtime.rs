@@ -439,6 +439,9 @@ pub(crate) struct IndexRefreshRequired {
 /// Bounded typed report returned when source verification is incomplete.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexVerificationIncomplete {
+    /// A policy pass exhausted work; automatic refresh must not restart its quota.
+    #[serde(skip)]
+    pub(crate) policy_work_limit: Option<projectatlas_fs::PolicyMatchResource>,
     /// Selected project root whose current source could not be verified.
     pub(crate) project_root: Option<String>,
     /// Registered alias when one selected this project.
@@ -1788,6 +1791,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
         FsError::IndexWork(failure) => failure.into(),
         FsError::RepositoryBoundary { .. } => {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                policy_work_limit: None,
                 project_root: lossless_project_root_display(root),
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
@@ -1797,6 +1801,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
             }))
         }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            policy_work_limit: None,
             project_root: lossless_project_root_display(root),
             worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
@@ -1840,6 +1845,7 @@ fn verification_incomplete(
     source: &CliError,
 ) -> CliError {
     CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+        policy_work_limit: None,
         project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::VerificationIncomplete,
@@ -7933,6 +7939,7 @@ pub(crate) fn read_indexed_file_content(
         Err(source) => {
             return Err(CliError::VerificationIncomplete(Box::new(
                 IndexVerificationIncomplete {
+                    policy_work_limit: None,
                     project_root,
                     worktree: None,
                     status: IndexReadStatus::VerificationIncomplete,
@@ -7964,6 +7971,7 @@ pub(crate) fn read_indexed_file_content(
     if metadata.len() > MAX_INDEXED_NAVIGATION_SOURCE_BYTES {
         return Err(CliError::VerificationIncomplete(Box::new(
             IndexVerificationIncomplete {
+                policy_work_limit: None,
                 project_root,
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
@@ -7978,6 +7986,7 @@ pub(crate) fn read_indexed_file_content(
     }
     let file = fs::File::open(&native).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            policy_work_limit: None,
             project_root: project_root.clone(),
             worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
@@ -7991,6 +8000,7 @@ pub(crate) fn read_indexed_file_content(
         .read_to_end(&mut bytes)
         .map_err(|source| {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                policy_work_limit: None,
                 project_root: project_root.clone(),
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,
@@ -8042,6 +8052,7 @@ pub(crate) fn read_indexed_file_content(
     }
     String::from_utf8(bytes).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            policy_work_limit: None,
             project_root,
             worktree: None,
             status: IndexReadStatus::VerificationIncomplete,
@@ -9129,6 +9140,7 @@ fn scan_incremental_path_controlled(
         Ok(false) => Ok(None),
         Err(source) => Err(CliError::VerificationIncomplete(Box::new(
             IndexVerificationIncomplete {
+                policy_work_limit: None,
                 project_root: lossless_project_root_display(root),
                 worktree: None,
                 status: IndexReadStatus::VerificationIncomplete,

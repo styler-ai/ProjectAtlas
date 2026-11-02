@@ -3,6 +3,9 @@
 pub mod worktree;
 
 mod git_config;
+mod policy_match;
+
+pub use policy_match::{PolicyMatchError, PolicyMatchLimits, PolicyMatchResource, RootScanMatcher};
 
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState};
@@ -237,7 +240,16 @@ impl RootScanPolicy {
     /// Returns an error when the path cannot be normalized or an ignore
     /// source cannot be parsed safely.
     pub fn excludes_path(&self, path: &Path) -> FsResult<bool> {
-        let absolute = if path.is_absolute() {
+        let absolute = self.absolute_target(path);
+        if should_skip_path(&self.root, &absolute, &self.options) {
+            return Ok(true);
+        }
+        standard_ignore_excludes_path(&self.root, &absolute, &self.walker, true, true)
+    }
+
+    /// Rebase selected-root aliases without resolving target components.
+    fn absolute_target(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
             match self
                 .selected_root_alias
                 .as_deref()
@@ -248,11 +260,7 @@ impl RootScanPolicy {
             }
         } else {
             self.root.join(path)
-        };
-        if should_skip_path(&self.root, &absolute, &self.options) {
-            return Ok(true);
         }
-        standard_ignore_excludes_path(&self.root, &absolute, &self.walker, true, true)
     }
 }
 
@@ -766,6 +774,18 @@ fn validate_local_ignore_inputs(
     plain_ignore: bool,
     git_exclude: bool,
 ) -> FsResult<()> {
+    visit_local_ignore_inputs(directory, plain_ignore, git_exclude, |path| {
+        validate_optional_policy_file(path).map(|_bytes| ())
+    })
+}
+
+/// Enumerate only enabled policy inputs inside an admitted directory.
+fn visit_local_ignore_inputs<E: From<FsError>>(
+    directory: &Path,
+    plain_ignore: bool,
+    git_exclude: bool,
+    mut visit: impl FnMut(&Path) -> Result<(), E>,
+) -> Result<(), E> {
     match fs::metadata(directory) {
         Ok(metadata) if !metadata.is_dir() => return Ok(()),
         Ok(_) => {}
@@ -781,24 +801,28 @@ fn validate_local_ignore_inputs(
             return Err(FsError::Io {
                 path: directory.to_path_buf(),
                 source,
-            });
+            }
+            .into());
         }
     }
     if plain_ignore {
-        validate_optional_policy_file(&directory.join(".ignore"))?;
+        visit(&directory.join(".ignore"))?;
     }
-    validate_optional_policy_file(&directory.join(".gitignore"))?;
+    visit(&directory.join(".gitignore"))?;
     if git_exclude && let Some(common) = common_git_directory(directory)? {
-        validate_optional_policy_file(&common.join("info/exclude"))?;
+        visit(&common.join("info/exclude"))?;
     }
     Ok(())
 }
 
 /// Refuse a present unsupported policy file before a library can block opening it.
-fn validate_optional_policy_file(path: &Path) -> FsResult<()> {
+fn validate_optional_policy_file(path: &Path) -> FsResult<u64> {
     match fs::metadata(path) {
-        Ok(metadata) => git_config::require_regular_file(path, &metadata),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(metadata) => {
+            git_config::require_regular_file(path, &metadata)?;
+            Ok(metadata.len())
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(0),
         Err(source) => Err(FsError::Io {
             path: path.to_path_buf(),
             source,

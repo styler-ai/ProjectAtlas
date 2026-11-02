@@ -114,6 +114,26 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a parent is excluded by enabled repository or configured policy and contains a non-regular child ignore input
 - **THEN** full and targeted selection preserve parent pruning without opening or inspecting policy inside the excluded subtree, and a Git-only compatibility helper does not inspect a disabled ignore family
 
+### Requirement: Document policy verification has bounded reusable work
+Document resolution and the cold unresolved-document probe SHALL reuse native hierarchical policy within one pass, bound cumulative local policy parsing and retained directory contexts, and preserve fresh matching in later passes and publication revalidation. Pagination alone SHALL NOT be treated as a total policy-work bound.
+
+#### Scenario: Multiple pages reuse loaded policy
+- **WHEN** a cold probe checks distinct absent targets across multiple keyset pages under the same local policy
+- **THEN** one pass reuses its loaded native policy rather than rebuilding it for each row, without retaining a repository-wide target-reason cache or imposing a document-row cutoff
+- **AND** the original cooperative control applies across all pages and later operations discover fresh policy
+
+#### Scenario: Policy work and retained contexts exhaust their bounds
+- **WHEN** local hierarchical policy parsing or directory-context loads exceed the pass limits, including reloads after bounded-cache eviction
+- **THEN** work refuses before the next disallowed policy parse with typed resource, limit and observed work, preserving last-valid publication and authored state
+- **AND** the CLI uses existing full-scope PolicyUnavailable verification guidance rather than an incremental-limit fallback that restarts the quota
+- **AND** defaults admit at most 128 MiB of local policy input and 1,000,000 context loads per matcher/pass; staging and fresh publication revalidation have separate pass accounting under one operation deadline
+
+#### Scenario: Reuse preserves pruning and positive workflows
+- **WHEN** a pass traverses nested or inherited policy, ignored parents, regular symlinks, selected-root aliases or legitimate external Git inputs
+- **THEN** each parent is matched before its child policy is inspected, admitted inputs are validated and charged before parsing, existing precedence and source-prefix admission remain effective, and cancellation/deadline retain their original typed failures
+- **AND** retained child context input/key estimates use soft 256-context / 4 MiB limits with between-target eviction, allowing one current ancestor chain under the cumulative pass limits, while an already warmed root seed is shared without reparsing it
+- **AND** the existing single-path Rust API, closed filesystem/core error enums, CLI commands, MCP tools and graph schema remain compatible
+
 ### Requirement: Existing compatible indexes repair without authored-state loss
 The existing derivation fingerprint and atomic publication owner SHALL repair both previously admitted excluded files and omitted legitimate files when source bytes are unchanged. A second current-contract refresh SHALL avoid redundant parsing/publication.
 

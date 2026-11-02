@@ -15,6 +15,7 @@ The broader audit also reproduced targeted matching losing ancestor rules when a
 - Invalidate warm verified epochs for document-only target events even when ignore policy excludes every source path; preserve typed read-only refresh guidance, last-valid publication and explicit reconciliation without a recursive rebind for ordinary target changes.
 - Restore recursive coverage when a supported source directory is replaced at its selected pathname while the database/config remain external. Serialize structural uncertainty with event ingress before accepting a warm result; preserve existing root/lifecycle admission and ignore ordinary access events without triggering a rebind.
 - Apply the already specified document-prefix admission boundary to the shared uncached policy inspector used by this issue's freshness probe and ordinary projection. Check each existing native prefix before per-target policy reads, using the caller's cooperative control; retain explicit global/shared policy inputs and typed source outcomes. #738 retains its separate complete acceptance and closure.
+- Reuse one bounded native ignore matcher per document-resolution pass, including every keyset page of a cold probe. Bound cumulative hierarchical policy parsing and retained directory contexts without a document-row cutoff; preserve fresh policy at the next pass and final publication revalidation.
 
 ## Capabilities
 
@@ -28,7 +29,7 @@ None. Existing canonical specs do not separately own this behavior.
 
 ## Impact
 
-Filesystem policy selection, WalkBuilder setup, policy-source observation, extraction fingerprint and causal unit/real CLI/MCP/upgrade proof. Reuse ignore for glob matching and a canonical Git-config syntax parser for config syntax; do not add a custom INI/regex parser or Git process requirement. Review locked dependency/MSRV/license/resource costs before check-in. No graph/schema/public-route change.
+Filesystem policy selection, WalkBuilder setup, policy-source observation, extraction fingerprint and causal unit/real CLI/MCP/upgrade proof. Reuse ignore for glob matching and a canonical Git-config syntax parser for config syntax; do not add a custom INI/regex parser or Git process requirement. Review locked dependency/MSRV/license/resource costs before check-in. Additive Rust batch-matcher APIs preserve the existing single-path API and closed error/resource enums. No graph/schema/CLI-command/MCP-tool change.
 
 ## Release Scope
 

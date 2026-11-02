@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 327,216 bytes (0.47%) to the optimized
+The derivation-25 policy repair adds 432,208 bytes (0.62%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -33,9 +33,9 @@ Positive matching and exclusion correctness use the separate CLI/MCP regressions
 
 | Fixture | Construction, main → repair | Full scan, main → repair | Targeted check, main → repair | Process RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 9.0 → 59.3 µs | 4.96 → 5.12 ms | 24.1 → 75.1 µs | 6,564 → 5,492 |
-| Large config | 9.0 → 828.8 µs | 5.17 → 5.73 ms | 72.5 → 75.4 µs | 7,108 → 9,268 |
-| 10,000 rules | 9.1 µs → 16.37 ms | 24.63 → 24.40 ms | 18.03 → 2.52 ms | 20,244 → 19,936 |
+| Ordinary | 9.0 → 59.3 µs | 4.95 → 4.96 ms | 24.2 → 75.0 µs | 6,188 → 5,952 |
+| Large config | 9.0 → 850.0 µs | 5.46 → 6.12 ms | 72.1 → 76.2 µs | 6,548 → 9,228 |
+| 10,000 rules | 9.0 µs → 16.25 ms | 24.38 → 24.09 ms | 17.83 → 2.47 ms | 20,548 → 20,140 |
 
 Construction now performs bounded canonical configuration parsing and compiles
 external rules once. The old construction deferred work to later operations,
@@ -47,33 +47,21 @@ do not establish cold-storage behavior, a scaling bound or a performance SLO.
 
 ## Complete CLI refresh costs
 
-The final publication fix rediscovers policy before validating staged absent
-document states. After the root-alias repair, the component measurements were
-rerun. The helper
-relinked from the final source is byte-identical to that measured helper; the
-CLI measurements, upgrade cases and public CLI/MCP scenarios were rerun against
-the final CLI binary. Its identity and source manifest are in the compact result.
-The watch-gap repair retains uncertainty through batch settling; the CLI samples,
-upgrade cases and public scenarios use its rebuilt binary.
-The observed-epoch repair now includes document-only events in invalidation.
-These samples use its rebuilt CLI; the persistent MCP regression separately
-proves typed read-only refresh guidance and explicit zero-reparse reconciliation
-for ignored/outside-symlink target transitions under local and global rules.
-The runtime namespace repair preserves the selected SQLite path while filtering
-its actual target cohort and keeping distinct source aliases observable. The CLI
-measurements and upgrade/public-adapter proofs were rerun against its fresh binary.
-Capturing the database target adds one canonicalization per observed request,
-including warm requests; this is not just observer-startup work. Event filtering
-checks at most two namespace bases and three sidecars, with no callback I/O.
-These fresh-process samples do not isolate persistent MCP warm-request latency.
-The controlled-watch repair distinguishes full-required selection from failed
-incremental work and retains full reconciliation under the original control.
-The final CLI samples and upgrade cases use that rebuilt binary. Its permanent
-native watcher regression also exercises a large single-file graph closure,
-compaction and root replacement; these fresh-process timings do not isolate
-that recovery branch's cost. The fixture wait bound is not a performance SLO.
-Component timings use canonical roots; separate regressions cover lexical aliases,
-relative root selection and selected symlink roots without claiming alias timings.
+Final publication revalidates staged absent-document outcomes against freshly
+selected policy. A pass-local native matcher amortizes hierarchical policy
+loading across distinct targets, while the next pass and final revalidation
+remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
+source manifest; all 36 component/CLI samples and four upgrade cases were rerun.
+
+The controlled watcher retains full reconciliation under its original control.
+Its native regression exercises a large single-file graph closure, compaction
+and root replacement; these fresh-process timings do not isolate that recovery
+branch. Capturing the database target adds one canonicalization per observed
+request, including warm requests. Callback filtering performs no I/O. The
+persistent MCP regressions separately prove document-only invalidation, typed
+read-only guidance and explicit zero-reparse reconciliation. These CLI samples
+do not isolate persistent MCP warm-request latency. Component costs use canonical
+roots; alias and relative-root regressions do not establish separate timings.
 
 An additional 18 fresh-root initialization samples compare accepted main with
 the final artifact, followed by separately timed unchanged `watch --once` calls.
@@ -85,15 +73,45 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 304.8 → 314.9 | 48.6 → 48.4 | 32,664 → 30,760 | 21,868 → 20,556 |
-| Large config | 303.3 → 312.6 | 48.6 → 53.9 | 32,980 → 33,408 | 21,924 → 23,756 |
-| 10,000 rules | 388.6 → 397.1 | 70.3 → 97.6 | 44,872 → 42,100 | 33,556 → 33,332 |
+| Ordinary | 312.3 → 309.3 | 48.3 → 49.6 | 32,936 → 30,608 | 21,924 → 20,500 |
+| Large config | 304.6 → 313.2 | 49.1 → 53.8 | 32,972 → 33,748 | 21,568 → 23,468 |
+| 10,000 rules | 389.1 → 393.5 | 72.5 → 96.3 | 44,996 → 42,004 | 32,860 → 33,032 |
 
-The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 24 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
 the faster targeted-matcher result.
+
+## Cold document-policy verification
+
+Eight Markdown files retain 1,024 distinct unresolved links across four 256-row
+pages. Root `.ignore` contains 2,000 nonmatching rules (50,890 bytes). Three cold
+CLI `summary guide0.md` reads per binary use distinct freshly initialized roots,
+explicitly disabled external Git config and warm filesystem caches. The
+predecessor is PR head 634cf78, not accepted main. Every read succeeds and leaves
+the complete publication metadata unchanged; persisted unresolved counts are
+verified through read-only SQLite queries.
+
+The predecessor median is 4.37718 seconds; the repair median is 0.07073 seconds,
+about 61.9 times faster in this fixture. Initialization is 10.21149 to 0.26473
+seconds. These samples establish the repeated-policy-work repair, not a general
+speedup, a thirty-minute denial experiment or release performance acceptance.
+The unisolated desktop host and sequential predecessor/candidate groups limit
+causal timing precision. Workspace check and rustdoc overlapped the final FS
+component trial above; the cold-document samples completed before that overlap.
+
+One resolution/probe pass admits at most 1,000,000 directory-context loads and
+128 MiB of local hierarchical policy input. Reloads after child-cache eviction
+are charged again; the warmed root/ancestor seed is shared without reparsing.
+Child policy input/native/wrapper keys use soft 256-context / 4 MiB estimates,
+with between-target eviction and one current ancestor chain under the cumulative
+limits. These are input/key estimates, not exact RSS bounds. Staging and fresh
+publication revalidation have separate pass quotas under the original operation
+deadline. A failed pass requires a fresh matcher. Quota exhaustion preserves
+existing typed PolicyUnavailable guidance and cannot restart a full refresh
+through incremental or observed-MCP fallback. Trusted global rules remain
+compiled once at policy discovery; external edits require fresh discovery.
 
 ## Dependency and boundary review
 

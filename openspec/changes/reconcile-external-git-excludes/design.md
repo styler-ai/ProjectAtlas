@@ -60,6 +60,12 @@ native paths. Keep relative-root coverage under captured CWD; use a separate
 ordinary temporary base for the Windows alias case so a long CWD or another
 volume cannot silently omit it. Compare each selection with its own canonical
 root and complete node vector, retaining all three cases.
+Ordinary Win32 lookup normalizes a parent component before opening the file;
+an eliminated `intermediate/..` sibling is therefore not a policy dependency.
+Prove the selected rules remain readable after removing that sibling and that
+routing agrees with the normalized spelling on Windows. Retain the Unix
+structural-component assertion and actual missing-parent creation controls;
+do not broaden callback filtering to satisfy a Unix-only expectation.
 
 Use canonical Git-config parsing with bounded input reads and no automatic unbounded includes/network/process execution. The implementation selects pinned `gix-config` 0.62.2 with default features disabled and its required `sha1` feature; that feature satisfies the dependency's hash-type contract and does not change ProjectAtlas content hashing. The parser has a transitive dependency graph, not a standalone tiny syntax-only footprint. Project code owns direct source precedence, cancellation and input inventory. Review the exact locked graph, MSRV, licenses and measured construction/scan overhead before acceptance. A home-grown parser or normal Git command invocation is the rejected alternative.
 
@@ -186,6 +192,76 @@ The uncached probe is another consumer of the document-policy reader covered by 
 Publication revalidation must discover current policy from the original plan's configured `ScanOptions`, not reuse the staged compiled matcher or feed its repository-expanded exclusions back into discovery. A selected external edit can change only an absent target's reason while the complete source inventory stays identical. Pass the original options and existing control into the publication owner, discover policy once when retained document states need validation, and refuse changed outcomes before acquiring the publication transaction. No new policy-byte contract hash, retained options clone or filesystem witness registry is required. A deterministic stage-to-publication control must flip an external exclusion without changing source nodes, prove last-valid state survives refusal, and prove retry/no-op convergence.
 
 Advance the extraction derivation contract after combining independently accepted fixes; it must be strictly newer than every exercised predecessor candidate and retain the accepted semantic contract. Accepted main now includes #731 and #741 at derivation 24 / semantic 23. The registered private-worktree inventory also has maximum derivation 24 before this change, so this policy repair uses derivation 25 and retains semantic 23. Repair omitted/excess prior source facts, not only document reasons. No query-time mutation or alternate database. Later combined release acceptance must reconcile any subsequent independent derivation changes.
+
+The cold unresolved-document probe pages rows but previously rebuilt a lazy
+hierarchical matcher for each target. Pagination bounds row memory, not repeated
+policy parsing. A bounded CLI reproduction at head 634cf78 has 1,024 unresolved
+targets and 50,890 bytes of root policy; three cold summaries take a median
+4.37718 seconds without changing publication. This establishes amplification,
+not a demonstrated thirty-minute denial or a general latency acceptance result.
+
+Own reuse in an additive filesystem `RootScanMatcher` borrowed from
+`RootScanPolicy` and the original `IndexWorkControl`. Preserve the existing
+`RootScanPolicy::excludes_path` signature and fresh single-path semantics. Reuse
+pinned ignore 0.4.34 `IncrementalIgnore`, not a second grammar. Each
+`DocumentResolutionIndex` owns one matcher through its existing single-threaded
+interior-mutability boundary, including all pages of the uncached cold probe.
+Keep native-prefix refusal before policy access and retain selected-root alias,
+relative/native path, directory, inherited rule, no-Git and linked-worktree
+semantics. No global cache, threads, synchronization service or schema change.
+
+Admit root/ancestor local policy once before the first native parse, then warm
+the root seed using the target's first normal component as a file. That loads no
+child policy. Reuse the warmed seed when evicting child contexts. For each target,
+match each parent as a directory, stop immediately if ignored, then validate and
+reserve that parent's enabled local policy inputs before a subsequent native
+match can load them. Share the existing validation/input enumeration; do not
+preflight pruned descendants or bypass non-regular-input refusal. The selected
+external excludes are already compiled once by policy discovery and are reused;
+these new quotas cover local hierarchical parse work, not a new restriction on
+trusted operator-selected global paths.
+
+Default cumulative limits are 1,000,000 directory-context loads (aligned with
+the default scan entry bound) and 128 MiB of local policy input admitted for
+parsing **per matcher/pass**. Every reload after eviction is charged again.
+Expose explicit limits for callers and deterministic tests. Bound retained child
+contexts with soft limits of 256 contexts and a 4 MiB estimate covering local
+policy inputs and retained native path/cache keys, including wrapper keys.
+Evict between targets when a new context is needed and either soft threshold
+would be exceeded; do not
+reparse policy for repeated targets in an already cached directory. One target's
+ancestor chain may temporarily exceed the soft cache threshold, but remains
+subject to the cumulative limits. This estimates retained input/key cost rather
+than promising exact allocator RSS. Root/ancestor seed input is separately
+bounded by the cumulative parse quota and is not repeatedly recompiled.
+
+Use an additive `PolicyMatchError` and typed policy resource/limit fields; do
+not extend the existing public closed `FsError` or `IndexWorkResource` enums.
+Preserve cancellation/deadline as the original `IndexWorkFailure`. At the CLI
+document owner map policy quota exhaustion to the existing
+`VerificationIncomplete` / `PolicyUnavailable` full-scope refusal, including
+resource, limit and observed work. It must not masquerade as incremental
+Entries/SourceBytes work that triggers a fresh full-scan retry. Staging and fresh
+publication revalidation deliberately construct separate matchers and each has
+its own pass quota; both retain the same cooperative whole-operation deadline.
+No hard unresolved-row cap or partial successful publication is introduced.
+A failed matcher pass is terminal, including a partial native parser failure;
+retry requires a fresh matcher. Keep an internal, non-serialized typed policy
+resource on quota verification refusals so the observed MCP watch owner also
+propagates them before its general incomplete-verification refresh fallback.
+Unmarked verification refusals retain that existing recovery. Prove both paths
+through the actual owner dispatch with a real pending source change and assert
+that the marker does not alter the serialized CLI/MCP envelope.
+
+Protect reuse, eviction/reload charging, before-parse refusal, cancellation and
+deadline with causal filesystem tests and low-limit tests through the real
+document-resolution/probe owner. Prove a loaded pass is stable and a new pass
+observes policy edits, final revalidation remains fresh, and refusals preserve
+last-valid publication, project identity and approved purposes. Re-run the
+bounded multi-page real CLI fixture and MCP positive/failure workflows. Existing
+FIFO/pruning, native-prefix, aliases, local/global precedence and linked/no-Git
+controls remain required. No claim of immunity to hostile replacement races or
+uninterruptible kernel I/O is added.
 
 ## Risks / Trade-offs
 

@@ -34,9 +34,9 @@ use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
     RepositoryResolutionCandidate, RepositoryResolutionReadPage,
 };
-use projectatlas_fs::RootScanPolicy;
 #[cfg(test)]
 use projectatlas_fs::ScanOptions;
+use projectatlas_fs::{PolicyMatchError, PolicyMatchLimits, RootScanMatcher, RootScanPolicy};
 use projectatlas_symbols::{
     ConfiguredModuleResolution, DOCUMENT_COVERAGE_SYMBOL, MAX_RESOLUTION_KEYS_PER_FACT,
     MarkdownFactCompleteness, MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection,
@@ -3973,8 +3973,8 @@ struct DocumentResolutionIndex<'a> {
     kinds_by_path: HashMap<&'a str, NodeKind>,
     /// Unicode-lowercase identity counts used to refuse guesses and collisions.
     casefold_path_counts: HashMap<String, u32>,
-    /// Effective repository admission policy shared with full and incremental scans.
-    scan_policy: &'a RootScanPolicy,
+    /// Bounded hierarchical policy reuse for this resolution/verification pass.
+    policy_matcher: RefCell<RootScanMatcher<'a>>,
     /// Consulted non-indexed states, memoized for repeated high-fan-out references.
     absent_states: RefCell<BTreeMap<String, DocumentTargetUnresolvedReason>>,
 }
@@ -3986,6 +3986,23 @@ impl<'a> DocumentResolutionIndex<'a> {
         nodes: &'a [Node],
         scan_policy: &'a RootScanPolicy,
         control: &'a IndexWorkControl,
+    ) -> Result<Self, CliError> {
+        Self::with_policy_limits(
+            root,
+            nodes,
+            scan_policy,
+            control,
+            PolicyMatchLimits::default(),
+        )
+    }
+
+    /// Retain one policy quota across every target in this resolution pass.
+    fn with_policy_limits(
+        root: &Path,
+        nodes: &'a [Node],
+        scan_policy: &'a RootScanPolicy,
+        control: &'a IndexWorkControl,
+        limits: PolicyMatchLimits,
     ) -> Result<Self, CliError> {
         control.check(IndexWorkStage::SymbolParsing)?;
         let canonical_root = fs::canonicalize(root).map_err(|source| CliError::Io {
@@ -4016,7 +4033,7 @@ impl<'a> DocumentResolutionIndex<'a> {
             canonical_root,
             kinds_by_path,
             casefold_path_counts,
-            scan_policy,
+            policy_matcher: RefCell::new(scan_policy.batch_matcher_with_limits(control, limits)),
             absent_states: RefCell::new(BTreeMap::new()),
         })
     }
@@ -4065,9 +4082,31 @@ impl<'a> DocumentResolutionIndex<'a> {
         let reason = if let Some(reason) = self.target_prefix_refusal(Path::new(path))? {
             reason
         } else if self
-            .scan_policy
+            .policy_matcher
+            .borrow_mut()
             .excludes_path(&native)
-            .map_err(|source| CliError::InvalidInput(source.to_string()))?
+            .map_err(|source| {
+                let policy_work_limit = match &source {
+                    PolicyMatchError::Limit { resource, .. } => Some(*resource),
+                    _ => None,
+                };
+                match source {
+                    PolicyMatchError::Filesystem(projectatlas_fs::FsError::IndexWork(failure)) => {
+                        CliError::IndexWork(failure)
+                    }
+                    other => CliError::VerificationIncomplete(Box::new(
+                        super::IndexVerificationIncomplete {
+                            policy_work_limit,
+                            project_root: lossless_project_root_display(&self.root),
+                            worktree: None,
+                            status: IndexReadStatus::VerificationIncomplete,
+                            reason: super::IndexVerificationReason::PolicyUnavailable,
+                            scope: IndexRefreshScope::Full,
+                            message: other.to_string(),
+                        },
+                    )),
+                }
+            })?
         {
             DocumentTargetUnresolvedReason::Ignored
         } else {
@@ -4160,6 +4199,25 @@ pub(super) fn nonindexed_document_projection_changed(
     options: &projectatlas_fs::ScanOptions,
     control: &IndexWorkControl,
 ) -> Result<(bool, u64), CliError> {
+    nonindexed_document_projection_changed_with_limits(
+        store,
+        root,
+        nodes,
+        options,
+        control,
+        PolicyMatchLimits::default(),
+    )
+}
+
+/// Keep explicit policy accounting at the real paged verifier, including fault tests.
+fn nonindexed_document_projection_changed_with_limits(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+    limits: PolicyMatchLimits,
+) -> Result<(bool, u64), CliError> {
     const DOCUMENT_INPUT_PAGE: u32 = 256;
     let mut page =
         store.repository_unresolved_documents_page(None, DOCUMENT_INPUT_PAGE, control)?;
@@ -4170,7 +4228,8 @@ pub(super) fn nonindexed_document_projection_changed(
     }
     let scan_policy = RootScanPolicy::discover(root, options, control)
         .map_err(|source| super::source_inspection_error(root, source))?;
-    let index = DocumentResolutionIndex::new(root, nodes, &scan_policy, control)?;
+    let index =
+        DocumentResolutionIndex::with_policy_limits(root, nodes, &scan_policy, control, limits)?;
     loop {
         for row in &page.rows {
             control.check(IndexWorkStage::RepositoryTraversal)?;
@@ -16962,6 +17021,128 @@ function helper() {}
                 Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
             ),
             "uncached document admission ignored original cancellation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_policy_probe_reuses_work_across_pages_and_preserves_state_on_refusal()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(root.join("docs/.ignore"), "unmatched-rule/\n")?;
+        for file in 0..3 {
+            use std::fmt::Write;
+            let mut text = String::new();
+            for target in 0..180 {
+                writeln!(text, "[target](docs/missing-{file}-{target}.rs)")?;
+            }
+            fs::write(root.join(format!("guide-{file}.md")), text)?;
+        }
+        let plan = super::super::ScanRuntimePlan::for_path(None, &root, Some(100_000))?;
+        let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+        let mut store = super::super::open_atlas_store_for_project(
+            &root.join(".projectatlas/projectatlas.db"),
+            &root,
+        )?;
+        super::super::refresh_index(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "guide-0.md",
+            "Retain this authored guide",
+            projectatlas_core::PurposeSource::Agent,
+        )?;
+        let publication = store.index_publication()?;
+        let identity = store.project_instance_id()?;
+        let authored_revision = store.authored_purpose_revision()?;
+        let control = super::super::standalone_index_work_control();
+        let nodes = projectatlas_fs::scan_repo(&root, &plan.scan_options)?;
+        let result = super::nonindexed_document_projection_changed_with_limits(
+            &store,
+            &root,
+            &nodes,
+            &plan.scan_options,
+            &control,
+            projectatlas_fs::PolicyMatchLimits::new(64, 64 * 1024),
+        )?;
+        require_eq(
+            &result,
+            &(false, 6),
+            "all three pages must complete under one small policy budget",
+        )?;
+        let error = super::nonindexed_document_projection_changed_with_limits(
+            &store,
+            &root,
+            &nodes,
+            &plan.scan_options,
+            &control,
+            projectatlas_fs::PolicyMatchLimits::new(0, u64::MAX),
+        )
+        .err()
+        .ok_or_else(|| std::io::Error::other("policy quota was ignored"))?;
+        require(
+            matches!(&error, CliError::VerificationIncomplete(state)
+            if state.reason == super::super::IndexVerificationReason::PolicyUnavailable
+                && state.policy_work_limit == Some(projectatlas_fs::PolicyMatchResource::DirectoryContexts)
+                && state.scope == IndexRefreshScope::Full
+                && state.message.contains("DirectoryContexts")
+                && state.message.contains("limit 0")),
+            "quota lost typed verification guidance",
+        )?;
+        require(
+            !super::super::incremental_refresh_needs_full(&error),
+            "policy quota can trigger a fresh full-scan retry",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "quota refusal changed publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "quota refusal changed project identity",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &authored_revision,
+            "quota refusal changed authored purposes",
+        )?;
+        // The next pass must discover edits even when source nodes are unchanged.
+        fs::write(root.join("docs/.ignore"), "missing-0-0.rs\n")?;
+        require(
+            super::nonindexed_document_projection_changed(
+                &store,
+                &root,
+                &nodes,
+                &plan.scan_options,
+                &control,
+            )?
+            .0,
+            "fresh pass retained old child policy",
+        )?;
+        control.cancel();
+        require(
+            matches!(
+                super::nonindexed_document_projection_changed(
+                    &store,
+                    &root,
+                    &nodes,
+                    &plan.scan_options,
+                    &control,
+                ),
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. })
+                    | CliError::Db(projectatlas_db::DbError::IndexWork(
+                        IndexWorkFailure::Cancelled { .. }
+                    )))
+            ),
+            "paged verifier replaced cancellation",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "cancelled probe changed publication",
         )?;
         Ok(())
     }
