@@ -1110,6 +1110,25 @@
       "after_metadata_plus_canonical_probe_upper_bound": 8704,
       "all_owned_native_probes_charged": true
     },
-    "limitations": "One local sample per binary on an unisolated Linux desktop, warm caches; scoped repeated-prefix proof, not a throughput or persistent-MCP SLO."
+    "limitations": "One local sample per binary on an unisolated Linux desktop, warm caches; scoped repeated-prefix proof, not a throughput or persistent-MCP SLO.",
+    "reported_scale": {
+      "existing_directory_depth": 200,
+      "documents": 2,
+      "links_per_document": 500,
+      "persisted_missing_relations": 1000,
+      "document_coverage_complete": true,
+      "publication_unchanged": true,
+      "before": {
+        "binary_sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d",
+        "init_seconds": 191.4762373290141,
+        "cold_summary_seconds": 95.70886936801253
+      },
+      "after": {
+        "binary_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
+        "init_seconds": 7.222722356033046,
+        "cold_summary_seconds": 3.4341939460136928
+      },
+      "limitations": "One quiet init/read per exact binary on distinct identical-input roots, warm caches and unisolated host; no general SLO. A one-document 1000-link/depth200 trial correctly reached the intermediate_bytes extraction limit at 614 links, so the complete comparison uses two documents without changing that limit."
+    }
   }
 }

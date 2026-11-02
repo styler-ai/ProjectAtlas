@@ -147,6 +147,17 @@ timings are not compared with the quiet timings. This is affected-work evidence,
 not a general speedup or persistent-MCP latency claim. Exact identities and sample
 data are in the compact result.
 
+The reported-scale check uses 1,000 links beneath 200 existing components.
+Two documents with 500 links each keep extraction complete under the existing
+intermediate-byte limit; a single 1,000-link document at that depth correctly
+retained only 614 links with explicit partial coverage and is excluded from the
+complete comparison. On the complete fixture, initialization is
+191.48 → 7.22 s and a cold summary is 95.71 → 3.43 s.
+Both retain all 1,000 missing relations with complete document coverage and leave
+publication unchanged. These are one-sample, quiet-process, warm-cache local
+measurements on distinct identical-input roots, subject to the same host/SLO
+limitations above.
+
 The owning 128-target/32-component regression fails before the repair with 4,352
 canonicalizations and passes afterward with at most 384. A separate counter
 checks metadata plus canonical operations against the actual ledger (at most

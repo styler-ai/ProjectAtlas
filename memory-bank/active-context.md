@@ -90,6 +90,14 @@ rebuilt byteidentity verified, so reuse these fresh product measurements explici
 FShelper identical to older measured ddc component:18FSsamples reused with old
 manifest/overlap limitation.18freshCLIcost/fourupgrade+rollback PASS at e89;
 ordinaryinit308.87→306.85ms/noop48.29→49.70ms;10krulesnoop70.85→98.41ms. No SLOwaiver.
+Reported-scale2docs×500links/depth200 BEFOREinit191.476s/coldsummary95.709s;
+AFTerinit7.223s/coldsummary3.434s, all1000missing relations and complete500/500
+coverage perdocument verified, publicationunchanged. One-document1000links at
+thisdepth correctlyhits intermediate_bytes at614links: documentedpartial, not
+a newbug or the acceptedcompletefixture. Original614trial artifacts preserved,
+not overwritten or claimed1000. Complete logs /tmp/projectatlas-739-prefix-
+complete-scale-{before,after}.* (80429TERMINAL0); firstpartialtrial61147TERMINAL1
+after init116.975s succeeded but retained-row assertion caught the correctlimit.
 Root512/depth64 AFTER init.735s/coldsummary.322s, unchanged512missingrelations/
 publication; tracing73,883calls/5,305readlink (separate traced timings, not compared).
 Originalshallow1024link/2000rule fixture3coldreadsmedian.0684947/init.273917s;
