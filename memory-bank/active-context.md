@@ -130,6 +130,10 @@ before fixes/dynamic work. Existing fixed inputs trustedoperator/test roots and
 explicit capabilities are not blanket security defects. Read SECURITY.md and
 triage references; preserve positive indexing/navigation capabilities.
 
+Normal push55453/wrapper895582 TERMINAL1 early: refreshed memory OpenSpec path
+violated private-absolute-path string policy. Replaced it with a home-relative
+path; no code/artifact change. Previous flood-phase push receipt is historical;
+next attempt uses flood-phase-path-fix-push prefix.
 Luna741 bounded metadata packet APPROVED after clarifying retained measurements.
 StrictOpenSpec/scopedIssueOps4candidate4live2checked/fmt/diff PASS. Normal push
 next uses /tmp/projectatlas-739-flood-phase-push{.py,.log,-session.json}; its
@@ -146,7 +150,7 @@ native/CodeQL/bot runs, finish33+ current security assessment +all8threads and
 source /tmp/projectatlas-rc1-test-env.sh; shared target integration/target; TMPDIR
 ~/.cache/projectatlas-test-tmp. No sibling compiles during CLI proof. Runtime tests
 belong --bin projectatlas, not--lib. strings: cargo projectatlas-lints strict-strings.
-OpenSpec /home/utopien/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
+OpenSpec ~/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
 Atlas050 exact739 sessionbrief still policy_drift/fullrefresh after candidate26;
 preserve privateDB/authored state, no downgrade/reset/scan for orientation. Exact
 bounded current source evidence is allowed; do not claim stale graph freshness.
