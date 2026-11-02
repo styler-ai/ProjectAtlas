@@ -13,8 +13,8 @@ Selected checkout .worktrees/issue-739, branch fix/external-excludes-739, PR745
 OPEN/unmerged, base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs #739.
 Live GitHub reverified2026-11-02: #731/PR737 and #741/PR743 merged/CLOSED;
 #739/#738/#708/#715 OPEN. Public head68cb2fd3e7d68c36a1e41414241098dc4ef71a32;
-local repair descends from64ce50492d2fa2fa1f1feea7ea705f91ff57f6f3; see Git HEAD
-for the subsequent watcher/CI/spec commit.
+source repair committed ase20f7b5391bdd83669a16f63e5463ad2b372035e.
+Subsequent cost/continuity changes do not change the140build inputs.
 Only task1.1 checked;2.1/2.2/3.1 and five acceptance rows remain unchecked.
 
 ## Current repair and verified results
@@ -50,10 +50,9 @@ openspec,issueops,pr-issueops,strings}.log. Luna731 APPROVES scope/resource/CI c
 Luna741 APPROVES correctness and inter-call transition fix after deterministic
 removal/reparse regression. Earlier test gap corrected. Windows
 cross-target check UNAVAILABLE: missing x86_64-w64-mingw32-gcc, not a source pass.
-Fresh hosted Windows proof remains required. Intermediate release session95475
-completed before the final transition guard; superseded. New build session63729
-is running after repeated observer/Clippy/strings/OpenSpec PASS. Inspect handle
-before waiting/restarting; receipt under /tmp/
+Fresh hosted Windows proof remains required. Intermediate95475 superseded; final
+build63729 TERMINAL0 after repeated observer/Clippy/strings/OpenSpec PASS.
+Final build38.31s; receipt under /tmp/
 projectatlas-739-indexed-namespace-release-{artifacts.jsonl,build.log,build.time}.
 
 Local64ce also fixes automated review4439249685: source-equal full-refresh no-op
@@ -136,6 +135,27 @@ plan, source/adapter and bounded native cache ownership. Its ignored-cache conce
 was withdrawn after checking final-component call order. No open source finding
 from that review; full exact-head automated/hosted acceptance still required.
 
+## Current optimized artifact and local acceptance
+
+Frozen ~/.cache/projectatlas-benchmarks/external-policy-739-indexed-namespace-release,
+sourcee20f7b5.140buildinputs match committed tree; manifestbc24b111d18db378327751f9d7ab78e932ffcb0098aefc232a92982c691bd8cd.
+CLI1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d,
+69,971,552bytes. FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9
+byte-identical to historical measured helper, so18FSsamples reused explicitly;
+not a claim of36new samples.18freshCLIcost/fourupgrade+rollback casesPASS.
+CLIordinaryinit308.79→311.76ms/noop48.50→50.32ms;10krulesnoop71.39→98.87ms.
+Actual optimized externalCLI/MCP1.29s,document-onlyMCP2.04s,largeclosure/root-
+replacement14.30s PASS. Final logs /tmp/projectatlas-739-indexed-namespace-*
+{cli-cost-proof,upgrade-proof,external-e2e,documents-e2e,replacement-e2e}.
+Cold-currentfixture3newCLIprocesses on one newlyinitialized DB median.0685849s,
+init.344581s;1024persisted missing document relations verified and publication
+unchanged. Earlier exact-identity baseline4.37718s retained (~63.8x fixture only),
+not a generalSLO/speedup claim. CurrentCLI/coldmeasurements had no overlapping
+builds. PriorFSsamples retain documented workspacecheck/rustdoc overlap.
+Cost docs bind currentCLI/source/helper identities; Luna731 APPROVED final
+cost/proof reconciliation, including all three real-adapter logs.
+All local sessions63729/39527/13827 TERMINAL0. No live build/index/push currently.
+
 ## Immutable historical artifacts and next proof
 
 Previous ddc90bf artifact ~/.cache/projectatlas-benchmarks/
@@ -152,10 +172,9 @@ CLI50c99150c8a2cce53f7bd6be8a1be99faae5b4a9823cb9cc9beaa81a0adbe6c6,
 69,872,736bytes;140-input manifeste561c712e673b12b1db40512458b394b315122ce62a4270207a90b981aa76261.
 FShelper byte-identical to ddc.18freshCLIcost/fourupgrade casesPASS; quiet final
 CLIcost rerun ordinaryinit308.96→309.84ms/noop49.44→48.85ms;10krulesnoop70.26→97.31ms.
-Current watcher source is ahead of both artifacts: no final-source equivalence
-claim. Freeze new CLI+manifest/helper, verify helper byte identity before reusing
-FS samples; rerun affected CLIcost/fourupgrade/real-adapter proofs and update cost
-docs. /tmp/projectatlas-739-freeze-document-noop.py and document-noop proof scripts
+These two historical artifacts are superseded by the current e20source-bound
+artifact above; no equivalence claim for their CLI binaries. Current cost docs
+were updated after new CLIcost/fourupgrade/real-adapter proof. /tmp/projectatlas-739-freeze-document-noop.py and document-noop proof scripts
 are reusable only after adapting immutable output paths and checking assumptions.
 
 ## Hosted/security feedback still requiring final acceptance

@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 432,208 bytes (0.62%) to the optimized
+The derivation-25 policy repair adds 514,592 bytes (0.74%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -51,14 +51,21 @@ Final publication revalidates staged absent-document outcomes against freshly
 selected policy. A pass-local native matcher amortizes hierarchical policy
 loading across distinct targets, while the next pass and final revalidation
 remain fresh. The CLI and filesystem helper were both rebuilt from the recorded
-source manifest; all 36 component/CLI samples and four upgrade cases were rerun.
+source manifest. The rebuilt filesystem helper is byte-identical to the prior
+measured helper, so its 18 component samples are reused with their original
+manifest and overlap limitation. All 18 CLI cost samples and four upgrade cases
+were rerun against the current frozen CLI without overlapping builds.
 
 The controlled watcher retains full reconciliation under its original control.
 Its native regression exercises a large single-file graph closure, compaction
 and root replacement; these fresh-process timings do not isolate that recovery
 branch. Capturing the database target adds one canonicalization per observed
 request, including warm requests. Callback filtering performs no I/O. The
-persistent MCP regressions separately prove document-only invalidation, typed
+policy-event scope index resolves unrelated source events with constant native
+namespace work; directory events resolve only affected selected bindings once
+across overlapping event paths. The 1,024-input resource regression checks this
+bound without claiming a warm-latency result. The persistent MCP regressions
+separately prove document-only invalidation, typed
 read-only guidance and explicit zero-reparse reconciliation. These CLI samples
 do not isolate persistent MCP warm-request latency. Component costs use canonical
 roots; alias and relative-root regressions do not establish separate timings.
@@ -73,11 +80,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 312.3 → 309.3 | 48.3 → 49.6 | 32,936 → 30,608 | 21,924 → 20,500 |
-| Large config | 304.6 → 313.2 | 49.1 → 53.8 | 32,972 → 33,748 | 21,568 → 23,468 |
-| 10,000 rules | 389.1 → 393.5 | 72.5 → 96.3 | 44,996 → 42,004 | 32,860 → 33,032 |
+| Ordinary | 308.8 → 311.8 | 48.5 → 50.3 | 32,440 → 30,508 | 21,404 → 20,800 |
+| Large config | 308.0 → 317.1 | 49.2 → 54.6 | 32,192 → 33,368 | 21,808 → 23,812 |
+| 10,000 rules | 384.7 → 392.5 | 71.4 → 98.9 | 44,464 → 42,064 | 32,316 → 33,028 |
 
-The large-rule fresh-process refresh adds about 24 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
@@ -86,20 +93,23 @@ the faster targeted-matcher result.
 ## Cold document-policy verification
 
 Eight Markdown files retain 1,024 distinct unresolved links across four 256-row
-pages. Root `.ignore` contains 2,000 nonmatching rules (50,890 bytes). Three cold
-CLI `summary guide0.md` reads per binary use distinct freshly initialized roots,
+pages. Root `.ignore` contains 2,000 nonmatching rules (50,890 bytes). Three fresh
+CLI `summary guide0.md` processes per binary read the same freshly initialized
+root; each binary has a distinct root. The runs use
 explicitly disabled external Git config and warm filesystem caches. The
 predecessor is PR head 634cf78, not accepted main. Every read succeeds and leaves
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the repair median is 0.07073 seconds,
-about 61.9 times faster in this fixture. Initialization is 10.21149 to 0.26473
-seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06858
+seconds, about 63.8 times faster in this fixture. Initialization is
+10.21149 to 0.34458 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
-The unisolated desktop host and sequential predecessor/candidate groups limit
-causal timing precision. Workspace check and rustdoc overlapped the final FS
-component trial above; the cold-document samples completed before that overlap.
+The unisolated desktop host and separately measured predecessor/candidate groups
+limit causal timing precision. The predecessor samples retain their verified
+unchanged binary identity; the current candidate samples ran without overlapping
+builds. Workspace check and rustdoc overlapped the final historical FS component
+trial above; that limitation still applies to the reused component samples.
 
 One resolution/probe pass admits at most 1,000,000 directory-context loads and
 128 MiB of local hierarchical policy input. Reloads after child-cache eviction
