@@ -66,6 +66,17 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **THEN** watch admission refuses the impossible parent and releases partial native coverage on every supported platform, even when the operating system reports the child as missing
 - **AND** regular-file leaves, genuinely absent parent chains and native ordinary Win32 parent normalization retain their supported behavior
 
+#### Scenario: Containing-directory modification does not replace source coverage
+- **WHEN** a native modification notification names an ordinary containing directory and the selected policy path bindings remain unchanged
+- **THEN** CLI and MCP drains retain valid source observation and warm epochs without inventing recursive coverage loss or a policy refresh
+- **AND** actual source-root notifications, structural root/ancestor changes, native errors, overflow and rescan retain their existing reconciliation behavior
+
+#### Scenario: Ancestor metadata changes a selected namespace
+- **WHEN** an ancestor notification accompanies an alias/junction retarget, a selected spelling becoming missing or present, a Windows case-mode change, or an inspection failure
+- **THEN** the existing controlled reconciliation or refusal occurs instead of acknowledging stale policy selection, even if the selected leaf remains absent after an alias retarget
+- **AND** exact selected file/control edits remain observable, alias entries remain distinct from target-directory metadata, and callback ingress performs no filesystem I/O
+- **AND** a directory observed present that disappears or visibly becomes a native link during namespace resolution retains uncertainty instead of acknowledging a raw or replacement target scope
+
 #### Scenario: Full fallback changes only document outcomes
 - **WHEN** a source or document watch batch exceeds incremental bounds, or another full-refresh caller has no captured document check, and source nodes remain unchanged while an excluded target changes its unresolved reason
 - **THEN** full reconciliation publishes the current document outcome instead of discarding it as a source-only no-op, reuses unchanged parses and preserves project identity and approved purposes

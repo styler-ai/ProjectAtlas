@@ -21,11 +21,96 @@ const MAX_POLICY_WATCH_ATTEMPTS: usize = 3;
 /// Git's directory whose children change the registered worktree inventory.
 const REGISTRATIONS_DIRECTORY: &str = "worktrees";
 
+#[cfg(test)]
+thread_local! {
+    /// Namespace resolver work performed by this test thread, independent of wall-clock noise.
+    static POLICY_BINDING_RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Replace one empty fixture directory between metadata and namespace checks.
+    static POLICY_BINDING_TRANSITION: std::cell::RefCell<Option<(PathBuf, Option<PathBuf>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Identify events that can replace a directory registration or its pathname.
+fn event_changes_structure(kind: notify::EventKind) -> bool {
+    matches!(
+        kind,
+        notify::EventKind::Any
+            | notify::EventKind::Other
+            | notify::EventKind::Create(
+                notify::event::CreateKind::Any | notify::event::CreateKind::Folder
+            )
+            | notify::EventKind::Remove(
+                notify::event::RemoveKind::Any | notify::event::RemoveKind::Folder
+            )
+            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+    )
+}
+
+/// Retain explicitly reported access, ownership, and non-timestamp attribute changes.
+fn event_changes_ancestor_policy(kind: notify::EventKind) -> bool {
+    event_changes_structure(kind)
+        || matches!(kind, notify::EventKind::Modify(notify::event::ModifyKind::Metadata(kind))
+            if !matches!(kind, notify::event::MetadataKind::AccessTime | notify::event::MetadataKind::WriteTime))
+}
+
+/// Resolve a selected spelling while keeping absence distinct from inspection failure.
+fn canonical_policy_binding(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    #[cfg(test)]
+    POLICY_BINDING_RESOLUTIONS.set(POLICY_BINDING_RESOLUTIONS.get().saturating_add(1));
+    #[cfg(test)]
+    if let Some((removed, replacement)) = POLICY_BINDING_TRANSITION.with(|slot| {
+        slot.borrow_mut()
+            .take_if(|(pending, _)| pending.as_path() == path)
+    }) {
+        fs::remove_dir(&removed).map_err(|source| CliError::Io {
+            path: removed.clone(),
+            source,
+        })?;
+        if let Some(target) = replacement {
+            tests::create_policy_directory_alias(&target, &removed).map_err(|source| {
+                CliError::InvalidInput(format!("policy transition fixture: {source}"))
+            })?;
+        }
+    }
+    match path.canonicalize() {
+        Ok(canonical) => Ok(Some(canonical)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Resolve an event entry without following a symlink control leaf into its target.
+fn policy_event_namespace(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    let Some(parent) = path.parent() else {
+        return Ok(Some(path.to_path_buf()));
+    };
+    let Some(parent) = canonical_policy_binding(parent)? else {
+        return Ok(None);
+    };
+    let Some(leaf) = path.file_name() else {
+        return Ok(Some(path.to_path_buf()));
+    };
+    #[cfg(windows)]
+    let leaf = crate::project_state::windows_filesystem::entry_name(path)
+        .map_err(|source| CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .unwrap_or_else(|| leaf.to_os_string());
+    Ok(Some(parent.join(leaf)))
+}
+
 /// An immutable selection snapshot, independent of indexed source node identity.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct PolicyWatchInputs {
     /// Selected file/control paths and their native aliases, including absent leaves.
     paths: BTreeSet<PathBuf>,
+    /// Captured native targets of selected inputs and alias controls, including absent targets.
+    bindings: BTreeMap<PathBuf, Option<PathBuf>>,
+    /// Native namespace scopes map to their selected spellings for bounded prefix lookup.
+    binding_scopes: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
     /// Existing external directories watched only for immediate child events.
     directories: BTreeSet<PathBuf>,
     /// Git registration directories whose immediate children affect policy discovery.
@@ -83,22 +168,21 @@ impl PolicyWatchInputs {
                 ));
             }
             self.paths.insert(path.clone());
-            match path.canonicalize() {
-                Ok(canonical) => {
-                    self.paths.insert(canonical.clone());
-                    if canonical.is_dir()
-                        && path
-                            .file_name()
-                            .is_some_and(|name| name == REGISTRATIONS_DIRECTORY)
-                    {
-                        self.registrations.insert(canonical.clone());
-                        if !canonical.starts_with(root) {
-                            self.record_parent(root, canonical, None);
-                        }
+            let binding = canonical_policy_binding(&path)?;
+            self.bindings.insert(path.clone(), binding.clone());
+            if let Some(canonical) = binding {
+                self.record_binding_scope(&path, canonical.clone());
+                self.paths.insert(canonical.clone());
+                if canonical.is_dir()
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name == REGISTRATIONS_DIRECTORY)
+                {
+                    self.registrations.insert(canonical.clone());
+                    if !canonical.starts_with(root) {
+                        self.record_parent(root, canonical, None);
                     }
                 }
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(CliError::Io { path, source }),
             }
             let mut nearest_directory_found = false;
             // Continue above the nearest existing directory: a symlink in an
@@ -107,6 +191,14 @@ impl PolicyWatchInputs {
                 control.check(IndexWorkStage::RepositoryTraversal)?;
                 match fs::symlink_metadata(ancestor) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
+                        // The alias entry itself is a control. Its target directory's
+                        // metadata is not an event on this entry's namespace.
+                        self.paths.insert(ancestor.to_path_buf());
+                        self.bindings
+                            .insert(ancestor.to_path_buf(), canonical_policy_binding(ancestor)?);
+                        if let Some(Some(target)) = self.bindings.get(ancestor) {
+                            self.record_binding_scope(ancestor, target.clone());
+                        }
                         let target = fs::read_link(ancestor).map_err(|source| CliError::Io {
                             path: ancestor.to_path_buf(),
                             source,
@@ -132,8 +224,15 @@ impl PolicyWatchInputs {
                                     source,
                                 })?;
                             if !canonical.starts_with(root) {
-                                self.record_parent(root, canonical, ancestor.file_name());
+                                self.record_parent(root, canonical.clone(), ancestor.file_name());
                             }
+                            let namespace = policy_event_namespace(ancestor)?.ok_or_else(|| CliError::Io {
+                                path: ancestor.to_path_buf(),
+                                source: std::io::Error::new(std::io::ErrorKind::NotFound,
+                                    "external policy control parent disappeared during selection"),
+                            })?;
+                            self.paths.insert(namespace.clone());
+                            self.record_binding_scope(ancestor, namespace);
                         }
                     }
                     Ok(metadata)
@@ -165,7 +264,9 @@ impl PolicyWatchInputs {
                         source,
                     })?;
                     if let Ok(suffix) = path.strip_prefix(ancestor) {
-                        self.paths.insert(canonical.join(suffix));
+                        let namespace = canonical.join(suffix);
+                        self.paths.insert(namespace.clone());
+                        self.record_binding_scope(&path, namespace);
                     }
                     if !canonical.starts_with(root) {
                         let child = path
@@ -180,6 +281,14 @@ impl PolicyWatchInputs {
             }
         }
         Ok(())
+    }
+
+    /// Index a selected spelling beneath its canonical target or native namespace spelling.
+    fn record_binding_scope(&mut self, input: &Path, namespace: PathBuf) {
+        self.binding_scopes
+            .entry(namespace)
+            .or_default()
+            .insert(input.to_path_buf());
     }
 
     /// Record a native namespace while its selected child identity is still explicit.
@@ -270,7 +379,8 @@ impl PolicyWatchInputs {
         }
         event.paths.iter().any(|candidate| {
             self.paths.contains(candidate)
-                || self.paths.iter().any(|input| input.starts_with(candidate))
+                || event_changes_ancestor_policy(event.kind)
+                    && self.paths.iter().any(|input| input.starts_with(candidate))
                 || self
                     .registrations
                     .iter()
@@ -278,15 +388,20 @@ impl PolicyWatchInputs {
                 || {
                     #[cfg(windows)]
                     {
-                        self.paths.iter().any(|input| {
-                            input.ancestors().any(|ancestor| {
-                                super::source_observation::same_native_path(ancestor, candidate)
+                        policy_event_namespace(candidate).is_ok_and(|namespace| {
+                            namespace.is_some_and(|namespace| self.paths.contains(&namespace))
+                        }) || event_changes_ancestor_policy(event.kind)
+                            && self.paths.iter().any(|input| {
+                                input.ancestors().skip(1).any(|ancestor| {
+                                    super::source_observation::same_native_path(ancestor, candidate)
+                                })
                             })
-                        }) || self.registrations.iter().any(|directory| {
-                            candidate.parent().is_some_and(|parent| {
-                                super::source_observation::same_native_path(directory, parent)
+                            || candidate.parent().is_some_and(|parent| {
+                                canonical_policy_binding(parent)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|parent| self.registrations.contains(&parent))
                             })
-                        })
                     }
                     #[cfg(not(windows))]
                     {
@@ -294,6 +409,88 @@ impl PolicyWatchInputs {
                     }
                 }
         })
+    }
+
+    /// Check ordinary ancestor notifications against the captured input namespace in the drain.
+    ///
+    /// Callbacks remain free of filesystem I/O. Windows modification events do not identify
+    /// which metadata flag changed; this proves namespace stability, not flag-level semantics.
+    pub(super) fn ancestor_bindings_changed(
+        &self,
+        event: &Event,
+        control: &IndexWorkControl,
+    ) -> Result<bool, CliError> {
+        if !super::event_kind_affects_index(event.kind) || event_changes_ancestor_policy(event.kind)
+        {
+            return Ok(false);
+        }
+        let mut checked = BTreeSet::new();
+        for candidate in &event.paths {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            let (ordinary_directory, observed_present) = match fs::symlink_metadata(candidate) {
+                Ok(metadata) => (
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    true,
+                ),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => (false, false),
+                Err(source) => {
+                    return Err(CliError::Io {
+                        path: candidate.clone(),
+                        source,
+                    });
+                }
+            };
+            // Resolve each event namespace once, rather than walking every selected
+            // spelling's ancestors through native filesystem comparisons. A link
+            // control must retain its entry identity instead of following its leaf.
+            let scope = if ordinary_directory {
+                let Some(scope) = canonical_policy_binding(candidate)? else {
+                    return Ok(true);
+                };
+                // Do not use a resolved target scope with a stale ordinary-directory
+                // classification when the entry visibly became a reparse control.
+                match fs::symlink_metadata(candidate) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                    Ok(_) => return Ok(true),
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(true);
+                    }
+                    Err(source) => {
+                        return Err(CliError::Io {
+                            path: candidate.clone(),
+                            source,
+                        });
+                    }
+                }
+                scope
+            } else {
+                match policy_event_namespace(candidate)? {
+                    Some(scope) => scope,
+                    None if observed_present => return Ok(true),
+                    None => candidate.clone(),
+                }
+            };
+            for (_, inputs) in self
+                .binding_scopes
+                .range(scope.clone()..)
+                .take_while(|(namespace, _)| namespace.starts_with(&scope))
+            {
+                for input in inputs {
+                    control.check(IndexWorkStage::RepositoryTraversal)?;
+                    if !ordinary_directory {
+                        // A relevant directory became absent, non-directory, or a
+                        // reparse control: the old coverage cannot establish policy.
+                        return Ok(true);
+                    }
+                    if checked.insert(input)
+                        && canonical_policy_binding(input)? != self.bindings[input]
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Establish a stable selected namespace before source sampling starts.
@@ -462,18 +659,7 @@ impl PolicyWatchSelection {
             return false;
         }
         let root_depth = self.root.components().count();
-        let structural = matches!(
-            event.kind,
-            notify::EventKind::Any
-                | notify::EventKind::Other
-                | notify::EventKind::Create(
-                    notify::event::CreateKind::Any | notify::event::CreateKind::Folder
-                )
-                | notify::EventKind::Remove(
-                    notify::event::RemoveKind::Any | notify::event::RemoveKind::Folder
-                )
-                | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-        );
+        let structural = event_changes_structure(event.kind);
         if event.need_rescan()
             || event.paths.is_empty()
             || event.paths.iter().any(|path| {
@@ -485,12 +671,12 @@ impl PolicyWatchSelection {
                 // Native aliases can differ in Windows prefix/case spelling.
                 // A deeper normal child cannot name this root or an ancestor;
                 // its source/runtime classification remains with the drain owner.
-                self.root.starts_with(&path)
-                    || structural && path.components().count() <= root_depth
-                    || structural
-                        && path
+                structural
+                    && (self.root.starts_with(&path)
+                        || path.components().count() <= root_depth
+                        || path
                             .components()
-                            .any(|component| matches!(component, std::path::Component::ParentDir))
+                            .any(|component| matches!(component, std::path::Component::ParentDir)))
             })
         {
             #[cfg(all(test, windows))]
@@ -579,6 +765,369 @@ mod tests {
         }
         inputs.retain_alias_children(&control)?;
         Ok(inputs)
+    }
+
+    #[test]
+    fn ordinary_parent_modifications_preserve_source_and_policy_observation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        let input = settings.join("rules");
+        fs::write(&input, "ignored.rs\n")?;
+        let inputs = Arc::new(selected(&root, std::slice::from_ref(&input))?);
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::clone(&inputs))?;
+        for parent in [&base, &settings] {
+            let event =
+                Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(parent.clone());
+            require(
+                selection.observe(&event),
+                "ancestor notification was dropped at ingress",
+            )?;
+            require(
+                !selection.recursive_rebind_pending(),
+                "ordinary parent modification invalidated recursive source coverage",
+            )?;
+            require(
+                !inputs.affects(&event),
+                "ordinary parent modification changed policy",
+            )?;
+            let (sender, receiver) = std::sync::mpsc::channel();
+            sender.send(Ok(event))?;
+            let changes = super::super::wait_for_index_event_with_continuity(
+                &receiver,
+                &root,
+                Duration::ZERO,
+                &projectatlas_fs::ScanOptions::default(),
+                &AtomicBool::new(false),
+                &inputs,
+                &selection,
+            )?;
+            require(
+                !changes.has_changes(),
+                "CLI drain treated parent metadata as source work",
+            )?;
+        }
+        require(
+            inputs.affects(&Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(input)),
+            "exact selected policy edit was dropped with parent metadata",
+        )?;
+        for kind in [
+            notify::EventKind::Any,
+            notify::EventKind::Other,
+            notify::EventKind::Create(CreateKind::Folder),
+            notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+            notify::EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
+        ] {
+            for path in [&base, &root] {
+                let selection = PolicyWatchSelection::new(root.clone());
+                selection.publish(Arc::clone(&inputs))?;
+                let event = Event::new(kind).add_path(path.clone());
+                require(
+                    selection.observe(&event),
+                    "structural notification was dropped",
+                )?;
+                require(
+                    selection.recursive_rebind_pending(),
+                    "structural coverage loss was ignored",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parent_notifications_recheck_input_bindings_and_preserve_stop_controls()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        let input = settings.join("rules");
+        fs::write(&input, "ignored.rs\n")?;
+        let inputs = selected(&root, std::slice::from_ref(&input))?;
+        let event =
+            Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(settings.clone());
+        let control = super::super::standalone_index_work_control();
+        require(
+            !inputs.ancestor_bindings_changed(&event, &control)?,
+            "stable input binding changed",
+        )?;
+        fs::remove_file(&input)?;
+        require(
+            inputs.ancestor_bindings_changed(&event, &control)?,
+            "disappearing input was hidden",
+        )?;
+        let absent = selected(&root, std::slice::from_ref(&input))?;
+        fs::write(&input, "ignored.rs\n")?;
+        require(
+            absent.ancestor_bindings_changed(&event, &control)?,
+            "appearing input was hidden",
+        )?;
+        let cancelled = super::super::standalone_index_work_control();
+        cancelled.cancel();
+        let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+        for stopped in [cancelled, expired] {
+            require(
+                matches!(
+                    inputs.ancestor_bindings_changed(&event, &stopped),
+                    Err(CliError::IndexWork(_))
+                ),
+                "ancestor binding verification ignored its original work control",
+            )?;
+        }
+        require(
+            inputs.affects(
+                &Event::new(notify::EventKind::Modify(ModifyKind::Metadata(
+                    notify::event::MetadataKind::Permissions,
+                )))
+                .add_path(settings),
+            ),
+            "explicitly reported ancestor permission change was ignored",
+        )
+    }
+
+    #[test]
+    fn metadata_events_resolve_only_related_bindings_once() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        let source = root.join("source.rs");
+        fs::write(&source, "fn source() {}\n")?;
+        // Watch-directory capacity does not bound selected-input cardinality:
+        // a single external directory can contain many absent policy inputs.
+        let paths: Vec<_> = (0..1024)
+            .map(|n| settings.join(format!("rules-{n}")))
+            .collect();
+        let inputs = selected(&root, &paths)?;
+        let control = super::super::standalone_index_work_control();
+        require(
+            inputs.directories.len() == 1,
+            "dense inputs acquired extra watches",
+        )?;
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(source);
+        POLICY_BINDING_RESOLUTIONS.set(0);
+        require(
+            !inputs.affects(&event),
+            "ordinary source edit changed external policy",
+        )?;
+        require(
+            POLICY_BINDING_RESOLUTIONS.get() <= 2,
+            "exact event classification resolved selected policy inputs",
+        )?;
+        POLICY_BINDING_RESOLUTIONS.set(0);
+        require(
+            !inputs.ancestor_bindings_changed(&event, &control)?,
+            "ordinary source edit changed external bindings",
+        )?;
+        require(
+            POLICY_BINDING_RESOLUTIONS.get() <= 1,
+            "unrelated source event resolved selected policy inputs",
+        )?;
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Any))
+            .add_path(settings.clone())
+            .add_path(base)
+            .add_path(settings);
+        POLICY_BINDING_RESOLUTIONS.set(0);
+        require(
+            !inputs.ancestor_bindings_changed(&event, &control)?,
+            "unchanged dense bindings changed policy",
+        )?;
+        require(
+            POLICY_BINDING_RESOLUTIONS.get() == paths.len() as u64 + event.paths.len() as u64,
+            "overlapping directory events repeated selected binding resolution",
+        )?;
+        fs::write(&paths[0], "ignored.rs\n")?;
+        require(
+            inputs.ancestor_bindings_changed(&event, &control)?,
+            "dense binding lookup hid an appearing selected input",
+        )
+    }
+
+    #[test]
+    fn directory_transition_during_namespace_resolution_retains_uncertainty()
+    -> Result<(), Box<dyn Error>> {
+        for retarget in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            #[cfg(windows)]
+            let base = PathBuf::from(projectatlas_core::lossless_native_path_display(&base)?);
+            let root = base.join("repo");
+            let settings = base.join("settings");
+            let intermediate = base.join("intermediate");
+            let target = base.join("replacement");
+            for path in [&root, &settings, &intermediate, &target] {
+                fs::create_dir(path)?;
+            }
+            let inputs = selected(&root, &[settings.join("missing-rules")])?;
+            let candidate = intermediate.join("../settings");
+            // Both selected leaves remain absent. A lexical event spelling and
+            // an inter-call transition expose raw/new-target scope mistakes.
+            POLICY_BINDING_TRANSITION.with(|slot| {
+                *slot.borrow_mut() = Some((candidate.clone(), retarget.then_some(target)));
+            });
+            let event = Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(candidate);
+            require(
+                inputs.ancestor_bindings_changed(
+                    &event,
+                    &super::super::standalone_index_work_control(),
+                )?,
+                "a directory transition was acknowledged through a different namespace scope",
+            )?;
+            require(
+                POLICY_BINDING_TRANSITION.with(|slot| slot.borrow().is_none()),
+                "directory transition did not exercise the inter-call boundary",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(super) fn create_policy_directory_alias(
+        target: &Path,
+        alias: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        std::os::unix::fs::symlink(target, alias)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn create_policy_directory_alias(
+        target: &Path,
+        alias: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(projectatlas_core::lossless_native_path_display(alias)?)
+            .arg(projectatlas_core::lossless_native_path_display(target)?)
+            .output()?;
+        require(
+            output.status.success(),
+            &format!("junction fixture failed: {output:?}"),
+        )
+    }
+
+    #[test]
+    fn directory_alias_entries_remain_distinct_from_target_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let aliases = base.join("aliases");
+        let first = base.join("first");
+        let second = base.join("second");
+        for path in [&root, &aliases, &first, &second] {
+            fs::create_dir(path)?;
+        }
+        let alias = aliases.join("selected");
+        create_policy_directory_alias(&first, &alias)?;
+        require(
+            fs::symlink_metadata(&alias)?.file_type().is_symlink(),
+            "alias is not a native name-surrogate link",
+        )?;
+        let input = alias.join("missing-rules");
+        let inputs = selected(&root, std::slice::from_ref(&input))?;
+        let control = super::super::standalone_index_work_control();
+        let modify = |path: &Path| {
+            Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(path.to_path_buf())
+        };
+        require(
+            inputs.affects(&modify(&alias)),
+            "alias modification lost exact control admission",
+        )?;
+        require(
+            !inputs.affects(&modify(&first))
+                && !inputs.ancestor_bindings_changed(&modify(&first), &control)?,
+            "target directory metadata impersonated a modification to the alias entry",
+        )?;
+        #[cfg(windows)]
+        require(
+            inputs.affects(&modify(&alias.with_file_name("SELECTED"))),
+            "native case alias of a control entry was lost",
+        )?;
+        #[cfg(unix)]
+        fs::remove_file(&alias)?;
+        #[cfg(windows)]
+        fs::remove_dir(&alias)?;
+        create_policy_directory_alias(&second, &alias)?;
+        require(
+            inputs.affects(&modify(&alias)),
+            "retargeted alias control was ignored",
+        )?;
+        require(
+            inputs.ancestor_bindings_changed(&modify(&aliases), &control)?,
+            "alias retarget between absent leaves was hidden by an ancestor notification",
+        )?;
+        require(
+            selected(&root, &[input])?.directories == BTreeSet::from([aliases, second]),
+            "retargeted alias did not select the new native coverage",
+        )?;
+        let prospective = base.join("prospective");
+        fs::create_dir(&prospective)?;
+        let prospective_input = prospective.join("missing-rules");
+        let before = selected(&root, &[prospective_input])?;
+        fs::remove_dir(&prospective)?;
+        create_policy_directory_alias(&first, &prospective)?;
+        require(
+            before.ancestor_bindings_changed(&modify(&prospective), &control)?,
+            "a newly installed ancestor link was discarded as ordinary metadata",
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ancestor_case_mode_changes_revalidate_selected_input_spelling() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        require(
+            !crate::project_state::windows_filesystem::case_sensitive(&settings)?,
+            "case-mode fixture did not start insensitive",
+        )?;
+        fs::write(settings.join("Rules"), "ignored.rs\n")?;
+        let input = settings.join("rules");
+        require(
+            fs::read_to_string(&input)? == "ignored.rs\n",
+            "case alias fixture was not readable",
+        )?;
+        let inputs = selected(&root, std::slice::from_ref(&input))?;
+        let enabled = std::process::Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(projectatlas_core::lossless_native_path_display(&settings)?)
+            .arg("enable")
+            .status()?;
+        require(
+            enabled.success(),
+            "required native directory case-mode transition failed",
+        )?;
+        require(
+            crate::project_state::windows_filesystem::case_sensitive(&settings)?,
+            "case sensitivity was not enabled",
+        )?;
+        require(
+            !input.try_exists()?,
+            "selected case alias remained available unexpectedly",
+        )?;
+        require(
+            inputs.ancestor_bindings_changed(
+                &Event::new(notify::EventKind::Modify(ModifyKind::Any)).add_path(settings),
+                &super::super::standalone_index_work_control(),
+            )?,
+            "an ordinary parent hid the selected spelling becoming unavailable",
+        )
     }
 
     #[test]

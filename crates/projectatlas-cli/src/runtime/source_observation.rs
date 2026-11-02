@@ -733,7 +733,10 @@ impl SourceObservationEntry {
                             policy,
                         );
                         let mut event_changes = self.preserve_consumed_event(classified)?;
-                        event_changes.requires_full_scan |= inputs.affects(&filtered);
+                        event_changes.requires_full_scan |= inputs.affects(&filtered)
+                            || self.preserve_consumed_event(
+                                inputs.ancestor_bindings_changed(&filtered, control),
+                            )?;
                         #[cfg(all(test, windows))]
                         if event_changes.has_changes() {
                             eprintln!(
@@ -854,7 +857,7 @@ fn filtered_observer_event(binding: &SourceBinding, event: &Event) -> Option<Eve
     let metadata_directory = binding.root.join(".projectatlas");
     filtered.paths.retain(|path| {
         let candidate = super::absolute_watch_path(&binding.root, path);
-        !same_runtime_namespace_entry(&candidate, &metadata_directory)
+        !same_native_namespace_entry(&candidate, &metadata_directory)
             && !is_database_runtime_path(&candidate, binding, event.kind)
     });
     if filtered.paths.is_empty() && !event.need_rescan() {
@@ -886,13 +889,13 @@ fn is_database_runtime_path(candidate: &Path, binding: &SourceBinding, kind: Eve
             .filter(|target| *target != binding.database.as_path()),
     ];
     for database in namespaces.into_iter().flatten() {
-        let main = same_runtime_namespace_entry(candidate, database);
+        let main = same_native_namespace_entry(candidate, database);
         let runtime = main
             || ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
                 let mut sidecar = database.as_os_str().to_os_string();
                 sidecar.push(suffix);
                 let sidecar = Path::new(&sidecar);
-                same_runtime_namespace_entry(candidate, sidecar) || {
+                same_native_namespace_entry(candidate, sidecar) || {
                     #[cfg(windows)]
                     {
                         missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
@@ -924,8 +927,8 @@ fn is_database_runtime_path(candidate: &Path, binding: &SourceBinding, kind: Eve
     false
 }
 
-/// Match a known runtime namespace without following a distinct source leaf.
-fn same_runtime_namespace_entry(candidate: &Path, known: &Path) -> bool {
+/// Compare a native namespace entry without equating a distinct link with its target.
+pub(super) fn same_native_namespace_entry(candidate: &Path, known: &Path) -> bool {
     let (Some(parent), Some(known_parent), Some(leaf), Some(known_leaf)) = (
         candidate.parent(),
         known.parent(),
@@ -1002,7 +1005,7 @@ fn missing_windows_sidecar_matches(
     // An unresolved candidate whose base spelling is already exact has no
     // native evidence that the missing suffix belongs to a case-insensitive
     // namespace; leave that event observable instead of guessing.
-    if base == database || !same_runtime_namespace_entry(&base, database) {
+    if base == database || !same_native_namespace_entry(&base, database) {
         return false;
     }
     let exact_suffix = leaf_units[leaf_units.len() - suffix_units.len()..] == suffix_units;
@@ -2945,6 +2948,74 @@ mod tests {
             "stale handoff changed the winner",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn ordinary_parent_notifications_preserve_the_verified_source_epoch()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let first = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let mut callback = selected_watcher_callback(
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let parent = entry
+            .binding
+            .root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("fixture root has no parent"))?;
+        callback(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(parent.to_path_buf())
+        ));
+        require(
+            !entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "ordinary ancestor modification invalidated the source epoch",
+        )?;
+        let warm = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        require(
+            warm.work.exact_verifications == 0,
+            "parent metadata repeated exact verification",
+        )?;
+        require(
+            warm.stamp == first.stamp,
+            "parent metadata replaced the verified epoch",
+        )?;
+        callback(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(entry.binding.root.clone())
+        ));
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )? && entry.policy_selection.recursive_rebind_pending(),
+            "a notification on the selected root lost full-verification handling",
+        )
     }
 
     #[test]

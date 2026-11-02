@@ -469,6 +469,17 @@ jobs:
             cargo check -p projectatlas-cli "${target_args[@]}" --all-features --locked
           fi
 
+      - name: Native source-policy unit regressions
+        if: contains(matrix.contracts, 'compile')
+        # Full mode can require a cold unit-test build at this earlier boundary.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-fs --lib --all-features
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
+
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
         # Includes cold compilation of the symbol, CLI, and navigation test targets.
@@ -1208,9 +1219,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p projectatlas-fs --lib --all-features
-          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
-          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
           cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation observed_mcp_reconciles_document_only_target_changes -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture

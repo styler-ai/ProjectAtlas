@@ -8297,7 +8297,8 @@ fn wait_for_index_event_with_continuity(
         } else {
             WatchChangeSet::default()
         };
-        changes.requires_full_scan |= policy_inputs.affects(event);
+        changes.requires_full_scan |= policy_inputs.affects(event)
+            || policy_inputs.ancestor_bindings_changed(event, &control)?;
         Ok::<_, CliError>(changes)
     };
     let mut changes = classify(&first)?;
@@ -8767,6 +8768,7 @@ fn staged_full_refresh_is_unchanged(
     {
         return Ok(false);
     }
+    drop(current);
     // Equal source nodes do not prove equal document policy. A missing capture,
     // or a prior unchanged capture, cannot authorize a no-op after full staging.
     let (document_projection_changed, _) =

@@ -192,6 +192,70 @@ compatibility alongside observer startup cleanup. Synthetic Windows events that
 model notify must use the exact registered root; temporary-directory DOS short
 aliases are a separate input spelling, not the backend's event producer.
 
+Windows native traces show repeated `Modify(Any)` notifications on the containing
+Temp directory, not source edits: all 77 recursive-rebind traces at public
+68cb2fd named that strict ancestor. Namespace spelling alone must not turn an
+ordinary ancestor modification into lost recursive coverage. Keep these events
+queued, but set callback rebind markers only for structural uncertainty, empty
+events, errors or rescan. Source-root notifications still reach full verification
+through the normal drain. Both continuous CLI and observed MCP drains use the
+same selected-input classification.
+
+Exact selected files and alias controls retain all relevant event kinds. Record
+symlink/junction ancestors as control entries as well as resolving their selected
+leaves. Exact Windows matching compares parent identity and native entry name,
+without following the control leaf into its target directory; structural proper
+ancestor matching retains the existing native-path comparison. Do not confuse a
+target directory's metadata with a modification to its alias entry.
+
+Retain each admitted input/control's already-resolved canonical target or absence
+in the immutable watch selection. For nonstructural ancestor events, the drain
+checks only affected bindings under its original work control, with checkpoints
+between candidates and affected entries. Index canonical target and entry scopes
+at selection time; resolve each event namespace once and use ordered prefix
+lookup to find related selected spellings. Deduplicate binding checks across
+overlapping event paths. Ordinary source-file events perform constant native
+namespace work, independent of selected-input count and path depth; a directory
+event performs at most one resolution per affected binding plus one per event
+path. This is proportional to actual affected selection, not the 256-directory
+watch limit: the resource regression includes 1,024 absent inputs sharing one
+external directory. Windows exact entry matching also normalizes the candidate
+once rather than resolving every selected entry. Suppress the event only when the
+ancestor is still an ordinary directory and those namespace outcomes are
+unchanged. A new link/reparse point, non-directory, missing ancestor, changed
+binding or inspection failure retains uncertainty. Only `NotFound` means absence;
+other resolution failures propagate. If a directory observed present disappears
+during resolution, or its subsequent no-follow metadata shows a link or another
+entry kind, retain uncertainty instead of looking up a raw or replaced target
+scope. Likewise preserve disagreement when a present entry loses its containing
+parent. A deterministic real-filesystem inter-call transition test covers removal
+and native symlink/junction replacement through a lexical event spelling. This
+is not a filesystem-snapshot guarantee. This preserves alias retargets even when
+leaves remain absent, and Windows case-mode changes that invalidate a selected
+spelling. Callbacks do no filesystem I/O. No file-object identity, content hash,
+new watcher or durable state is introduced; space/work scales with selected
+policy paths within the existing coverage and cooperative bounds.
+
+This is a namespace check, not proof of which metadata flag changed:
+[notify 8.2's Windows backend](https://docs.rs/notify/8.2.0/src/notify/windows.rs.html)
+collapses native modified actions into `Modify(Any)`, including security events.
+Retain explicitly typed access/ownership/unknown metadata notifications and the
+existing source/policy witnesses, read failures and rescan behavior. Do not claim
+flag-level discrimination, a filesystem snapshot or universal race immunity.
+[Rust 1.98's native filesystem implementation](https://github.com/rust-lang/rust/blob/1.98.0/library/std/src/sys/fs/windows.rs)
+recognizes name-surrogate reparse points and reads mount-point targets; use those
+standard APIs for junction controls. Windows permits
+[per-directory case changes](https://devblogs.microsoft.com/commandline/per-directory-case-sensitivity-and-wsl/)
+and [reparse-point updates on empty directories](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165),
+so ordinary-directory type alone cannot prove selected bindings stayed valid.
+
+Run the same filesystem/policy/observer unit commands immediately after native
+target compilation to surface owning failures before installed-host/installer
+work. The early unit step permits a ten-minute cold test build; product indexing
+budgets are unchanged. Keep all three real CLI/MCP external-policy/document/root
+replacement E2Es in their existing five-minute late step and retain every other
+platform, feature flag and required gate.
+
 Policy-only proof includes absent-document classification with an unchanged source inventory: no source-node delta is not evidence that document admission/reasons are unchanged. Reproduce any mismatch through real CLI/MCP before choosing a repair, then reuse the existing bounded reconciliation/projection owner rather than hashing every external edit into an unconditional all-source reparse. Preserve last-valid state on failed observation/reconciliation.
 
 Full-refresh no-op admission must retain the distinction between a captured
