@@ -377,3 +377,46 @@ N/A: Existing filesystem selection and runtime publication owners remain authori
 ## Open Questions
 
 None.
+
+
+### Fresh bounded document-prefix admission
+
+The separate security review found that cold paged document verification still
+canonicalized every component of every missing target. The hierarchical matcher
+quota did not charge those calls or the nearest-ancestor fallback. A bounded
+512-link/64-directory CLI fixture reproduces a 2.600s cold summary; syscall
+tracing records 1,300,153 readlink calls, because each canonicalization walks its
+whole prefix. This is a shared admission mechanism, including cached projection,
+uncached verification and fresh staged-publication checks.
+
+Keep prefix admission fresh for each distinct target. Canonicalize the selected
+root and compare it with the captured canonical root, then inspect normal path
+components with no-follow metadata. Canonicalize symlink components and every
+Windows reparse component immediately, refusing the first escape even if a later
+component could reenter. Stop on the first missing prefix; preserve unsupported
+and permission uncertainty. The missing-ancestor fallback uses the same fresh,
+controlled walk. There is no cross-target allow-cache or new snapshot guarantee.
+
+Charge each target-specific metadata and canonicalization call before execution
+under the original control, cumulatively across every target and SQL page owned
+by one DocumentResolutionIndex. The default four-million-probe allowance admits
+one million flat missing targets at four probes per target; deeper targets spend
+the same allowance on their extra component checks. A native probe is an
+accounting unit, not a constant-time syscall or latency promise. Root capture
+and policy discovery remain separately bounded setup; the existing matcher owns
+its context and input-byte quotas. Staging and fresh publication revalidation
+create separate indexes under the same operation cancellation/deadline.
+
+Quota exhaustion retains existing VerificationIncomplete/PolicyUnavailable wire
+shapes and a CLI-private, non-serialized typed work-owner marker. Both policy
+quota and document-prefix quota are terminal for automatic incremental/observed
+MCP fallback; neither can restart a fresh allowance. Failure preserves identity,
+approved purposes and last-valid publication. No public core/filesystem error
+enum, SQL/schema, graph identity, CLI command or MCP tool changes.
+
+Causal coverage distinguishes expensive canonicalization counts from total native
+probe accounting, and covers cumulative refusal across pages, retry prevention,
+fresh alias/root retargets, outside-then-reentry, in-root aliases, missing and
+regular suffixes, cancellation and native Windows junction/reparse behavior.
+The existing no-hostile-replacement-race limitation remains; it does not justify
+caching a positive admission across targets before a later policy read.

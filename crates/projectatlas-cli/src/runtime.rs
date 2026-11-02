@@ -436,12 +436,21 @@ pub(crate) struct IndexRefreshRequired {
     pub(crate) sample_paths: Vec<String>,
 }
 
+/// Internal exhausted work owner; automatic fallback must not restart its allowance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VerificationWorkLimit {
+    /// Native hierarchical ignore contexts or policy input bytes.
+    Policy(projectatlas_fs::PolicyMatchResource),
+    /// Native document-prefix metadata and canonicalization probes.
+    DocumentPrefixes,
+}
+
 /// Bounded typed report returned when source verification is incomplete.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexVerificationIncomplete {
-    /// A policy pass exhausted work; automatic refresh must not restart its quota.
+    /// A policy/admission pass exhausted work; fallback must not restart its quota.
     #[serde(skip)]
-    pub(crate) policy_work_limit: Option<projectatlas_fs::PolicyMatchResource>,
+    pub(crate) policy_work_limit: Option<VerificationWorkLimit>,
     /// Selected project root whose current source could not be verified.
     pub(crate) project_root: Option<String>,
     /// Registered alias when one selected this project.

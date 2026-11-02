@@ -1006,9 +1006,11 @@ mod tests {
         alias: &Path,
     ) -> Result<(), Box<dyn Error>> {
         let output = std::process::Command::new("cmd.exe")
-            .args(["/C", "mklink", "/J"])
-            .arg(projectatlas_core::lossless_native_path_display(alias)?)
-            .arg(projectatlas_core::lossless_native_path_display(target)?)
+            .args(["/D", "/C", "mklink", "/J"])
+            // Display paths use '/', which mklink parses as switches rather than
+            // native separators. Preserve the fixture's spelling using Win32 '\\'.
+            .arg(projectatlas_core::lossless_native_path_display(alias)?.replace('/', "\\"))
+            .arg(projectatlas_core::lossless_native_path_display(target)?.replace('/', "\\"))
             .output()?;
         require(
             output.status.success(),
@@ -1104,6 +1106,10 @@ mod tests {
             "case alias fixture was not readable",
         )?;
         let inputs = selected(&root, std::slice::from_ref(&input))?;
+        // Windows requires an empty directory for a case-mode transition.
+        // Restore the same stored name and bytes after changing the directory,
+        // so only the selected alias spelling becomes unavailable.
+        fs::remove_file(settings.join("Rules"))?;
         let enabled = std::process::Command::new("fsutil")
             .args(["file", "SetCaseSensitiveInfo"])
             .arg(projectatlas_core::lossless_native_path_display(&settings)?)
@@ -1116,6 +1122,11 @@ mod tests {
         require(
             crate::project_state::windows_filesystem::case_sensitive(&settings)?,
             "case sensitivity was not enabled",
+        )?;
+        fs::write(settings.join("Rules"), "ignored.rs\n")?;
+        require(
+            fs::read_to_string(settings.join("Rules"))? == "ignored.rs\n",
+            "case-mode transition lost the exact stored policy name",
         )?;
         require(
             !input.try_exists()?,

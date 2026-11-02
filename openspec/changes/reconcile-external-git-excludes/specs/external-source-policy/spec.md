@@ -165,3 +165,10 @@ The existing derivation fingerprint and atomic publication owner SHALL repair bo
 #### Scenario: Exact MCP root and read-only boundary
 - **WHEN** CLI/MCP navigation selects another root, lacks initialized state or only queries a stale index
 - **THEN** exact root/database isolation and existing typed recovery apply without implicitly mutating, initializing or substituting a sibling database
+
+
+#### Scenario: Document prefix work stays fresh and bounded
+- **WHEN** many persisted missing links share deep existing prefixes or a target has a long missing suffix
+- **THEN** fresh per-target component admission avoids canonicalizing ordinary components repeatedly, checks redirecting components before target-specific policy reads, and charges all native metadata/canonical probes cumulatively across pages and fallback walks under the original control
+- **AND** in-root/root aliases remain usable while retargets, Windows reparse escapes and outside-then-reentry paths retain refusal without a cross-target positive admission cache
+- **AND** exhaustion returns existing typed incomplete-verification guidance without restarting its allowance through incremental or observed MCP fallback, preserving last-valid publication and authored state

@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 514,592 bytes (0.74%) to the optimized
+The derivation-25 policy repair adds 505,576 bytes (0.73%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -80,11 +80,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 308.8 → 311.8 | 48.5 → 50.3 | 32,440 → 30,508 | 21,404 → 20,800 |
-| Large config | 308.0 → 317.1 | 49.2 → 54.6 | 32,192 → 33,368 | 21,808 → 23,812 |
-| 10,000 rules | 384.7 → 392.5 | 71.4 → 98.9 | 44,464 → 42,064 | 32,316 → 33,028 |
+| Ordinary | 308.9 → 306.8 | 48.3 → 49.7 | 32,492 → 29,408 | 21,752 → 19,272 |
+| Large config | 306.4 → 317.7 | 48.5 → 54.3 | 32,756 → 32,468 | 21,528 → 22,104 |
+| 10,000 rules | 381.1 → 392.0 | 70.9 → 98.4 | 44,452 → 41,232 | 33,676 → 32,088 |
 
-The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
@@ -101,9 +101,9 @@ predecessor is PR head 634cf78, not accepted main. Every read succeeds and leave
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the current repair median is 0.06858
-seconds, about 63.8 times faster in this fixture. Initialization is
-10.21149 to 0.34458 seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06849
+seconds, about 63.9 times faster in this fixture. Initialization is
+10.21149 to 0.27392 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
 The unisolated desktop host and separately measured predecessor/candidate groups
 limit causal timing precision. The predecessor samples retain their verified
@@ -122,6 +122,45 @@ deadline. A failed pass requires a fresh matcher. Quota exhaustion preserves
 existing typed PolicyUnavailable guidance and cannot restart a full refresh
 through incremental or observed-MCP fallback. Trusted global rules remain
 compiled once at policy discovery; external edits require fresh discovery.
+
+## Native document-prefix admission
+
+A second fixture uses four Markdown files with 512 distinct missing links beneath
+64 existing ordinary directory components. The preceding optimized artifact
+repeated full canonicalization for every component. The repair checks the selected
+root freshly, inspects each component without following its leaf, and
+canonicalizes symlink/reparse components immediately. It refuses the first escape,
+including outside-then-reentry paths. There is no cross-target allow-cache.
+
+| Operation | Preceding artifact → current repair |
+| --- | ---: |
+| Initialization | 5.320 → 0.735 s |
+| Cold CLI summary | 2.600 → 0.322 s |
+| Selected filesystem syscalls in separate tracing | 1,302,683 → 73,883 |
+| readlink calls within that subset | 1,300,153 → 5,305 |
+
+These are one quiet initialization/read sample per exact binary on distinct,
+identical-input roots, with warm filesystem caches. Both retain all 512 missing
+relations and leave publication unchanged. Separate `strace -f -c` runs count only
+`readlink`, `readlinkat`, `newfstatat`, `statx` and `openat`; their instrumented
+timings are not compared with the quiet timings. This is affected-work evidence,
+not a general speedup or persistent-MCP latency claim. Exact identities and sample
+data are in the compact result.
+
+The owning 128-target/32-component regression fails before the repair with 4,352
+canonicalizations and passes afterward with at most 384. A separate counter
+checks metadata plus canonical operations against the actual ledger (at most
+8,704 in that test). Replacing an expensive canonicalization with cheap metadata
+can increase the count of high-level operations while reducing kernel work.
+
+One resolution/verification index admits at most 4,000,000 target-specific native
+prefix/leaf/ancestor metadata and canonical probes, charged before execution.
+The quota spans SQL pages, cache hits retain cancellation and terminal-refusal
+checks, and a failed pass cannot restart through automatic refresh. A flat missing
+target uses four probes; deeper targets spend the same allowance on extra checks.
+A probe is an accounting unit, not a constant-time syscall. Fixed root capture and
+native ignore-engine work retain their separate existing controls. No graph
+schema, public filesystem/core error enum, command or MCP wire field changes.
 
 ## Dependency and boundary review
 

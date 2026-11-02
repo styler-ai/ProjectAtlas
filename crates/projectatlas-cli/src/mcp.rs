@@ -17556,31 +17556,36 @@ mod tests {
                     .to_owned(),
             }))
         };
-        let quota = incomplete(Some(
-            projectatlas_fs::PolicyMatchResource::DirectoryContexts,
-        ));
-        let encoded: serde_json::Value =
-            toon_format::decode_default(&ProjectAtlasMcpServer::encode_error_payload(&quota))?;
-        require(
-            encoded
-                .pointer("/error/verification_incomplete/reason")
-                .and_then(serde_json::Value::as_str)
-                == Some("policy_unavailable")
-                && encoded
-                    .pointer("/error/verification_incomplete/policy_work_limit")
-                    .is_none(),
-            "policy quota changed the wire contract",
-        )?;
-        require(
-            matches!(ProjectAtlasMcpServer::run_watch_after_observation(
+        for resource in [
+            crate::runtime::VerificationWorkLimit::Policy(
+                projectatlas_fs::PolicyMatchResource::DirectoryContexts,
+            ),
+            crate::runtime::VerificationWorkLimit::DocumentPrefixes,
+        ] {
+            let quota = incomplete(Some(resource));
+            let encoded: serde_json::Value =
+                toon_format::decode_default(&ProjectAtlasMcpServer::encode_error_payload(&quota))?;
+            require(
+                encoded
+                    .pointer("/error/verification_incomplete/reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("policy_unavailable")
+                    && encoded
+                        .pointer("/error/verification_incomplete/policy_work_limit")
+                        .is_none(),
+                "policy quota changed the wire contract",
+            )?;
+            require(
+                matches!(ProjectAtlasMcpServer::run_watch_after_observation(
             &state, &state, &plan, &options, &control, Some(Err(quota)),
         ), Err(CliError::VerificationIncomplete(report)) if report.policy_work_limit.is_some()),
-            "observed watch restarted exhausted policy work",
-        )?;
-        require(
-            writer.index_publication()? == before,
-            "quota refusal published pending source changes",
-        )?;
+                "observed watch restarted exhausted policy work",
+            )?;
+            require(
+                writer.index_publication()? == before,
+                "quota refusal published pending source changes",
+            )?;
+        }
         ProjectAtlasMcpServer::run_watch_after_observation(
             &state,
             &state,

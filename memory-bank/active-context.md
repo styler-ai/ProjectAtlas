@@ -5,65 +5,103 @@
 Finish/normal-merge/native-close ONE issue at a time: #739 → #738 → #708,
 then #715 RC acceptance/publication and independently verify downloaded/installed
 v0.5.1-rc1, non-draft prerelease Latest=false. Stable0.5.0 stays Latest. Stable
-publication and milestone closure require later instruction; #715 remains open
-through stable verification. Goal ACTIVE. No force/admin/noverify/selfapproval
-or database reset. Primary implements; independent Luna Max reviewers read only.
+publication and milestone closure require later instruction; #715 stays open
+through separately authorized stable verification. Goal ACTIVE. No force/admin/
+noverify/selfapproval or DB reset. Primary implements; Luna Max reviewers read only.
 
-Selected checkout .worktrees/issue-739, branch fix/external-excludes-739, PR745
-OPEN/unmerged, base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs #739.
-Live GitHub reverified2026-11-02: #731/PR737 and #741/PR743 merged/CLOSED;
-#739/#738/#708/#715 OPEN. Public head68cb2fd3e7d68c36a1e41414241098dc4ef71a32;
-source repair committed ase20f7b5391bdd83669a16f63e5463ad2b372035e.
-Subsequent cost/continuity changes do not change the140build inputs.
-Only task1.1 checked;2.1/2.2/3.1 and five acceptance rows remain unchecked.
+Selected .worktrees/issue-739, fix/external-excludes-739, PR745OPEN/unmerged,
+base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs739. Publicheadb703f544167e452310f36ea2870c433193b78906.
+This source/continuity checkpoint is being committed as its follow-up; use Git HEAD
+for exact localcommit. Only1.1 checked;2.1/2.2/3.1 and all5acceptance rows unchecked.
+#731/PR737 and #741/PR743 merged/CLOSED; #739/#738/#708/#715 OPEN, RC1unpublished.
 
-## Current repair and verified results
+## Current follow-up: prefix-probe security fix and native fixtures
 
-Public68cb source run41395102219 is TERMINAL: Linux, macOS Intel, macOS ARM,
-Rust, repository and Windowsdiagnostics SUCCESS; Windows125114655655 FAILED,
-verify FAILED. Do not poll/restart as live. All77 recursive-rebind traces name
-Modify(Any) on strict containing Temp directory;42 drain refusals had rebind=true
-and continuity_lost=false. Full trace /tmp/projectatlas-739-68cb-windows-ci-clean.log.
-Root cause: callbacks unconditionally marked source-root ancestors for rebind;
-policy matching likewise treated ordinary ancestor modifications as policy edits.
+New Securitybot4440644526 onb703 identified repeated target_prefix_refusal
+canonicalization outside matcher quotas. Cold CLI/MCP paged freshness, cached
+projection and staged/final document verification share this DocumentResolutionIndex
+owner. missing_or_escaping_ancestor had the same uncontrolled probe mechanism.
+Primary used fix-finding workflow: real optimized beforefixture512missinglinks/
+64existingdirs init5.320s/coldsummary2.600s, unchangedpublication. Separate strace
+subset(readlink/readlinkat/newfstatat/statx/openat):1,302,683calls,1,300,153readlink.
+Causal owning32dirs/128targets test BEFOREFAIL4352canonicalizations; AFTERPASS
+<=384canonicalizations and <=8704metadata+canonicalprobes, independent native
+counter equals ledger. High-level probe count is not a constant-time syscall.
 
-Current source preserves structural/rescan/error/root uncertainty, queues ordinary
-ancestor events without callback I/O, then revalidates captured selected namespace
-bindings in CLI/MCP drains under original control. Explicit non-timestamp metadata
-remains conservative. Windows notify collapses modification flags: namespace
-stability is not proof of which flag changed. Retain symlink/junction controls
-including absent leaves; target-directory metadata is distinct from alias-entry
-metadata. Native-entry and canonical-target scope indexes select related bindings;
-resolve each candidate once and each related binding once across overlapping event
-paths. Ordinary source-file namespace work is independent of input count/depth.
-Directory work scales with related bindings; watch-directory cap does not bound
-input count. Case-mode setup now requires fsutil success, no silent skipped proof.
+Current fix keeps admission FRESH per distinct target: recanonicalize selected
+root against captured canonical_root; lstat normal components, canonicalize each
+symlink and every Windows reparse component immediately, reject first escape
+including outside-then-reentry, stopfirstmissing, retain Unsupported uncertainty.
+No cross-target positive admission cache. Ancestor fallback uses the same fresh
+controlled walk. Scalar per-index ledger4Mprobes charges BEFORE every owned native
+prefix/leaf/ancestor metadata/canonical operation across rows/pages. Cached states
+stillcheckoriginalcontrol and terminalexhaustion. Constructor's control-checked
+rootcapture is fixed separate setup, matcher keeps separate context/byte quotas.
+Flatmissingtarget4probes; deeper targets spend samequota onextra checks.
 
-17 policy tests/43 observer tests PASS; affected all-target/all-feature Clippy,
-strict-strings, fmt, strictOpenSpec, planned and PR IssueOps, affected-ci-proof
-self-test PASS. Dense resource test uses1,024 absent inputs/one external directory,
-constant unrelated event resolution and exact P+eventPaths overlapping-directory
-work, plus appearing-input positive. Initial ancestor regression causally failed
-before fix and passed after (/tmp/projectatlas-739-ancestor-metadata-{before,after}.log).
-New logs /tmp/projectatlas-739-indexed-namespace-{policy,observer,clippy,ci-proof,
-openspec,issueops,pr-issueops,strings}.log. Luna731 APPROVES scope/resource/CI change;
-Luna741 APPROVES correctness and inter-call transition fix after deterministic
-removal/reparse regression. Earlier test gap corrected. Windows
-cross-target check UNAVAILABLE: missing x86_64-w64-mingw32-gcc, not a source pass.
-Fresh hosted Windows proof remains required. Intermediate95475 superseded; final
-build63729 TERMINAL0 after repeated observer/Clippy/strings/OpenSpec PASS.
-Final build38.31s; receipt under /tmp/
-projectatlas-739-indexed-namespace-release-{artifacts.jsonl,build.log,build.time}.
+CLI-private VerificationWorkLimit::Policy(PolicyMatchResource)|DocumentPrefixes
+keeps existing serde-skipped policy_work_limit field. No publicFS/core errorenum,
+CLI/MCP schema, graphidentity, SQL/schema or derivation/semanticcontract change.
+Quota refuses through existing VerificationIncomplete/PolicyUnavailable and cannot
+restart via incremental or observed-MCP full fallback.39documenttests PASS incl
+page-spanning nativequota, cached/uncached stickyrefusal, fresh root/aliasretargets,
+outside-back-inside, positivealiases/missing/regular targets, cancellation and
+last-valid publication/identity/purpose controls. MCP no-retry/wire+normalrecovery
+selector PASS for BOTH marker kinds. Affectedalltarget/allfeatureClippy, strict-
+strings/fmt/strictOpenSpec/scopedIssueOps PASS. Luna731 plan+actualsource APPROVED.
+Logs /tmp/projectatlas-739-prefix-{probes-before,probes-after,document-suite,
+mcp-quota,clippy,strings,issueops}.log. No global/exhaustive security claim.
 
-Local64ce also fixes automated review4439249685: source-equal full-refresh no-op
-must run existing bounded fresh document-policy probe, then recheck publication
-generation. capturedNone/false never prove current policy. No new SQL/schema/source
-scan/graph copy/transaction. drop(current) releases source-comparison ownership
-before document maps. Owning causal test failed expectedMissing/gotIgnored before,
-then passes full/source-overflow/document-overflow, ignored/missing/outside-root,
-identity/purpose, parsed0/no-op, cancellation/deadline; nine related tests passed.
-Current owning test rerun PASS1.43s. Luna731 source/spec approved. Generation fence
-is statically checked; no deterministic inter-page concurrent-publisher test added.
+Windows b703 job125188004554 TERMINALFAILED earlyunits: FS47PASS; policy12PASS/
+3FAIL, observer command not reached. Failures are test-fixture setup: display
+forwardslashes make cmd mklink report Invalid switch Users; fsutil needs an empty
+directory and returned0 despite printing directory-not-empty. Current test-only
+repair uses cmd /D, Win32 backslash args; removes Rules before fsutil, requires
+success+actualnativecaseflag, restores exact Rules/content and asserts lowercase
+selectedalias missing. No skip/waiver. Luna741 approved fixture+analogouscall audit.
+
+MacIntel b703 job125188004525 TERMINALFAILED automatic_state_admission_preserves_
+cli_mcp_navigation under APFSX with generic MCP Timeout35.68s; previous volume
+cohort same selector PASS16.50s. Underlying cause UNRESOLVED, not called flake or
+fixed. Current E2E-only diagnostics print stage/suffix and requestid+tool, preserve
+10s request deadline, distinguishTimeout/UnexpectedEof. On actual Mac timeout,
+sample the still-owned/unreaped MCP PID: assert_cmd5s sampler timeout, structured
+quoted shell positional args, stdout/stderrnull, coreoff, ulimitfile256blocks,
+explicit NamedTempFile report, read<=32768bytes, automaticcleanup, best-effort
+logging preserves primaryerror. Exact capture block typechecked with project
+assert_cmd/tempfile on host; fullmac execution pending. Luna741 reviewed bounds,
+lifecycle, cleanup, context and primaryerror: APPROVED. No timeoutincrease/retry.
+
+## Current immutable artifact and local adapter proof
+
+Final source folder ~/.cache/projectatlas-benchmarks/external-policy-739-prefix-admission-release:
+CLIe89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06,
+69,962,536bytes; FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9.
+140-input manifest243a8385160eb477c1670b8ee595a590b6a5968841cacd836d8c7ebadd24bf4a.
+Built from saved dirty source; receipt preserves that truth. NEXT: bind ALL140
+saved hashes to the new committed tree and clean checkout before normalpush.
+No further source edits without rebuilding/rebinding affected proof.
+
+Fresh measured source manifestbcd077917dd9ae3ff814603f18908c8bbc167a83cb79dfd45648c9dc0187bbea
+at intermediate external-policy-739-fresh-prefix-release has EXACT SAME CLI/helper
+bytes. Only E2E failure-diagnostic source changed between those manifests. Final
+rebuilt byteidentity verified, so reuse these fresh product measurements explicitly.
+FShelper identical to older measured ddc component:18FSsamples reused with old
+manifest/overlap limitation.18freshCLIcost/fourupgrade+rollback PASS at e89;
+ordinaryinit308.87→306.85ms/noop48.29→49.70ms;10krulesnoop70.85→98.41ms. No SLOwaiver.
+Root512/depth64 AFTER init.735s/coldsummary.322s, unchanged512missingrelations/
+publication; tracing73,883calls/5,305readlink (separate traced timings, not compared).
+Originalshallow1024link/2000rule fixture3coldreadsmedian.0684947/init.273917s;
+historical exact-identity predecessor4.37718s retained, not a generalspeed claim.
+
+Optimized e89 realE2Es PASS externalCLI/MCP1.24s, document-onlyMCP2.04s,
+largeclosure/rootreplacement14.42s, automaticstateCLI/MCP Linux2.01s and primary-
+failure/shutdownpreservation. Native Windows/APFSX and combinedrelease proof STILL
+REQUIRED. /tmp/projectatlas-739-fresh-prefix-{cli-cost-proof,upgrade-proof,
+cold-policy-cost,external-e2e,documents-e2e,replacement-e2e,state-e2e,shutdown-e2e}.*;
+/tmp/projectatlas-739-document-prefix-cost-{before,after}.* and prefix-syscalls-*.
+Cost docs bind current CLI+manifest and explicitly distinguish FS reuse and
+E2E-diagnostics-only byte-identity reuse. Final cost/source binding review next.
 
 ## Accepted behavior and related fixes
 
@@ -135,93 +173,54 @@ plan, source/adapter and bounded native cache ownership. Its ignored-cache conce
 was withdrawn after checking final-component call order. No open source finding
 from that review; full exact-head automated/hosted acceptance still required.
 
-## Current optimized artifact and local acceptance
+## Public b703 hosted/security state and next steps
 
-Frozen ~/.cache/projectatlas-benchmarks/external-policy-739-indexed-namespace-release,
-sourcee20f7b5.140buildinputs match committed tree; manifestbc24b111d18db378327751f9d7ab78e932ffcb0098aefc232a92982c691bd8cd.
-CLI1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d,
-69,971,552bytes. FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9
-byte-identical to historical measured helper, so18FSsamples reused explicitly;
-not a claim of36new samples.18freshCLIcost/fourupgrade+rollback casesPASS.
-CLIordinaryinit308.79→311.76ms/noop48.50→50.32ms;10krulesnoop71.39→98.87ms.
-Actual optimized externalCLI/MCP1.29s,document-onlyMCP2.04s,largeclosure/root-
-replacement14.30s PASS. Final logs /tmp/projectatlas-739-indexed-namespace-*
-{cli-cost-proof,upgrade-proof,external-e2e,documents-e2e,replacement-e2e}.
-Cold-currentfixture3newCLIprocesses on one newlyinitialized DB median.0685849s,
-init.344581s;1024persisted missing document relations verified and publication
-unchanged. Earlier exact-identity baseline4.37718s retained (~63.8x fixture only),
-not a generalSLO/speedup claim. CurrentCLI/coldmeasurements had no overlapping
-builds. PriorFSsamples retain documented workspacecheck/rustdoc overlap.
-Cost docs bind currentCLI/source/helper identities; Luna731 APPROVED final
-cost/proof reconciliation, including all three real-adapter logs.
-All local sessions63729/39527/13827 TERMINAL0. No live build/index/push currently.
+b703 normalpush99029 TERMINAL0 at09:10:01Z:1801PASS/34suites/0FAIL/12intentional
+ignores plus normalRust/docs/dependency/repository/Atlas gates. Do not repoll.
+Source41418445583 terminaljobresults: plan/repository/Rust/Linux/Windowsdiagnostics/
+MacARM SUCCESS; MacIntel and Windows FAILED as above; inspect run aggregate if
+needed. Never treat those failures as LIVE or restart merely for observation.
+pr-state41418441850 and41418496481 SUCCESS; metadata41418495571 follows source.
+Code review6562604562 onb703 COMPLETED false/false; separateSecurity COMPLETED
+true/true with originalpolicyresourceP2 and newprefixP2. This does not resolve
+native threads. PRbody last readbackexact still describes b703; rewrite for new
+followup/freshsource before/after nextpush, preserving Refs739 untilaccepted.
 
-## Immutable historical artifacts and next proof
+CodeQL41418440583 all7analyses COMPLETE: Rust2075694918has14, Actions2075580323
+has2, other5zero. Currentraw metadata /tmp/projectatlas-739-b703-analyses.json;
+ActionsSARIF /tmp/projectatlas-739-b703-actions.sarif.json. New Actions row is
+ci.yml472–483 earlyunits; retainedrow1216–1226 lateE2Es. Both claim poisoned
+needs.plan.outputs.head on schedule/dispatch. NOcurrentverdict assigned; trace
+currentplanner/eventhead/cache controls and keep one result per nativeinput.
+Fetch full exactPRref-scoped openalerts+instances and RustSARIF, normalize WHOLE
+collection incl2genuinebotresourceclaims before finalinline/statictriage/render.
+REST only findingintake; explicit ref=refs%2Fpull%2F745%2Fhead is REQUIRED. Do not
+repeat unscoped391defaultmain intake mistake. Prior16input ddc renderedtriage
+/tmp/projectatlas-739-ddc90-complete-triage.json is HISTORICAL, reuse verified
+reportedflow facts only with exactcurrentmapping. Statictriage phase: no agents,
+source edits/builds/tests; leave phase explicitly before dynamicfix work.
 
-Previous ddc90bf artifact ~/.cache/projectatlas-benchmarks/
-external-policy-739-bounded-matcher-release: CLI4307afd4ff50ca401b1c8c50d0d477729ffce6cfa7a98cb70d2b8e799cbc49f9;
-140-input manifestbb9bf24ff9cec0522faf05df21edaa8648772e8138e7a6ef7c3d9d1b0a456d00.
-FShelper544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9.
-All18FS+18CLIcost/fourupgrade cases passed then; optimized externalCLI/MCP,
-document-onlyMCP and largeclosure/source-root replacement passed. Bounded cold
-1,024-link/2,000-rule fixture4.37718→.0707262s (~61.9x) is fixture-only, no general
-speed/SLO claim. Cost docs currently describe this historical packet.
+Now5genuineopen threads expected (refresh live): document-onlyP2 PRRT_kwDOQyFgJ86yfjX1,
+controlledfallbackP2 PRRT_kwDOQyFgJ86ygrn7, policyresourceP2 PRRT_kwDOQyFgJ86ygte3,
+fullnoop4439249685, prefix4440644526. FP414/415 previously dispositioned/replied/
+resolved; do not bulkresolve realfixthreads before complete acceptance. No native
+alertdismissal/suppression. Live739WhatChanges expanded/readbackexact for native
+prefix work; localtasktext unchanged/scopedIssueOps PASS. Allacceptanceunchecked.
 
-Intermediate clean64ce artifact external-policy-739-document-noop-release:
-CLI50c99150c8a2cce53f7bd6be8a1be99faae5b4a9823cb9cc9beaa81a0adbe6c6,
-69,872,736bytes;140-input manifeste561c712e673b12b1db40512458b394b315122ce62a4270207a90b981aa76261.
-FShelper byte-identical to ddc.18freshCLIcost/fourupgrade casesPASS; quiet final
-CLIcost rerun ordinaryinit308.96→309.84ms/noop49.44→48.85ms;10krulesnoop70.26→97.31ms.
-These two historical artifacts are superseded by the current e20source-bound
-artifact above; no equivalence claim for their CLI binaries. Current cost docs
-were updated after new CLIcost/fourupgrade/real-adapter proof. /tmp/projectatlas-739-freeze-document-noop.py and document-noop proof scripts
-are reusable only after adapting immutable output paths and checking assumptions.
+Next: finalcheapgates/source+cost commit/all140Gitbinding, finalcostreview, normal
+cleanpush withhooks, currenthead nativeWindows+APFSX/platform proof, automated
+code+separateSecurityfeedback, wholecurrentsecuritytriage+render, examinedthreads/
+implementation/fiveacceptancesync, normalmerge745/native739CLOSED BEFORE738.
+Goal remains ACTIVE until actual RC1 downloaded/installed independentlyverified.
 
-## Hosted/security feedback still requiring final acceptance
-
-Public68cb CodeQL41395098627 all7SUCCESS: Rust2074629854 has14results,
-Actions2074560814has1, other5zero. Complete facts/fullflows matchddc after exact
-unchanged Git line relocation; /tmp/projectatlas-739-68cb-{rust,actions}-reconciliation.json.
-Correct PR-ref-scoped15native inputs:415/414/413/412/411/410/408/407/406/405/404/
-372/316/237/236, exact68cb instances fetched+validated. Intake needs explicit
-ref=refs%2Fpull%2F745%2Fhead. Earlier unscoped request fetched391defaultmainalerts:
-preserved *unscoped-main* is an intake error, NOT this PR's current collection.
-
-Prior ddc complete16input static triage was rendered through Securityapp:
-/tmp/projectatlas-739-ddc90-complete-triage.json,15native+genuine resourceP2 nowfixed.
-415 aggregate taint does not assign immutable plan.root; native prefix guard
-precedes matcher metadata.414 privatecfgtest DB copy reads owned fixture content;
-other privatecfgtest helpers may intentionally use trusted outside paths. No
-blanket TempDir/root-jail/race claim, suppression or native alert dismissal.
-Reuse verified flow facts with exact current mapping; final current-source full
-static collection assessment/render remains pending. Static triage is INLINE,
-no agents/builds/tests/source edits while in that phase; read skill+SECURITY first.
-Both code and separate Security reviews completed for68cb; code true/true from
-new document-noop finding; security flagsnull. No clean-scan claim.
-
-13threads/9resolved/4genuineOPEN before latest refetch: document-onlyP2
-PRRT_kwDOQyFgJ86yfjX1, controlledfallbackP2 PRRT_kwDOQyFgJ86ygrn7,
-resourceP2 PRRT_kwDOQyFgJ86ygte3, new4439249685 (reply4439288172 readbackexact).
-FP414/415 replies4439040686/4439040822 and threads were readbackexact/resolved.
-Publicsecurity summary6563449602 is historicalddc. Final PRbody/securitysummary,
-feedback reconciliation, task/fiveacceptance synchronization, normal cleanpush,
-exacthead hosted proof and required review/thread closure remain. Do not mark
-Closes739, resolve genuine threads or merge until complete acceptance.
-
-## Parked work and tooling
+## Parked work and tools
 
 #738 parked8814d6d+dirtymemory. #708/PR728 publicc65dfed/local587ecbe+dirtymemory;
-warm1201.127ms FAIL/focused1.031526ms partial, noSLO waiver. Reconcile live/main
-2.3 drift when708 accepted, preserve private progress. Integration .worktrees/v0.5.1
-has three private715 proposal/design/spec edits plus memory; never revert. Later715
-evaluates PR744 outside RC milestone and CodexCIgap. Do not start738 before739
-normally merges and GitHub confirms CLOSED.
-
-Source /tmp/projectatlas-rc1-test-env.sh for cargo/gh (itsPATH removes rg).
-Installedstable050 exactissue739 DB preserved; MCP brief returned policy_drift,
-requested one watch_once task index-7 now TERMINALcomplete. No DB reset. New source
-edits may stale index again; reuse exact current source slices, no stale graphclaims.
-Local sessions56944/83379/48466/67916/61561/61269/95475 are terminal; crosscheck48466 failed only
-missingcompiler. Old normalpush63564 TERMINAL0 at05:37:17Z:1794PASS/34suites/12ignored.
-No repeated poll of terminal jobs. During normalpush hooks do not edit selected
-checkout; update integration memory only. Progressvisible≤60s, no wait>60s.
+warm1201.127ms FAIL/focused1.031526ms partial, noSLO waiver; reconcile live/main
+2.3drift onlywhen708accepted, preserve privateprogress. Integration .worktrees/v0.5.1
+has3private715proposal/design/spec edits plusmemory; never revert. Later715
+evaluatesPR744outsideRCmilestone andCodexCIgap. Source /tmp/projectatlas-rc1-test-env.sh
+forcargo+gh (PATHremovesrg). Exact installedstable050 Atlas DB preserved, most
+recent onepass refresh index-8 TERMINALcomplete; no reset. Source edits can stale
+index, do not claim stalegraphfacts. All local builds/proofs/exec sessions in this
+checkpoint are TERMINAL, no livepush currently; inspect newhandles when launched.

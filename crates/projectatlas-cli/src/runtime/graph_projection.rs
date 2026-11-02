@@ -3961,6 +3961,51 @@ impl ProjectedGraphRows {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Actual canonicalization calls made by document namespace admission on this thread.
+    static DOCUMENT_PREFIX_CANONICALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Metadata plus canonicalization calls, independently checking quota accounting.
+    static DOCUMENT_PREFIX_NATIVE_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Resolve one document namespace prefix, retaining exact native semantics.
+fn canonical_document_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    DOCUMENT_PREFIX_CANONICALIZATIONS
+        .set(DOCUMENT_PREFIX_CANONICALIZATIONS.get().saturating_add(1));
+    #[cfg(test)]
+    DOCUMENT_PREFIX_NATIVE_PROBES.set(DOCUMENT_PREFIX_NATIVE_PROBES.get().saturating_add(1));
+    fs::canonicalize(path)
+}
+
+/// Inspect one document namespace component without following its leaf.
+fn document_prefix_metadata(path: &Path) -> std::io::Result<fs::Metadata> {
+    #[cfg(test)]
+    DOCUMENT_PREFIX_NATIVE_PROBES.set(DOCUMENT_PREFIX_NATIVE_PROBES.get().saturating_add(1));
+    fs::symlink_metadata(path)
+}
+
+/// Bound actual native admission calls across all cached, uncached and paged targets.
+/// Flat missing targets spend four units; deep targets spend the same allowance
+/// on their additional component checks. A probe is not a constant-time syscall.
+const MAX_DOCUMENT_PREFIX_PROBES: u64 = 4_000_000;
+
+/// Identify path components whose native lookup can redirect traversal.
+fn document_prefix_redirects(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 /// Exact staged file inventory plus platform-aware case and root checks.
 struct DocumentResolutionIndex<'a> {
     /// Selected source root used only for bounded filesystem checks.
@@ -3977,6 +4022,10 @@ struct DocumentResolutionIndex<'a> {
     policy_matcher: RefCell<RootScanMatcher<'a>>,
     /// Consulted non-indexed states, memoized for repeated high-fan-out references.
     absent_states: RefCell<BTreeMap<String, DocumentTargetUnresolvedReason>>,
+    /// Cumulative native metadata/canonical calls, never reset between pages or targets.
+    prefix_probes: std::cell::Cell<u64>,
+    /// Per-index native admission allowance; independent of matcher-context limits.
+    prefix_probe_limit: u64,
 }
 
 impl<'a> DocumentResolutionIndex<'a> {
@@ -3987,22 +4036,24 @@ impl<'a> DocumentResolutionIndex<'a> {
         scan_policy: &'a RootScanPolicy,
         control: &'a IndexWorkControl,
     ) -> Result<Self, CliError> {
-        Self::with_policy_limits(
+        Self::with_limits(
             root,
             nodes,
             scan_policy,
             control,
             PolicyMatchLimits::default(),
+            MAX_DOCUMENT_PREFIX_PROBES,
         )
     }
 
-    /// Retain one policy quota across every target in this resolution pass.
-    fn with_policy_limits(
+    /// Retain policy and native admission quotas across every target in this pass.
+    fn with_limits(
         root: &Path,
         nodes: &'a [Node],
         scan_policy: &'a RootScanPolicy,
         control: &'a IndexWorkControl,
         limits: PolicyMatchLimits,
+        prefix_probe_limit: u64,
     ) -> Result<Self, CliError> {
         control.check(IndexWorkStage::SymbolParsing)?;
         let canonical_root = fs::canonicalize(root).map_err(|source| CliError::Io {
@@ -4035,7 +4086,43 @@ impl<'a> DocumentResolutionIndex<'a> {
             casefold_path_counts,
             policy_matcher: RefCell::new(scan_policy.batch_matcher_with_limits(control, limits)),
             absent_states: RefCell::new(BTreeMap::new()),
+            prefix_probes: std::cell::Cell::new(0),
+            prefix_probe_limit,
         })
+    }
+
+    /// Preserve cancellation and terminal probe exhaustion even on path-state cache hits.
+    fn check_prefix_work(&self) -> Result<(), CliError> {
+        self.control.check(IndexWorkStage::SymbolParsing)?;
+        let observed = self.prefix_probes.get();
+        if observed > self.prefix_probe_limit {
+            return Err(CliError::VerificationIncomplete(Box::new(
+                super::IndexVerificationIncomplete {
+                    policy_work_limit: Some(super::VerificationWorkLimit::DocumentPrefixes),
+                    project_root: lossless_project_root_display(&self.root),
+                    worktree: None,
+                    status: IndexReadStatus::VerificationIncomplete,
+                    reason: super::IndexVerificationReason::PolicyUnavailable,
+                    scope: IndexRefreshScope::Full,
+                    message: format!(
+                        "document prefix verification exceeds native probe work: observed {observed}, limit {}",
+                        self.prefix_probe_limit,
+                    ),
+                },
+            )));
+        }
+        Ok(())
+    }
+
+    /// Charge before every document-admission filesystem call, including fallback walks.
+    fn charge_prefix_probe(&self) -> Result<(), CliError> {
+        self.check_prefix_work()?;
+        let observed = self.prefix_probes.get().saturating_add(1);
+        self.prefix_probes.set(observed);
+        if observed > self.prefix_probe_limit {
+            return self.check_prefix_work();
+        }
+        Ok(())
     }
 
     /// Return a closed unresolved reason, or `None` for one exact admitted file.
@@ -4043,6 +4130,7 @@ impl<'a> DocumentResolutionIndex<'a> {
         &self,
         path: &str,
     ) -> Result<Option<DocumentTargetUnresolvedReason>, CliError> {
+        self.check_prefix_work()?;
         let casefold_count = self
             .casefold_path_counts
             .get(&path.to_lowercase())
@@ -4061,7 +4149,7 @@ impl<'a> DocumentResolutionIndex<'a> {
 
     /// Distinguish absent source from excluded or escaping filesystem state.
     fn absent_reason(&self, path: &str) -> Result<DocumentTargetUnresolvedReason, CliError> {
-        self.control.check(IndexWorkStage::SymbolParsing)?;
+        self.check_prefix_work()?;
         if let Some(reason) = self.absent_states.borrow().get(path).copied() {
             return Ok(reason);
         }
@@ -4077,7 +4165,7 @@ impl<'a> DocumentResolutionIndex<'a> {
         &self,
         path: &str,
     ) -> Result<DocumentTargetUnresolvedReason, CliError> {
-        self.control.check(IndexWorkStage::SymbolParsing)?;
+        self.check_prefix_work()?;
         let native = self.root.join(Path::new(path));
         let reason = if let Some(reason) = self.target_prefix_refusal(Path::new(path))? {
             reason
@@ -4087,7 +4175,9 @@ impl<'a> DocumentResolutionIndex<'a> {
             .excludes_path(&native)
             .map_err(|source| {
                 let policy_work_limit = match &source {
-                    PolicyMatchError::Limit { resource, .. } => Some(*resource),
+                    PolicyMatchError::Limit { resource, .. } => {
+                        Some(super::VerificationWorkLimit::Policy(*resource))
+                    }
                     _ => None,
                 };
                 match source {
@@ -4110,19 +4200,23 @@ impl<'a> DocumentResolutionIndex<'a> {
         {
             DocumentTargetUnresolvedReason::Ignored
         } else {
-            match fs::symlink_metadata(&native) {
+            self.charge_prefix_probe()?;
+            match document_prefix_metadata(&native) {
                 Ok(metadata) if metadata.file_type().is_dir() => {
                     DocumentTargetUnresolvedReason::Unsupported
                 }
-                Ok(_metadata) => match fs::canonicalize(&native) {
-                    Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
-                        DocumentTargetUnresolvedReason::OutsideRoot
+                Ok(_metadata) => {
+                    self.charge_prefix_probe()?;
+                    match canonical_document_prefix(&native) {
+                        Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
+                            DocumentTargetUnresolvedReason::OutsideRoot
+                        }
+                        Ok(_canonical) => DocumentTargetUnresolvedReason::Unsupported,
+                        Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
                     }
-                    Ok(_canonical) => DocumentTargetUnresolvedReason::Unsupported,
-                    Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
-                },
+                }
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                    self.missing_or_escaping_ancestor(&native)
+                    self.missing_or_escaping_ancestor(&native)?
                 }
                 Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
             }
@@ -4135,17 +4229,34 @@ impl<'a> DocumentResolutionIndex<'a> {
         &self,
         relative: &Path,
     ) -> Result<Option<DocumentTargetUnresolvedReason>, CliError> {
+        self.check_prefix_work()?;
         if relative
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
             return Ok(Some(DocumentTargetUnresolvedReason::OutsideRoot));
         }
+        self.charge_prefix_probe()?;
+        match canonical_document_prefix(&self.root) {
+            Ok(current) if current == self.canonical_root => {}
+            Ok(_) => return Ok(Some(DocumentTargetUnresolvedReason::OutsideRoot)),
+            Err(_) => return Ok(Some(DocumentTargetUnresolvedReason::Unsupported)),
+        }
         let mut prefix = self.root.clone();
         for component in relative.components() {
-            self.control.check(IndexWorkStage::SymbolParsing)?;
             prefix.push(component.as_os_str());
-            match fs::canonicalize(&prefix) {
+            self.charge_prefix_probe()?;
+            let metadata = match document_prefix_metadata(&prefix) {
+                Ok(metadata) => metadata,
+                // Normal suffixes beneath a missing prefix need no further probes.
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => return Ok(Some(DocumentTargetUnresolvedReason::Unsupported)),
+            };
+            if !document_prefix_redirects(&metadata) {
+                continue;
+            }
+            self.charge_prefix_probe()?;
+            match canonical_document_prefix(&prefix) {
                 Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
                     return Ok(Some(DocumentTargetUnresolvedReason::OutsideRoot));
                 }
@@ -4168,24 +4279,19 @@ impl<'a> DocumentResolutionIndex<'a> {
     }
 
     /// Check the nearest existing ancestor so a missing child cannot hide symlink escape.
-    fn missing_or_escaping_ancestor(&self, native: &Path) -> DocumentTargetUnresolvedReason {
-        let mut ancestor = native.parent();
-        while let Some(path) = ancestor {
-            if !path.starts_with(&self.root) {
-                break;
-            }
-            match fs::canonicalize(path) {
-                Ok(canonical) if !canonical.starts_with(&self.canonical_root) => {
-                    return DocumentTargetUnresolvedReason::OutsideRoot;
-                }
-                Ok(_canonical) => return DocumentTargetUnresolvedReason::Missing,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                    ancestor = path.parent();
-                }
-                Err(_source) => return DocumentTargetUnresolvedReason::Unsupported,
-            }
-        }
-        DocumentTargetUnresolvedReason::Missing
+    fn missing_or_escaping_ancestor(
+        &self,
+        native: &Path,
+    ) -> Result<DocumentTargetUnresolvedReason, CliError> {
+        let Some(relative) = native
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&self.root).ok())
+        else {
+            return Ok(DocumentTargetUnresolvedReason::OutsideRoot);
+        };
+        Ok(self
+            .target_prefix_refusal(relative)?
+            .unwrap_or(DocumentTargetUnresolvedReason::Missing))
     }
 }
 
@@ -4206,6 +4312,7 @@ pub(super) fn nonindexed_document_projection_changed(
         options,
         control,
         PolicyMatchLimits::default(),
+        MAX_DOCUMENT_PREFIX_PROBES,
     )
 }
 
@@ -4217,6 +4324,7 @@ fn nonindexed_document_projection_changed_with_limits(
     options: &projectatlas_fs::ScanOptions,
     control: &IndexWorkControl,
     limits: PolicyMatchLimits,
+    prefix_probe_limit: u64,
 ) -> Result<(bool, u64), CliError> {
     const DOCUMENT_INPUT_PAGE: u32 = 256;
     let mut page =
@@ -4228,8 +4336,14 @@ fn nonindexed_document_projection_changed_with_limits(
     }
     let scan_policy = RootScanPolicy::discover(root, options, control)
         .map_err(|source| super::source_inspection_error(root, source))?;
-    let index =
-        DocumentResolutionIndex::with_policy_limits(root, nodes, &scan_policy, control, limits)?;
+    let index = DocumentResolutionIndex::with_limits(
+        root,
+        nodes,
+        &scan_policy,
+        control,
+        limits,
+        prefix_probe_limit,
+    )?;
     loop {
         for row in &page.rows {
             control.check(IndexWorkStage::RepositoryTraversal)?;
@@ -16961,6 +17075,89 @@ function helper() {}
     }
 
     #[test]
+    fn document_prefix_probes_do_not_recanonicalize_ordinary_components()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let relative: std::path::PathBuf = std::iter::repeat_n("p", 32).collect();
+        fs::create_dir_all(root.join(&relative))?;
+        let control = super::super::standalone_index_work_control();
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(&root, &[], &policy, &control)?;
+        super::DOCUMENT_PREFIX_CANONICALIZATIONS.set(0);
+        super::DOCUMENT_PREFIX_NATIVE_PROBES.set(0);
+        for n in 0..128 {
+            let path = relative.join(format!("missing-{n}.md"));
+            let path = projectatlas_core::lossless_native_path_display(&path)?;
+            require_eq(
+                &index.inspect_absent_reason(&path)?,
+                &DocumentTargetUnresolvedReason::Missing,
+                "deep missing document",
+            )?;
+        }
+        let native = super::DOCUMENT_PREFIX_NATIVE_PROBES.get();
+        require_eq(
+            &native,
+            &index.prefix_probes.get(),
+            "all native admission calls must be charged",
+        )?;
+        require(
+            native <= (2 * 32 + 4) * 128,
+            "native admission grew beyond the component walk",
+        )?;
+        let probes = super::DOCUMENT_PREFIX_CANONICALIZATIONS.get();
+        require(
+            probes <= 3 * 128,
+            &format!("ordinary shared prefixes repeated canonicalization: {probes}"),
+        )
+    }
+
+    #[test]
+    fn document_prefix_admission_rechecks_aliases_and_roots_between_targets()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(root.join("inside"))?;
+        fs::create_dir_all(outside.join(".ignore"))?;
+        let alias = root.join("alias");
+        let selected_root = temp.path().join("selected-root");
+        create_directory_link(&root.join("inside"), &alias)?;
+        create_directory_link(&root.join("inside"), &outside.join("back"))?;
+        create_directory_link(&root, &selected_root)?;
+        let control = super::super::standalone_index_work_control();
+        let policy = RootScanPolicy::discover(&selected_root, &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::new(&selected_root, &[], &policy, &control)?;
+        for path in ["alias/missing-one.md", "absent/deeper/target.md"] {
+            require_eq(
+                &index.inspect_absent_reason(path)?,
+                &DocumentTargetUnresolvedReason::Missing,
+                "legitimate alias or missing suffix",
+            )?;
+        }
+        #[cfg(unix)]
+        fs::remove_file(&alias)?;
+        #[cfg(windows)]
+        fs::remove_dir(&alias)?;
+        create_directory_link(&outside, &alias)?;
+        require_eq(
+            &index.inspect_absent_reason("alias/back/missing-two.md")?,
+            &DocumentTargetUnresolvedReason::OutsideRoot,
+            "a later target reused an old prefix admission or inspected outside policy",
+        )?;
+        #[cfg(unix)]
+        fs::remove_file(&selected_root)?;
+        #[cfg(windows)]
+        fs::remove_dir(&selected_root)?;
+        create_directory_link(&outside, &selected_root)?;
+        require_eq(
+            &index.inspect_absent_reason("missing-three.md")?,
+            &DocumentTargetUnresolvedReason::OutsideRoot,
+            "a selected-root retarget reused its captured canonical root",
+        )
+    }
+
+    #[test]
     fn document_policy_probes_admit_prefixes_before_ignore_reads() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
@@ -17065,11 +17262,33 @@ function helper() {}
             &plan.scan_options,
             &control,
             projectatlas_fs::PolicyMatchLimits::new(64, 64 * 1024),
+            super::MAX_DOCUMENT_PREFIX_PROBES,
         )?;
         require_eq(
             &result,
             &(false, 6),
             "all three pages must complete under one small policy budget",
+        )?;
+        let prefix_error = super::nonindexed_document_projection_changed_with_limits(
+            &store,
+            &root,
+            &nodes,
+            &plan.scan_options,
+            &control,
+            projectatlas_fs::PolicyMatchLimits::default(),
+            6 * 256 + 4,
+        )
+        .err()
+        .ok_or_else(|| std::io::Error::other("paged native prefix quota was ignored"))?;
+        require(
+            matches!(&prefix_error, CliError::VerificationIncomplete(state)
+            if state.policy_work_limit == Some(super::super::VerificationWorkLimit::DocumentPrefixes)
+                && state.reason == super::super::IndexVerificationReason::PolicyUnavailable),
+            "prefix quota lost its typed non-retrying marker",
+        )?;
+        require(
+            !super::super::incremental_refresh_needs_full(&prefix_error),
+            "prefix quota restarted work through full fallback",
         )?;
         let error = super::nonindexed_document_projection_changed_with_limits(
             &store,
@@ -17078,13 +17297,14 @@ function helper() {}
             &plan.scan_options,
             &control,
             projectatlas_fs::PolicyMatchLimits::new(0, u64::MAX),
+            super::MAX_DOCUMENT_PREFIX_PROBES,
         )
         .err()
         .ok_or_else(|| std::io::Error::other("policy quota was ignored"))?;
         require(
             matches!(&error, CliError::VerificationIncomplete(state)
             if state.reason == super::super::IndexVerificationReason::PolicyUnavailable
-                && state.policy_work_limit == Some(projectatlas_fs::PolicyMatchResource::DirectoryContexts)
+                && state.policy_work_limit == Some(super::super::VerificationWorkLimit::Policy(projectatlas_fs::PolicyMatchResource::DirectoryContexts))
                 && state.scope == IndexRefreshScope::Full
                 && state.message.contains("DirectoryContexts")
                 && state.message.contains("limit 0")),
@@ -17145,6 +17365,35 @@ function helper() {}
             "cancelled probe changed publication",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn exhausted_document_prefix_work_refuses_cached_and_uncached_reuse()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = super::super::standalone_index_work_control();
+        let policy = RootScanPolicy::discover(temp.path(), &ScanOptions::default(), &control)?;
+        let index = DocumentResolutionIndex::with_limits(
+            temp.path(),
+            &[],
+            &policy,
+            &control,
+            projectatlas_fs::PolicyMatchLimits::default(),
+            4,
+        )?;
+        require_eq(
+            &index.unresolved_reason("first.md")?,
+            &Some(DocumentTargetUnresolvedReason::Missing),
+            "initial flat target",
+        )?;
+        for path in ["second.md", "first.md", "third.md"] {
+            require(
+                matches!(index.unresolved_reason(path), Err(CliError::VerificationIncomplete(state))
+                if state.policy_work_limit == Some(super::super::VerificationWorkLimit::DocumentPrefixes)),
+                "exhausted prefix work admitted another cached/uncached target",
+            )?;
+        }
+        require_eq(&index.prefix_probes.get(), &5, "failed work was restarted")
     }
 
     #[test]

@@ -5037,6 +5037,10 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
     }
     #[cfg(unix)]
     {
+        writeln!(
+            io::stderr().lock(),
+            "automatic state admission: operator database alias"
+        )?;
         let cohort_root = temp.path().join("cohort-operator-alias");
         fs::create_dir(&cohort_root)?;
         fs::write(cohort_root.join(COHORT_SOURCE_FILE), "pub fn cohort() {}\n")?;
@@ -5323,9 +5327,17 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
         return Err(io::Error::other("ownership fixture has no approved purpose").into());
     }
     let control_db = control.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    writeln!(
+        io::stderr().lock(),
+        "automatic state admission: managed database and sidecars"
+    )?;
     let mut session = McpContractSession::spawn(&executable, &control, &control_db)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         for suffix in ["", "-wal", "-shm"] {
+            writeln!(
+                io::stderr().lock(),
+                "automatic state admission: SQLite suffix {suffix:?}"
+            )?;
             // Read-only snapshots may leave empty WAL/SHM entries after closing.
             // Finish the owning writable lifecycle before installing a fixture
             // alias; never unlink a sidecar belonging to an active connection.
@@ -9132,7 +9144,11 @@ impl McpContractSession {
     /// Send one request and wait for its matching response under a fixed deadline.
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
         let request_id = self.start_request(method, params)?;
-        self.wait_for_response(request_id, method)
+        let label = params
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or_else(|| method.to_owned(), |tool| format!("{method} {tool}"));
+        self.wait_for_response(request_id, &label)
     }
 
     /// Send one request and return its id before waiting for the response.
@@ -9172,7 +9188,45 @@ impl McpContractSession {
             let line = self
                 .responses
                 .recv_timeout(remaining)
-                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+                .map_err(|error| {
+                    #[cfg(target_os = "macos")]
+                    if matches!(error, mpsc::RecvTimeoutError::Timeout) {
+                        // Capture the still-owned child after failure; this neither
+                        // extends the request deadline nor retries the operation.
+                        if let Some(child) = &self.child {
+                            let sampled = (|| -> io::Result<_> {
+                                let mut report = tempfile::NamedTempFile::new()?;
+                                // Bound the report file before sample writes it;
+                                // capture only a bounded prefix and clean up on drop.
+                                let output = Command::new("/bin/sh")
+                                    .args(["-c", "exec >/dev/null 2>&1; ulimit -c 0 && ulimit -f 256 && exec /usr/bin/sample \"$1\" 1 1 -file \"$2\"", "projectatlas-mcp-timeout"])
+                                    .arg(child.id().to_string())
+                                    .arg(report.path())
+                                    .timeout(Duration::from_secs(5))
+                                    .output()?;
+                                let mut bytes = Vec::new();
+                                report.as_file_mut().take(32_768).read_to_end(&mut bytes)?;
+                                Ok((output.status, bytes))
+                            })();
+                            match sampled {
+                                Ok((status, bytes)) => {
+                                    let _ = writeln!(io::stderr().lock(), "MCP timeout child sample: request={request_id}, method={method}, pid={}, status={status}\n{}\nreport prefix capped at 32768 bytes; owned report removed after capture",
+                                        child.id(), String::from_utf8_lossy(&bytes));
+                                }
+                                Err(source) => {
+                                    let _ = writeln!(io::stderr().lock(), "MCP timeout child sample unavailable: {source}");
+                                }
+                            }
+                        }
+                    }
+                    let kind = match error {
+                        mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                        mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::UnexpectedEof,
+                    };
+                    io::Error::new(kind, format!(
+                        "MCP contract request {request_id} for {method} failed waiting for response: {error}"
+                    ))
+                })??;
             let response: Value = serde_json::from_str(line.trim())?;
             if response.get("id").and_then(Value::as_u64) == Some(request_id) {
                 return Ok(response);

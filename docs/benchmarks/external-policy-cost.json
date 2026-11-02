@@ -21,9 +21,9 @@
   "candidate": {
     "derivation": 25,
     "semantic": 23,
-    "source_manifest_sha256": "bc24b111d18db378327751f9d7ab78e932ffcb0098aefc232a92982c691bd8cd",
-    "bytes": 69971552,
-    "sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d"
+    "source_manifest_sha256": "243a8385160eb477c1670b8ee595a590b6a5968841cacd836d8c7ebadd24bf4a",
+    "bytes": 69962536,
+    "sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06"
   },
   "protocol": {
     "trials": 3,
@@ -47,7 +47,9 @@
       "sha256": "544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9",
       "measurement_source_manifest_sha256": "bb9bf24ff9cec0522faf05df21edaa8648772e8138e7a6ef7c3d9d1b0a456d00",
       "reuse_basis": "Exact relinked native filesystem helper byte identity; current CLI costs and upgrades measured freshly."
-    }
+    },
+    "cli_measurement_source_manifest_sha256": "bcd077917dd9ae3ff814603f18908c8bbc167a83cb79dfd45648c9dc0187bbea",
+    "cli_measurement_reuse_basis": "Only the macOS E2E failure-diagnostic helper changed after fresh measurements; rebuilt optimized CLI and filesystem helper are byte-identical. All fresh CLI, upgrade and real-adapter product measurements remain bound to the same executable bytes."
   },
   "fixtures": {
     "ordinary": {
@@ -354,9 +356,9 @@
   },
   "binary_size": {
     "baseline_bytes": 69456960,
-    "candidate_bytes": 69971552,
-    "delta_bytes": 514592,
-    "delta_percent": 0.7408789558310591
+    "candidate_bytes": 69962536,
+    "delta_bytes": 505576,
+    "delta_percent": 0.7278982552648472
   },
   "upgrade_cases": [
     {
@@ -629,66 +631,66 @@
       "ordinary": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.3087910229805857,
-            "peak_rss_kib": 32440
+            "wall_seconds": 0.3088732629548758,
+            "peak_rss_kib": 32492
           },
           "noop": {
-            "wall_seconds": 0.048504917009267956,
-            "peak_rss_kib": 21404
+            "wall_seconds": 0.04829124402021989,
+            "peak_rss_kib": 21752
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.31176014500670135,
-            "peak_rss_kib": 30508
+            "wall_seconds": 0.3068475689506158,
+            "peak_rss_kib": 29408
           },
           "noop": {
-            "wall_seconds": 0.050320188980549574,
-            "peak_rss_kib": 20800
+            "wall_seconds": 0.04970426298677921,
+            "peak_rss_kib": 19272
           }
         }
       },
       "large-config": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.30796411697519943,
-            "peak_rss_kib": 32192
+            "wall_seconds": 0.3063900329871103,
+            "peak_rss_kib": 32756
           },
           "noop": {
-            "wall_seconds": 0.049219337990507483,
-            "peak_rss_kib": 21808
+            "wall_seconds": 0.048541540978476405,
+            "peak_rss_kib": 21528
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3170564040192403,
-            "peak_rss_kib": 33368
+            "wall_seconds": 0.31766138901002705,
+            "peak_rss_kib": 32468
           },
           "noop": {
-            "wall_seconds": 0.05460523598594591,
-            "peak_rss_kib": 23812
+            "wall_seconds": 0.054344623000361025,
+            "peak_rss_kib": 22104
           }
         }
       },
       "many-rules": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.3847091000061482,
-            "peak_rss_kib": 44464
+            "wall_seconds": 0.3811437070253305,
+            "peak_rss_kib": 44452
           },
           "noop": {
-            "wall_seconds": 0.07139043201459572,
-            "peak_rss_kib": 32316
+            "wall_seconds": 0.07085018599173054,
+            "peak_rss_kib": 33676
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.392545972019434,
-            "peak_rss_kib": 42064
+            "wall_seconds": 0.3920307160005905,
+            "peak_rss_kib": 41232
           },
           "noop": {
-            "wall_seconds": 0.09887296496890485,
-            "peak_rss_kib": 33028
+            "wall_seconds": 0.09841067297384143,
+            "peak_rss_kib": 32088
           }
         }
       }
@@ -704,12 +706,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31202454899903387,
-          "peak_rss_kib": 31740
+          "wall_seconds": 0.3088732629548758,
+          "peak_rss_kib": 33244
         },
         "noop": {
-          "wall_seconds": 0.048504917009267956,
-          "peak_rss_kib": 21204
+          "wall_seconds": 0.051218762004282326,
+          "peak_rss_kib": 22284
         }
       },
       {
@@ -722,12 +724,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31176014500670135,
-          "peak_rss_kib": 30508
+          "wall_seconds": 0.3102954730275087,
+          "peak_rss_kib": 29408
         },
         "noop": {
-          "wall_seconds": 0.051213070983067155,
-          "peak_rss_kib": 21240
+          "wall_seconds": 0.04993294400628656,
+          "peak_rss_kib": 19028
         }
       },
       {
@@ -740,12 +742,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3228845509584062,
-          "peak_rss_kib": 30460
+          "wall_seconds": 0.30608628899790347,
+          "peak_rss_kib": 30072
         },
         "noop": {
-          "wall_seconds": 0.048741555016022176,
-          "peak_rss_kib": 20800
+          "wall_seconds": 0.04876150202471763,
+          "peak_rss_kib": 19272
         }
       },
       {
@@ -758,12 +760,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3051252930308692,
-          "peak_rss_kib": 32440
+          "wall_seconds": 0.3045193299767561,
+          "peak_rss_kib": 32484
         },
         "noop": {
-          "wall_seconds": 0.04850192501908168,
-          "peak_rss_kib": 21404
+          "wall_seconds": 0.04829124402021989,
+          "peak_rss_kib": 21752
         }
       },
       {
@@ -776,12 +778,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3087910229805857,
-          "peak_rss_kib": 32488
+          "wall_seconds": 0.31090523197781295,
+          "peak_rss_kib": 32492
         },
         "noop": {
-          "wall_seconds": 0.05043248797301203,
-          "peak_rss_kib": 21636
+          "wall_seconds": 0.047609957051463425,
+          "peak_rss_kib": 21672
         }
       },
       {
@@ -794,12 +796,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3073935150168836,
-          "peak_rss_kib": 31032
+          "wall_seconds": 0.3068475689506158,
+          "peak_rss_kib": 29356
         },
         "noop": {
-          "wall_seconds": 0.050320188980549574,
-          "peak_rss_kib": 20796
+          "wall_seconds": 0.04970426298677921,
+          "peak_rss_kib": 19332
         }
       },
       {
@@ -812,12 +814,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.30796411697519943,
-          "peak_rss_kib": 31956
+          "wall_seconds": 0.3063900329871103,
+          "peak_rss_kib": 32056
         },
         "noop": {
-          "wall_seconds": 0.049219337990507483,
-          "peak_rss_kib": 21728
+          "wall_seconds": 0.05099873500876129,
+          "peak_rss_kib": 21828
         }
       },
       {
@@ -830,12 +832,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.32084549497812986,
-          "peak_rss_kib": 33460
+          "wall_seconds": 0.31766138901002705,
+          "peak_rss_kib": 32340
         },
         "noop": {
-          "wall_seconds": 0.05492208496434614,
-          "peak_rss_kib": 23812
+          "wall_seconds": 0.054344623000361025,
+          "peak_rss_kib": 22104
         }
       },
       {
@@ -848,12 +850,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3170564040192403,
-          "peak_rss_kib": 33076
+          "wall_seconds": 0.3205164019600488,
+          "peak_rss_kib": 34512
         },
         "noop": {
-          "wall_seconds": 0.05460523598594591,
-          "peak_rss_kib": 23612
+          "wall_seconds": 0.05506393301766366,
+          "peak_rss_kib": 21856
         }
       },
       {
@@ -866,12 +868,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3045670510036871,
-          "peak_rss_kib": 32436
+          "wall_seconds": 0.30317142099374905,
+          "peak_rss_kib": 32756
         },
         "noop": {
-          "wall_seconds": 0.05006865999894217,
-          "peak_rss_kib": 21808
+          "wall_seconds": 0.048541540978476405,
+          "peak_rss_kib": 21528
         }
       },
       {
@@ -884,12 +886,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3099985749577172,
-          "peak_rss_kib": 32192
+          "wall_seconds": 0.3064767920295708,
+          "peak_rss_kib": 32792
         },
         "noop": {
-          "wall_seconds": 0.04879801400238648,
-          "peak_rss_kib": 21816
+          "wall_seconds": 0.04804869904182851,
+          "peak_rss_kib": 21012
         }
       },
       {
@@ -902,12 +904,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3113037809962407,
-          "peak_rss_kib": 33368
+          "wall_seconds": 0.30851510795764625,
+          "peak_rss_kib": 32468
         },
         "noop": {
-          "wall_seconds": 0.05436810594983399,
-          "peak_rss_kib": 24052
+          "wall_seconds": 0.05356059496989474,
+          "peak_rss_kib": 22208
         }
       },
       {
@@ -920,12 +922,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3847091000061482,
-          "peak_rss_kib": 44644
+          "wall_seconds": 0.3811437070253305,
+          "peak_rss_kib": 44328
         },
         "noop": {
-          "wall_seconds": 0.07139043201459572,
-          "peak_rss_kib": 33020
+          "wall_seconds": 0.07085018599173054,
+          "peak_rss_kib": 32936
         }
       },
       {
@@ -938,12 +940,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.38930596102727577,
-          "peak_rss_kib": 42064
+          "wall_seconds": 0.3920307160005905,
+          "peak_rss_kib": 41232
         },
         "noop": {
-          "wall_seconds": 0.09887296496890485,
-          "peak_rss_kib": 32900
+          "wall_seconds": 0.09841067297384143,
+          "peak_rss_kib": 32196
         }
       },
       {
@@ -956,12 +958,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.392545972019434,
-          "peak_rss_kib": 42048
+          "wall_seconds": 0.3996132450411096,
+          "peak_rss_kib": 40368
         },
         "noop": {
-          "wall_seconds": 0.09996582003077492,
-          "peak_rss_kib": 33424
+          "wall_seconds": 0.09960532997502014,
+          "peak_rss_kib": 32088
         }
       },
       {
@@ -974,12 +976,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.38390111399348825,
-          "peak_rss_kib": 44436
+          "wall_seconds": 0.3761326699750498,
+          "peak_rss_kib": 44992
         },
         "noop": {
-          "wall_seconds": 0.07097796205198392,
-          "peak_rss_kib": 32316
+          "wall_seconds": 0.07211617502616718,
+          "peak_rss_kib": 33676
         }
       },
       {
@@ -992,12 +994,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.38503019203199074,
-          "peak_rss_kib": 44464
+          "wall_seconds": 0.3839546549716033,
+          "peak_rss_kib": 44452
         },
         "noop": {
-          "wall_seconds": 0.07151666097342968,
-          "peak_rss_kib": 31824
+          "wall_seconds": 0.07018451899057254,
+          "peak_rss_kib": 33736
         }
       },
       {
@@ -1010,12 +1012,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3927335990010761,
-          "peak_rss_kib": 42444
+          "wall_seconds": 0.3870976360049099,
+          "peak_rss_kib": 41356
         },
         "noop": {
-          "wall_seconds": 0.09756136505166069,
-          "peak_rss_kib": 33028
+          "wall_seconds": 0.09732511796755716,
+          "peak_rss_kib": 31744
         }
       }
     ]
@@ -1041,17 +1043,17 @@
         "init_seconds": 10.211493673967198
       },
       "after": {
-        "binary_sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d",
+        "binary_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
         "cold_summary_seconds": [
-          0.06793816201388836,
-          0.06858492299215868,
-          0.07110108598135412
+          0.06849473802139983,
+          0.06891842000186443,
+          0.0680001950240694
         ],
-        "median_seconds": 0.06858492299215868,
-        "init_seconds": 0.3445807339739986
+        "median_seconds": 0.06849473802139983,
+        "init_seconds": 0.2739167149993591
       }
     },
-    "speed_ratio": 63.82135540948944,
+    "speed_ratio": 63.90538707728847,
     "limitations": "Bounded local CLI workload on an unisolated desktop; predecessor samples retained from the earlier exact-identity measurement, current candidate sampled separately without overlapping builds. Not a thirty-minute denial experiment, isolated persistent-MCP latency or general performance SLO."
   },
   "policy_work_limits": {
@@ -1063,6 +1065,51 @@
     "reloads_charged_again": true,
     "root_seed_reparsed_after_eviction": false,
     "failed_pass_requires_fresh_matcher": true,
-    "quota_refusal": "existing verification_incomplete / policy_unavailable, no incremental or observed-MCP refresh retry"
+    "quota_refusal": "existing verification_incomplete / policy_unavailable, no incremental or observed-MCP refresh retry",
+    "native_document_prefix_probes_per_pass": 4000000,
+    "native_probe_scope": "Explicit target-prefix, target-leaf and ancestor-fallback metadata/canonical operations; fixed root capture and native ignore-engine setup have their existing separate controls. A probe is not a constant-time syscall."
+  },
+  "native_prefix_verification": {
+    "existing_directory_depth": 64,
+    "documents": 4,
+    "links_per_document": 128,
+    "persisted_missing_relations": 512,
+    "publication_unchanged": true,
+    "samples": {
+      "before": {
+        "binary_sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d",
+        "init_seconds": 5.320103170990478,
+        "cold_summary_seconds": 2.6000373759889044,
+        "traced_syscalls": {
+          "readlink": 1300153,
+          "statx": 2120,
+          "openat": 228,
+          "readlinkat": 130,
+          "newfstatat": 52
+        }
+      },
+      "after": {
+        "binary_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
+        "init_seconds": 0.7350583620136604,
+        "cold_summary_seconds": 0.3216716010356322,
+        "traced_syscalls": {
+          "statx": 68168,
+          "readlink": 5305,
+          "openat": 228,
+          "readlinkat": 130,
+          "newfstatat": 52
+        }
+      }
+    },
+    "method": "One quiet init and one cold summary per exact optimized binary, distinct newly initialized roots with identical authored input. Separate strace -f -c measurements record only readlink/readlinkat/newfstatat/statx/openat; traced timings are not compared with untraced timings.",
+    "owning_counter_regression": {
+      "targets": 128,
+      "ordinary_directory_depth": 32,
+      "before_canonicalizations": 4352,
+      "after_canonicalization_upper_bound": 384,
+      "after_metadata_plus_canonical_probe_upper_bound": 8704,
+      "all_owned_native_probes_charged": true
+    },
+    "limitations": "One local sample per binary on an unisolated Linux desktop, warm caches; scoped repeated-prefix proof, not a throughput or persistent-MCP SLO."
   }
 }
