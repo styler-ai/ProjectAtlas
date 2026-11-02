@@ -59,6 +59,10 @@ The observed-epoch repair now includes document-only events in invalidation.
 These samples use its rebuilt CLI; the persistent MCP regression separately
 proves typed read-only refresh guidance and explicit zero-reparse reconciliation
 for ignored/outside-symlink target transitions under local and global rules.
+A later integration-test inventory correction changes only a test-support input.
+A fresh locked release rebuild is byte-identical to the measured CLI and helper,
+so their measurements, upgrade cases and public regressions remain applicable.
+The compact result records the current and measured source-manifest identities.
 Component timings use canonical roots; separate regressions cover lexical aliases,
 relative root selection and selected symlink roots without claiming alias timings.
 

@@ -21,7 +21,7 @@
   "candidate": {
     "derivation": 25,
     "semantic": 23,
-    "source_manifest_sha256": "ebc7ab6a6da4e38aeb85bce592b166c66ea897b9ce790d4f7eb8849df284c536",
+    "source_manifest_sha256": "097ead7d2827bb0130a2775be21d9bcba34996956507176ef266a68d4a5d6640",
     "bytes": 69807752,
     "sha256": "c41b3bd19921bda4a5b11dcd1a81543aea059926948195ebbefa4152c6e2544d"
   },
@@ -45,6 +45,15 @@
       "sha256": "68663dbeaf98788375eb33213c0b472b4e0fcc3c3bd5da176089e79113aebb72",
       "scope": "Fresh 18-sample FS measurements after root-alias repair; helper relinked byte-identically from final source. Final CLI costs, upgrades and public regressions rerun separately.",
       "measured_source_manifest_sha256": "23dbb47bfcd2a63aebcaae847fa2feb8868d244662083a898b2c6e2f2e33759d"
+    },
+    "cli_binary_reuse": {
+      "byte_identical": true,
+      "sha256": "c41b3bd19921bda4a5b11dcd1a81543aea059926948195ebbefa4152c6e2544d",
+      "measured_source_manifest_sha256": "ebc7ab6a6da4e38aeb85bce592b166c66ea897b9ce790d4f7eb8849df284c536",
+      "changed_source_inputs": [
+        "crates/projectatlas-cli/tests/support/source_contract.rs"
+      ],
+      "scope": "Fresh locked default release rebuild after integration-test inventory correction is byte-identical. Reuse the same optimized CLI cost samples, four upgrade cases and three public CLI/MCP regression results; filesystem helper also remains byte-identical."
     }
   },
   "fixtures": {
