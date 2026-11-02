@@ -21,9 +21,9 @@
   "candidate": {
     "derivation": 26,
     "semantic": 23,
-    "source_manifest_sha256": "9764dd5a16f55257740f4ff74268ad37936b067859c91a0e4c0e75a8308f629a",
-    "bytes": 69995872,
-    "sha256": "dd15f5772c6f2a280ca4a1f190632c7a3289ae12fdd1b4f6d0afc2e07b34051b"
+    "source_manifest_sha256": "e990ab1e4ff21be2ea4777223ab3dea9fd945081eb32bc099025d2027f1f3d4e",
+    "bytes": 69998192,
+    "sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd"
   },
   "protocol": {
     "trials": 3,
@@ -48,8 +48,8 @@
       "measurement_source_manifest_sha256": "bb9bf24ff9cec0522faf05df21edaa8648772e8138e7a6ef7c3d9d1b0a456d00",
       "reuse_basis": "Exact relinked native filesystem helper byte identity; current CLI costs and upgrades measured freshly."
     },
-    "cli_measurement_source_manifest_sha256": "9764dd5a16f55257740f4ff74268ad37936b067859c91a0e4c0e75a8308f629a",
-    "cli_measurement_reuse_basis": "All 18 CLI samples freshly measured against this exact frozen artifact; only the byte-identical native filesystem helper component samples are reused.",
+    "cli_measurement_source_manifest_sha256": "e990ab1e4ff21be2ea4777223ab3dea9fd945081eb32bc099025d2027f1f3d4e",
+    "cli_measurement_reuse_basis": "All 18 CLI samples freshly measured against this exact frozen artifact; only byte-identical native filesystem component samples are reused.",
     "runtime_event_ingress": "One separate pending runtime wake per observer/CLI loop coalesces exact selected/resolved SQLite notifications without policy uncertainty or callback filesystem I/O. Main structural changes remain observable; MCP drains revalidate target authority and rearm at the shared receiver-fenced owner. Real ASCII/Unicode-root CLI/MCP and source-edit proof is separate from these fresh-process timings."
   },
   "fixtures": {
@@ -357,9 +357,9 @@
   },
   "binary_size": {
     "baseline_bytes": 69456960,
-    "candidate_bytes": 69995872,
-    "delta_bytes": 538912,
-    "delta_percent": 0.7758934453796998
+    "candidate_bytes": 69998192,
+    "delta_bytes": 541232,
+    "delta_percent": 0.7792336433958491
   },
   "upgrade_cases": [
     {
@@ -632,66 +632,66 @@
       "ordinary": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.31284189299913123,
-            "peak_rss_kib": 32092
+            "wall_seconds": 0.3063669709954411,
+            "peak_rss_kib": 32872
           },
           "noop": {
-            "wall_seconds": 0.04829349304782227,
-            "peak_rss_kib": 20660
+            "wall_seconds": 0.04782957799034193,
+            "peak_rss_kib": 21792
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.31009535799967125,
-            "peak_rss_kib": 31276
+            "wall_seconds": 0.31413083703955635,
+            "peak_rss_kib": 32144
           },
           "noop": {
-            "wall_seconds": 0.04990510403877124,
-            "peak_rss_kib": 20384
+            "wall_seconds": 0.047736281994730234,
+            "peak_rss_kib": 21768
           }
         }
       },
       "large-config": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.30562955199275166,
-            "peak_rss_kib": 31924
+            "wall_seconds": 0.3063319140346721,
+            "peak_rss_kib": 32764
           },
           "noop": {
-            "wall_seconds": 0.049216045008506626,
-            "peak_rss_kib": 20984
+            "wall_seconds": 0.04846284899394959,
+            "peak_rss_kib": 21892
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.31453809898812324,
-            "peak_rss_kib": 33312
+            "wall_seconds": 0.3089751459774561,
+            "peak_rss_kib": 34708
           },
           "noop": {
-            "wall_seconds": 0.05327278497861698,
-            "peak_rss_kib": 23628
+            "wall_seconds": 0.05325763899600133,
+            "peak_rss_kib": 24784
           }
         }
       },
       "many-rules": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.39287663402501494,
-            "peak_rss_kib": 44412
+            "wall_seconds": 0.38237530703190714,
+            "peak_rss_kib": 45256
           },
           "noop": {
-            "wall_seconds": 0.06955980899510905,
-            "peak_rss_kib": 32212
+            "wall_seconds": 0.07029401801992208,
+            "peak_rss_kib": 33412
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3947798640001565,
-            "peak_rss_kib": 41700
+            "wall_seconds": 0.39486550400033593,
+            "peak_rss_kib": 43576
           },
           "noop": {
-            "wall_seconds": 0.09726512600900605,
-            "peak_rss_kib": 32984
+            "wall_seconds": 0.09754293801961467,
+            "peak_rss_kib": 34244
           }
         }
       }
@@ -707,12 +707,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31284189299913123,
-          "peak_rss_kib": 32684
+          "wall_seconds": 0.3071765240165405,
+          "peak_rss_kib": 32872
         },
         "noop": {
-          "wall_seconds": 0.04897898796480149,
-          "peak_rss_kib": 22292
+          "wall_seconds": 0.04724626103416085,
+          "peak_rss_kib": 21756
         }
       },
       {
@@ -725,12 +725,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31796754099195823,
-          "peak_rss_kib": 31364
+          "wall_seconds": 0.31413083703955635,
+          "peak_rss_kib": 32176
         },
         "noop": {
-          "wall_seconds": 0.04990510403877124,
-          "peak_rss_kib": 20384
+          "wall_seconds": 0.047736281994730234,
+          "peak_rss_kib": 21768
         }
       },
       {
@@ -743,12 +743,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3089800470042974,
-          "peak_rss_kib": 31276
+          "wall_seconds": 0.3210859299870208,
+          "peak_rss_kib": 32144
         },
         "noop": {
-          "wall_seconds": 0.050267083977814764,
-          "peak_rss_kib": 19736
+          "wall_seconds": 0.04855730599956587,
+          "peak_rss_kib": 21588
         }
       },
       {
@@ -761,12 +761,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3123475009924732,
-          "peak_rss_kib": 32092
+          "wall_seconds": 0.3046707100002095,
+          "peak_rss_kib": 32632
         },
         "noop": {
-          "wall_seconds": 0.04829349304782227,
-          "peak_rss_kib": 20660
+          "wall_seconds": 0.04916616197442636,
+          "peak_rss_kib": 21792
         }
       },
       {
@@ -779,12 +779,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3169986489810981,
-          "peak_rss_kib": 31816
+          "wall_seconds": 0.3063669709954411,
+          "peak_rss_kib": 33192
         },
         "noop": {
-          "wall_seconds": 0.04795780195854604,
-          "peak_rss_kib": 20540
+          "wall_seconds": 0.04782957799034193,
+          "peak_rss_kib": 22008
         }
       },
       {
@@ -797,12 +797,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31009535799967125,
-          "peak_rss_kib": 31012
+          "wall_seconds": 0.29592915502144024,
+          "peak_rss_kib": 31996
         },
         "noop": {
-          "wall_seconds": 0.04784736898727715,
-          "peak_rss_kib": 20456
+          "wall_seconds": 0.04746203601825982,
+          "peak_rss_kib": 21972
         }
       },
       {
@@ -815,12 +815,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3017693349975161,
-          "peak_rss_kib": 31688
+          "wall_seconds": 0.3063319140346721,
+          "peak_rss_kib": 32764
         },
         "noop": {
-          "wall_seconds": 0.04927813698304817,
-          "peak_rss_kib": 21140
+          "wall_seconds": 0.048531248001381755,
+          "peak_rss_kib": 21892
         }
       },
       {
@@ -833,12 +833,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31744002900086343,
-          "peak_rss_kib": 32768
+          "wall_seconds": 0.3108338830061257,
+          "peak_rss_kib": 36764
         },
         "noop": {
-          "wall_seconds": 0.05271352699492127,
-          "peak_rss_kib": 23644
+          "wall_seconds": 0.05325763899600133,
+          "peak_rss_kib": 24524
         }
       },
       {
@@ -851,12 +851,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.31453809898812324,
-          "peak_rss_kib": 33312
+          "wall_seconds": 0.30807329004164785,
+          "peak_rss_kib": 34592
         },
         "noop": {
-          "wall_seconds": 0.05423075600992888,
-          "peak_rss_kib": 23556
+          "wall_seconds": 0.053642201994080096,
+          "peak_rss_kib": 24784
         }
       },
       {
@@ -869,12 +869,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3082892330130562,
-          "peak_rss_kib": 32444
+          "wall_seconds": 0.31393231195397675,
+          "peak_rss_kib": 33220
         },
         "noop": {
-          "wall_seconds": 0.049216045008506626,
-          "peak_rss_kib": 20668
+          "wall_seconds": 0.047952719032764435,
+          "peak_rss_kib": 21696
         }
       },
       {
@@ -887,12 +887,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.30562955199275166,
-          "peak_rss_kib": 31924
+          "wall_seconds": 0.2959384729620069,
+          "peak_rss_kib": 32500
         },
         "noop": {
-          "wall_seconds": 0.048477228032425046,
-          "peak_rss_kib": 20984
+          "wall_seconds": 0.04846284899394959,
+          "peak_rss_kib": 22272
         }
       },
       {
@@ -905,12 +905,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3140992390108295,
-          "peak_rss_kib": 33704
+          "wall_seconds": 0.3089751459774561,
+          "peak_rss_kib": 34708
         },
         "noop": {
-          "wall_seconds": 0.05327278497861698,
-          "peak_rss_kib": 23628
+          "wall_seconds": 0.0521089980029501,
+          "peak_rss_kib": 25008
         }
       },
       {
@@ -923,12 +923,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3989530489780009,
-          "peak_rss_kib": 44412
+          "wall_seconds": 0.37334626296069473,
+          "peak_rss_kib": 45416
         },
         "noop": {
-          "wall_seconds": 0.07103261002339423,
-          "peak_rss_kib": 32212
+          "wall_seconds": 0.07029401801992208,
+          "peak_rss_kib": 33632
         }
       },
       {
@@ -941,12 +941,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.4040953920339234,
-          "peak_rss_kib": 42472
+          "wall_seconds": 0.39486550400033593,
+          "peak_rss_kib": 43500
         },
         "noop": {
-          "wall_seconds": 0.09717782400548458,
-          "peak_rss_kib": 33052
+          "wall_seconds": 0.09796543297125027,
+          "peak_rss_kib": 34556
         }
       },
       {
@@ -959,12 +959,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3947798640001565,
-          "peak_rss_kib": 41700
+          "wall_seconds": 0.39727591804694384,
+          "peak_rss_kib": 43584
         },
         "noop": {
-          "wall_seconds": 0.09741196100367233,
-          "peak_rss_kib": 32816
+          "wall_seconds": 0.09754293801961467,
+          "peak_rss_kib": 34244
         }
       },
       {
@@ -977,35 +977,35 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.39287663402501494,
-          "peak_rss_kib": 44232
+          "wall_seconds": 0.38237530703190714,
+          "peak_rss_kib": 44820
         },
         "noop": {
-          "wall_seconds": 0.06955980899510905,
+          "wall_seconds": 0.0705150940339081,
+          "peak_rss_kib": 33412
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.38352382701123133,
+          "peak_rss_kib": 45256
+        },
+        "noop": {
+          "wall_seconds": 0.06975554500240833,
           "peak_rss_kib": 32504
         }
       },
       {
         "case": "many-rules",
         "trial": 2,
-        "label": "accepted-main",
-        "config_bytes": 139,
-        "rules_bytes": 150012,
-        "source_files": 515,
-        "symbols": 514,
-        "document_reason": "missing",
-        "init": {
-          "wall_seconds": 0.3857971310499124,
-          "peak_rss_kib": 44540
-        },
-        "noop": {
-          "wall_seconds": 0.06924472597893327,
-          "peak_rss_kib": 32108
-        }
-      },
-      {
-        "case": "many-rules",
-        "trial": 2,
         "label": "candidate",
         "config_bytes": 135,
         "rules_bytes": 150012,
@@ -1013,12 +1013,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3943337899981998,
-          "peak_rss_kib": 41588
+          "wall_seconds": 0.39101393800228834,
+          "peak_rss_kib": 43576
         },
         "noop": {
-          "wall_seconds": 0.09726512600900605,
-          "peak_rss_kib": 32984
+          "wall_seconds": 0.09645975095918402,
+          "peak_rss_kib": 33908
         }
       }
     ]
@@ -1044,17 +1044,17 @@
         "init_seconds": 10.211493673967198
       },
       "after": {
-        "binary_sha256": "dd15f5772c6f2a280ca4a1f190632c7a3289ae12fdd1b4f6d0afc2e07b34051b",
+        "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
         "cold_summary_seconds": [
-          0.06822777300840244,
-          0.07048361503984779,
-          0.06877404102124274
+          0.06901290500536561,
+          0.06778970500454307,
+          0.06745783000951633
         ],
-        "median_seconds": 0.06877404102124274,
-        "init_seconds": 0.27031479496508837
+        "median_seconds": 0.06778970500454307,
+        "init_seconds": 0.28013658797135577
       }
     },
-    "speed_ratio": 63.64585650366264,
+    "speed_ratio": 64.57002203685173,
     "limitations": "Bounded local CLI workload on an unisolated desktop; predecessor samples retained from the earlier exact-identity measurement, current candidate sampled separately without overlapping builds. Not a thirty-minute denial experiment, isolated persistent-MCP latency or general performance SLO."
   },
   "policy_work_limits": {
@@ -1125,11 +1125,27 @@
         "cold_summary_seconds": 95.70886936801253
       },
       "after": {
-        "binary_sha256": "dd15f5772c6f2a280ca4a1f190632c7a3289ae12fdd1b4f6d0afc2e07b34051b",
-        "init_seconds": 7.127615122008137,
-        "cold_summary_seconds": 3.4292136750300415
+        "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
+        "init_seconds": 7.102649875974748,
+        "cold_summary_seconds": 3.45405889704125
       },
-      "limitations": "One quiet init/read per exact binary on distinct identical-input roots, warm caches and unisolated host; no general SLO. A one-document 1000-link/depth200 trial correctly reached the intermediate_bytes extraction limit at 614 links, so the complete comparison uses two documents without changing that limit."
+      "limitations": "One quiet init/read per exact binary on distinct identical-input roots, warm caches and unisolated host; no general SLO. A one-document 1000-link/depth200 trial correctly reached the intermediate_bytes extraction limit at 614 links, so the complete comparison uses two documents without changing that limit.",
+      "document_coverage": [
+        [
+          "guide0.md",
+          "complete",
+          500,
+          500,
+          0
+        ],
+        [
+          "guide1.md",
+          "complete",
+          500,
+          500,
+          0
+        ]
+      ]
     },
     "historical_512_link_sample_scope": "The retained 512-link timings and separate syscall counts belong to the identified derivation-25 prefix-repair artifact, not the current CLI. The complete 1000-link reported-scale result below is freshly measured for the current artifact; no binary equivalence is claimed."
   },
@@ -1166,24 +1182,36 @@
   "optimized_adapter_cases": [
     {
       "test": "external_git_exclusions_agree_across_cli_mcp_and_refresh",
-      "passed": true
+      "passed": true,
+      "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
+      "harness_sha256": "c54990b879aa3b7ffeb7afc9af2c5e5d4521c1ce98cd19584a4f98604d361bfe",
+      "seconds": 1.717728313000407
     },
     {
       "test": "observed_mcp_reconciles_document_only_target_changes",
-      "passed": true
+      "passed": true,
+      "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
+      "harness_sha256": "c54990b879aa3b7ffeb7afc9af2c5e5d4521c1ce98cd19584a4f98604d361bfe",
+      "seconds": 2.2934401399688795
     },
     {
       "test": "source_root_replacement_preserves_cli_mcp_external_bindings",
-      "passed": true
+      "passed": true,
+      "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
+      "harness_sha256": "c54990b879aa3b7ffeb7afc9af2c5e5d4521c1ce98cd19584a4f98604d361bfe",
+      "seconds": 16.782891983981244
     },
     {
       "test": "automatic_state_admission_preserves_cli_mcp_navigation",
-      "passed": true
+      "passed": true,
+      "binary_sha256": "dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd",
+      "harness_sha256": "b6cc57506a6e7987218c6bd9b573b68cf65d52efe266d72a37c68a11d5c14178",
+      "seconds": 2.336780355020892
     }
   ],
   "measurement_status": {
-    "source_commit": "8a276a885086fd4a0afb386d053d517898f4785e",
-    "status": "predecessor_evidence",
-    "limitation": "Subsequent native watch-scope and CI follow-up is under verification. Recorded identities and results do not establish current-head artifact equivalence or final release acceptance; freeze and revalidate the final source before completing #739."
+    "source_commit": "1b7880c46105d18b7b93043dea5e5e71c1589c0c",
+    "status": "current_frozen_source_evidence",
+    "limitation": "Local Linux artifact and affected-work proof; native Windows lifecycle, exact hosted/review gates and final issue/release acceptance remain separately required. Historical 512-link syscall samples are not current-artifact measurements."
   }
 }

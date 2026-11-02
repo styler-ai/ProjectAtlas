@@ -1,13 +1,12 @@
 # External source-policy costs and release handoff
 
-Measurement status: all artifact identities, costs and optimized upgrade/adapter
-results below describe committed source `8a276a885086fd4a0afb386d053d517898f4785e`.
-They are predecessor evidence while the subsequent native watch-scope and CI
-follow-up is under verification. They do not establish current-head artifact
-equivalence or final release acceptance; freeze and revalidate the final source
-before completing #739.
+Measurement status: current artifact identities and fresh CLI, upgrade, adapter,
+complete-prefix and cold-policy results bind source `1b7880c46105d18b7b93043dea5e5e71c1589c0c`.
+All 140 build inputs match its committed and saved source. Native Windows lifecycle
+and complete hosted/issue/release acceptance remain required. The separately labelled
+512-link syscall samples retain their historical derivation-25 identity.
 
-The derivation-26 policy repair adds 538,912 bytes (0.78%) to the optimized
+The derivation-26 policy repair adds 541,232 bytes (0.78%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -87,11 +86,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 312.8 → 310.1 | 48.3 → 49.9 | 32,092 → 31,276 | 20,660 → 20,384 |
-| Large config | 305.6 → 314.5 | 49.2 → 53.3 | 31,924 → 33,312 | 20,984 → 23,628 |
-| 10,000 rules | 392.9 → 394.8 | 69.6 → 97.3 | 44,412 → 41,700 | 32,212 → 32,984 |
+| Ordinary | 306.4 → 314.1 | 47.8 → 47.7 | 32,872 → 32,144 | 21,792 → 21,768 |
+| Large config | 306.3 → 309.0 | 48.5 → 53.3 | 32,764 → 34,708 | 21,892 → 24,784 |
+| 10,000 rules | 382.4 → 394.9 | 70.3 → 97.5 | 45,256 → 43,576 | 33,412 → 34,244 |
 
-The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in
@@ -108,9 +107,9 @@ predecessor is PR head 634cf78, not accepted main. Every read succeeds and leave
 the complete publication metadata unchanged; persisted unresolved counts are
 verified through read-only SQLite queries.
 
-The predecessor median is 4.37718 seconds; the current repair median is 0.06877
-seconds, about 63.6 times faster in this fixture. Initialization is
-10.21149 to 0.27031 seconds. These samples establish the repeated-policy-work repair, not a general
+The predecessor median is 4.37718 seconds; the current repair median is 0.06779
+seconds, about 64.6 times faster in this fixture. Initialization is
+10.21149 to 0.28014 seconds. These samples establish the repeated-policy-work repair, not a general
 speedup, a thirty-minute denial experiment or release performance acceptance.
 The unisolated desktop host and separately measured predecessor/candidate groups
 limit causal timing precision. The predecessor samples retain their verified
@@ -163,7 +162,7 @@ Two documents with 500 links each keep extraction complete under the existing
 intermediate-byte limit; a single 1,000-link document at that depth correctly
 retained only 614 links with explicit partial coverage and is excluded from the
 complete comparison. On the complete fixture, initialization is
-191.48 → 7.13 s and a cold summary is 95.71 → 3.43 s.
+191.48 → 7.10 s and a cold summary is 95.71 → 3.45 s.
 Both retain all 1,000 missing relations with complete document coverage and leave
 publication unchanged. These are one-sample, quiet-process, warm-cache local
 measurements on distinct identical-input roots, subject to the same host/SLO

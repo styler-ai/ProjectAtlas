@@ -34,7 +34,7 @@ Filesystem policy selection, WalkBuilder setup, policy-source observation, extra
 
 ## Release Scope
 
-High-priority #739 is a direct child/blocker of #715 for v0.5.1-rc1. It starts at accepted main with no direct implementation blocker and can proceed independently of #738's document admission guard and #731's binding fix. Combined contracts, inventories and exact installed/performance proof belong to #708/#715 before RC1. Planning was independently approved; implementation and proof are in progress. No execution/proof task is complete yet, and the broader selection/watch findings are not deferred.
+High-priority #739 is a direct child/blocker of #715 for v0.5.1-rc1. It starts at accepted main with no direct implementation blocker and can proceed independently of #738's document admission guard and #731's binding fix. Combined contracts, inventories and exact installed/performance proof belong to #708/#715 before RC1. Planning was independently approved. Policy selection, observation and the owning causal/dependency/cost proof are complete; compatible-index, installed/platform and final acceptance remain in progress. The broader selection/watch findings are not deferred.
 
 ## Non-Goals
 

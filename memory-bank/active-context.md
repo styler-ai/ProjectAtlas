@@ -395,3 +395,52 @@ GoalACTIVE,4issuesOPEN,RC1unpublished,stable050Latest;715privateeditsandparked
 738/708preserved. Stablepromotionrequireslaterinstruction.
 
 Final87202cheapgatesTERMINAL0:fmt/strictOpenSpec/scopedPRIssueOps/diffcheckPASS. LatestactualLuna741publicationapprovalincludesallcleanup/errorpropagationanduser-visiblecontractfixes. Normalcommit/cleanpushnext; nochangeselsewhere.
+
+
+## Current authoritative checkpoint — native Windows proof and hosted disk fix
+
+Public/local HEAD 1b7880c46105d18b7b93043dea5e5e71c1589c0c; PR745 OPEN,
+unmerged. Previous normal push65057 TERMINAL0 at16:17:33Z,1814 tests PASS across
+34 suites,0 failures/12ignored. Do not repoll that push or treat it as live.
+Source41480033316: Rust/repository/diagnostics SUCCESS; Windows native policy
+and source-observer units SUCCESS (including causal handle matrix/legal
+replacement/cold restart), MacARM native units SUCCESS. Windows now installed
+host-reader proof; MacIntel document resource proof; MacARM concurrent rollback
+proof at latest read. These are still running, not whole-platform acceptance.
+Linux125396656789 FAILED at independent installed runtime /bin/cp with ENOSPC,
+not a product assertion. Preserve copy semantics (Rust executable-fd workaround).
+
+Current bounded follow-up sets the e2e-smoke job dev/test DEBUG=1 to match the
+already accepted Rust job, from the first build across all native platforms.
+No optimization/assertion/feature/test selector/deadline/release-profile change.
+Luna731 actual-diff review APPROVED, conditional on fresh hosted Linux copy proof.
+Existing workflow quality-gate E2E PASS; final fmt/OpenSpec/scoped IssueOps next,
+then normal commit/clean push with required hooks. No edits during normal push.
+
+Fresh immutable default-release CLI dff7764ae6114458fada5e218d1dd7c29c59ba7187aa83da85e2b26c72316dfd
+(69,998,192B), frozen source manifest e990ab1e4ff21be2ea4777223ab3dea9fd945081eb32bc099025d2027f1f3d4e
+all140 inputs match committed1b and saved bytes. New proof batch19289 TERMINAL0:
+18 CLI cost samples,4stable/main upgrade/rollback cases,2 DER25->26 Markdown
+repair cases,4 optimized CLI/MCP adapters all PASS. 1000links/depth200 init7.103s
+and cold3.454s;1024links/2000rules cold median67.790ms. Publication unchanged;
+complete500/500 document relation rows each checked, not whole-AST coverage.
+Updated cost MD/JSON reviewed APPROVED by Luna741; +0.78% binary vs acceptedmain.
+Current metadata/CI changes outside140 buildinputs; rebind after commit rather
+than repeat proved artifact. No general SLO or persistent-MCP timing claim.
+
+Task2.1 now CHECKED locally and live739;2.2/3.1 and all five acceptance rows
+remain UNCHECKED. Full platform/installed acceptance still required. Both Codex
+reviews1b COMPLETED; code false/false, security retained old advisory threads.
+CodeQL1b workflow41480027200 all7 SUCCESS, but native findings need fresh full
+intake/reconciliation (CodeQL aggregate remains failed). Prior full32 static
+assessment reported57/current1b complete and publicly read back; no alerts
+suppressed/dismissed. Seven genuine fix threads still open pending acceptance;
+417/ancestor dispositions resolved with exact public readback.
+
+Next: normal publish bounded CI/cost/task update; preserve native run handles,
+verify fresh Linux installed-reader and every native platform; reconcile exact
+head bots/CodeQL, complete2.2/3.1/acceptance and genuine feedback, normal merge
+and native closure739 BEFORE738->708->715 RC1 publication/independent install.
+GoalACTIVE; RC1 unpublished;050Latest;715 stable promotion needs later instruction.
+Preserve parked738/708 and three private715 specification edits. No fixed ETA
+while a required hosted gate is failing.

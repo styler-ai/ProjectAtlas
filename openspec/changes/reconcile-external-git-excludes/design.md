@@ -312,6 +312,17 @@ from tests of another operation. The isolated Windows matrix and restart control
 must establish the limit natively before this acceptance is complete; no product
 backend, source witness, quota, indexing deadline or security boundary changes.
 
+Native platform jobs use the same limited Cargo dev/test debug metadata as the
+Rust proof job. Hosted Linux exhausted disk while copying an independent runtime
+for the real-host reader after both debug and release builds; leaving platform
+jobs at full debug metadata missed the existing Rust-job resource control.
+CARGO_PROFILE_DEV_DEBUG=1 and CARGO_PROFILE_TEST_DEBUG=1 retain unoptimized tests,
+debug assertions and limited diagnostic information. Apply them to the platform
+job from its first compilation, preserving independent executable copies, all
+feature/target/test selectors, release-profile measurements and time budgets.
+Do not hide copy failures, hard-link mutable runtime fixtures or delete unrelated
+host SDKs to make this resource proof pass.
+
 Native source-policy CI remains required under its existing ten-minute cap.
 Place its unchanged commands after the existing twenty-minute PHP regression,
 which owns cold symbol/CLI dependency compilation in this job. Full-mode Intel
