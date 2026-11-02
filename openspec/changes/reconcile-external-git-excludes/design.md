@@ -179,6 +179,19 @@ under .ignore, no-Git .gitignore and selected global rules through real persiste
 MCP, plus deterministic all-platform receiver/epoch invalidation and existing
 runtime-path/access/outside filtering, source and structural uncertainty controls.
 
+Native watch discovery must distinguish a genuinely absent parent chain from a
+confirmed non-directory intermediate component. Windows can return `NotFound`
+where Unix returns `NotADirectory` for a child beneath a regular file. Reject
+the confirmed file at `PolicyWatchInputs::add_path` using the existing I/O error
+boundary, before registering the impossible selection. Preserve regular-file
+leaves, symlink expansion and genuinely absent parents. Stop this check once a
+closer ancestor resolves as a directory: ordinary Win32 parent normalization can
+cancel earlier lexical file components. Prove both blocker depths, regular and
+symlink leaves, missing-parent creation coverage and native ordinary `file/..`
+compatibility alongside observer startup cleanup. Synthetic Windows events that
+model notify must use the exact registered root; temporary-directory DOS short
+aliases are a separate input spelling, not the backend's event producer.
+
 Policy-only proof includes absent-document classification with an unchanged source inventory: no source-node delta is not evidence that document admission/reasons are unchanged. Reproduce any mismatch through real CLI/MCP before choosing a repair, then reuse the existing bounded reconciliation/projection owner rather than hashing every external edit into an unconditional all-source reparse. Preserve last-valid state on failed observation/reconciliation.
 
 Selected external configuration and excludes must be repeatable file inputs. Reject unsupported non-regular inputs promptly under existing typed failure semantics while retaining regular files and symlinks to regular files. Unix config opens avoid waiting on a FIFO replaced between metadata and open; do not claim hard kernel-I/O preemption or universal adversarial race freedom from cooperative controls. Cover failure and positive operator workflows before declaring the guard complete.

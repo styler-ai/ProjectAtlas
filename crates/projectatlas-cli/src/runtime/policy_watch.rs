@@ -136,6 +136,20 @@ impl PolicyWatchInputs {
                             }
                         }
                     }
+                    Ok(metadata)
+                        if ancestor != path && !nearest_directory_found && !metadata.is_dir() =>
+                    {
+                        // Windows can report a child of a file as NotFound.
+                        // A closer resolved directory already proves traversal;
+                        // earlier lexical components may be canceled by Win32 `..`.
+                        return Err(CliError::Io {
+                            path: ancestor.to_path_buf(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::NotADirectory,
+                                "external policy parent is not a directory",
+                            ),
+                        });
+                    }
                     Ok(_) => {}
                     Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
                     Err(source) => {
@@ -479,6 +493,11 @@ impl PolicyWatchSelection {
                             .any(|component| matches!(component, std::path::Component::ParentDir))
             })
         {
+            #[cfg(all(test, windows))]
+            eprintln!(
+                "source observer recursive coverage invalidated: root={:?}, event={event:?}",
+                self.root
+            );
             self.require_recursive_rebind();
         }
         true
@@ -612,6 +631,73 @@ mod tests {
             "coverage did not advance to the created parent",
         )?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_parent_symlink_to_file_refuses_descendants() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let file = base.join("regular-policy");
+        fs::write(&file, "selected.rs\n")?;
+        let alias = base.join("selected-policy");
+        std::os::unix::fs::symlink(&file, &alias)?;
+        selected(&root, std::slice::from_ref(&alias))?;
+        require(
+            matches!(
+                selected(&root, &[alias.join("config.toml")]),
+                Err(CliError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotADirectory
+            ),
+            "a policy symlink to a regular file admitted a child path",
+        )
+    }
+
+    #[test]
+    fn policy_parent_files_refuse_descendants_without_rejecting_leaf_or_missing_inputs()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let file = base.join("regular-policy");
+        fs::write(&file, "selected.rs\n")?;
+        let inputs = selected(&root, std::slice::from_ref(&file))?;
+        require(
+            inputs.paths.contains(&file),
+            "regular policy leaf was rejected",
+        )?;
+        #[cfg(windows)]
+        {
+            let ordinary_base =
+                PathBuf::from(projectatlas_core::lossless_native_path_display(&base)?);
+            let mut spelling = ordinary_base.into_os_string();
+            spelling.push("\\regular-policy\\..\\regular-policy");
+            let canceled_file = PathBuf::from(spelling);
+            require(
+                fs::read_to_string(&canceled_file)? == "selected.rs\n",
+                "ordinary Win32 parent normalization did not cancel the file component",
+            )?;
+            selected(&root, &[canceled_file])?;
+        }
+        for suffix in ["config.toml", "nested/config.toml"] {
+            require(
+                matches!(
+                    selected(&root, &[file.join(suffix)]),
+                    Err(CliError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotADirectory
+                ),
+                "existing policy parent file was accepted as a missing directory",
+            )?;
+        }
+        let missing = base.join("missing/nested/config.toml");
+        let inputs = selected(&root, std::slice::from_ref(&missing))?;
+        require(
+            inputs.paths.contains(&missing) && inputs.directories.contains(&base),
+            "genuinely absent policy parents lost their creation coverage",
+        )
     }
 
     #[cfg(unix)]

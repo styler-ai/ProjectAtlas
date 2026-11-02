@@ -9,10 +9,13 @@ and milestone closure require later user instruction. #731/PR737 and #741/PR743
 are merged/CLOSED; four RC issues remain OPEN and RC1 is unpublished.
 
 Exact checkout .worktrees/issue-739, branch fix/external-excludes-739, PR745
-OPEN, main base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs #739. Last
-uploaded baseline at this checkpoint:634cf7803977b8a392c77507c5a36de74190e152.
-The bounded-matcher change below is ready for its next normal commit/push;
-read Git and integration memory for the resulting live SHA/handle. Do not
+OPEN, main base6927ed0ca64788db6947b4d43eafce29aac5ed61, Refs #739.
+Public/local head ddc90bf72fa11f131b603098f08d89e93b2e2f6c. Normal push29417
+TERMINAL0 on2026-11-02T04:25:50Z;1792PASS/34suites/0FAIL/12ignored plus locked
+Rust/docs/dependency/repository/Atlas gates. All140 artifact inputs match the
+committed tree (/tmp/projectatlas-739-bounded-matcher-commit-source-binding.json).
+No local push/build/index live. This memory update is metadata-only; final task/
+continuity commit remains after full hosted acceptance. Do not
 start738 before739 is normally merged and native CLOSED. No force/admin/hook
 bypass, self-approval or database reset. Only task1.1 checked;2.1/2.2/3.1 and
 all five acceptance rows remain open pending exact-head hosted/review acceptance.
@@ -126,36 +129,66 @@ largeclosure+source-replacementCLI/MCP1PASS14.30s. Inventory source unchanged,
 Luna741 approved exact fresh cost packet; receipts' tracked-only dirty_paths omit
 new untracked module but hashed140-input manifest explicitly includes it.
 
-## Hosted and security acceptance still pending
+## Current hosted and security acceptance
 
-634source41379701198 TERMINAL: plan/Rust/Linux/MacARM/MacIntel/repository/
-Windowsdiagnostics SUCCESS; Windows failure above. CodeQL41379697364 all7SUCCESS,
-not a clean-scan claim. Current successor head needs fresh required checks/bots.
-Do not restart completed634jobs or repeat old pushes because observation yielded.
-Normal634push4931 TERMINAL0,1784PASS/34suites/12ignored; historical evidence only.
+Source41388423972 exactbase6927/head ddc: plan125094298262, Windowsdiagnostics
+125094349945, repository125094349962, Rust125094349967, Linux125094350014 and
+MacARM125094350053 SUCCESS. MacIntel125094349957 and Windows125094350002 LIVE
+at last check; poll those same jobs, do not restart because observation yields.
+Linux terminal log confirms externalCLI/MCP, document-onlyMCP, largeclosure/
+rootreplacement, ingressfilter and DBaliasretarget regressions PASS. MacIntel
+progressed beyond release/resource proof to installed-reader at05:01:12Z, not
+stalled. pr-state41388421527 SUCCESS. Old634Windows failure is historical.
 
-All15a2nativealert instances fetched; complete static triage prepared in
-/tmp/projectatlas-739-a2ccd-complete-triage-prepared.json, NOT RENDERED.13olderRust
-facts/fullflows andActions2flows unchanged vs parent; alert414 private cfg(test)
-fs::copy TempDir database has4aggregate-taint flows, no hostile path assignment.
-Copy reads content, not metadata-only. Keep exact source/test/operator boundaries;
-no suppressions/dismissals. Fresh successor SARIF reconciliation/per-input triage
-and rendering required, including any changed/new flows. Old public security
-comment6563449602 describesbad7 and must be updated after complete current triage.
+CodeQL41388419794 all7SUCCESS: Rust2074364500 has14results, Actions2074291446
+has1, other5zero. No clean-scan claim.13retainedRust result facts/fullflows match
+634 after exactly unchanged source-line relocation. Former409result absent;
+new415 separately inspected, not deduplicated. All15native exactddc instances
+fetched viaREST, ordered415/414/413/412/411/410/408/407/406/405/404/372/316/237/236.
+/tmp/projectatlas-739-ddc90-{rust,actions}-reconciliation.json and
+/tmp/projectatlas-739-ddc90-instance-reconciliation.json retain source evidence.
 
-Open threads: olddocumentP2 PRRT_kwDOQyFgJ86yfjX1; controlledfallbackP2
-PRRT_kwDOQyFgJ86ygrn7/comment4438294526 (reply4438359277); resourceP2
-PRRT_kwDOQyFgJ86ygte3; AdvancedSecurity414 PRRT_kwDOQyFgJ86yg0JO. Prior7threads
-resolved. Completed bot summary does not disposition every open thread. Resolve
-only after source-specific proof/replies, current scans/platform and final review.
+415 has4completeflows/27relatedlocations: leaseFileopen and Node kind/language/
+content_hash aggregate taint is propagated to batch.root, but full3262 and
+incremental8878/9067 explicitly assign immutable plan.root. Prefix admission at
+graph_projection4082 precedes batch matching; metadata241 only classifies dirs.
+Not actionable for supplied flow.414 privatecfgtest copy reads owned fixture DB
+content;4aggregateflows do not assign its PathBuf. No universal TempDir/race/
+metadata-containment claim; trusted test environment overrides for other alerts
+can select non-TempDir fixture paths. No source restriction/suppression/dismissal.
+
+Complete16input current static triage (15native alerts plus the genuine older
+resource finding now repaired) is /tmp/projectatlas-739-ddc90-complete-triage.json,
+RENDERED through CodexSecurityapp, one row per input. Current secondary citations
+come from exactSARIF, not guessed offsets: runtimecfgtest9859-9860/test15463-15485;
+FScfgtest1575-1576/rootfixture2527/2528/2529/2533. No runtime-triage claim; separate
+fix-finding runtime proof remains above. Current static dispositions need no new
+source fixes. Keep required platform/release acceptance distinct.
+
+Code and separate security reviews COMPLETED forddc; codefalse/false, security
+flagsnull and older resource advisory still listed until thread resolution.
+TechnicalFP414reply4439040686 and415reply4439040822 read back EXACT; matching
+threads PRRT_kwDOQyFgJ86yg0JO and PRRT_kwDOQyFgJ86yiVaS RESOLVED. Publicsecurity
+summary6563449602 updated/readbackEXACT for this head, replacing oldbad7summary.
+ResourceP2reply4438902496 also exact. PR745scope/costbody readbackEXACT.
+
+12reviewthreads/9resolved. Only3 genuine fix threads remain OPEN pending platform
+acceptance: document-onlyP2 PRRT_kwDOQyFgJ86yfjX1; controlledfallbackP2
+PRRT_kwDOQyFgJ86ygrn7/comment4438294526; resourceP2 PRRT_kwDOQyFgJ86ygte3.
+No current new code-review finding. Do not bulk-resolve or infer thread closure
+from a completed review summary. Live739scope explicitly includes no observed-
+MCP quota retry; PRscopedIssueOps PASS (candidate4/live4/checked1), allpostbase
+commit subjects solely(#739), no unrelated mapped task file changed.
 
 ## Next and preserved work
 
-Normally commit solely(#739), bind140inputs, pushwithhooks from CLEAN issue739.
-While pushlive update integration memory only; retain same live handle on waits.
-Then app readback, refreshed PR scope/costs, fresh exact-head CI/security/bot
-comments, complete triage/render, task synchronization/five acceptance rows,
-normalmerge745/native739CLOSED. Goal remains ACTIVE until actualRC1verification.
+Finish current Windows/MacIntel proof and inspect terminal #739 selectors, then
+resolve the three examined fix threads, synchronize implementation/five acceptance
+rows/liveissue and final metadata-only continuity/tasks commit. Reuse expensive
+source proof only with verified unchanged140inputs/artifact identities; normal
+protected gates remain mandatory. Normalmerge745/native739CLOSED before738.
+Goal remains ACTIVE until actualRC1verification. Source739 worktree must be clean
+while any subsequent normal push runs; update integration memory only then.
 
 #738 parked8814d6d+dirtymemory. #708/PR728 publicc65dfed/local587ecbe+dirtymemory,
 warm1201.127ms FAIL/focused1.031526ms partial/noSLO waiver. Reconcile live/main
@@ -163,3 +196,45 @@ warm1201.127ms FAIL/focused1.031526ms partial/noSLO waiver. Reconcile live/main
 three private715proposal/design/spec edits plus memory; preserve all. Later715
 evaluates PR744 outside RC milestone and queued CodexCIgap. Integration entry
 .worktrees/v0.5.1/memory-bank/active-context.md; prior708checkpoint preserved.
+
+
+### Latest verified CI blocker — 2026-11-02
+
+Exact public head ddc90bf / source run 41388423972: Windows job
+125094350002 FAILED; macOS Intel job125094349957 remains in progress.
+Rust, repository, Linux, macOS ARM and Windows diagnostics passed.
+The corrected Windows parent-component policy fixture passes. Twelve later
+source_observation tests fail (27 pass), involving warm verification, injected
+observer-event filtering and the non-directory configuration-parent refusal.
+Full terminal log: /tmp/projectatlas-739-ddc90-windows-ci.log. Root cause remains
+under investigation; ordinary/display versus native Windows root representations
+is a hypothesis, not an established fixture-only disposition. No source fix for
+these failures has been made. Independent read-only review_741 is running.
+PR745 remains OPEN/BLOCKED; three genuine fix review threads stay open pending
+platform acceptance. Four native milestone37 issues remain OPEN:739,738,708,715.
+731 and741 are natively CLOSED. Continue739 only; RC1 remains unpublished.
+
+
+### Windows CI investigation slice prepared
+
+Confirmed product defect: PolicyWatchInputs::add_path treated Windows NotFound
+for a child beneath a regular file as a genuinely missing parent. New owning
+guard rejects only confirmed non-directory proper ancestors before any closer
+directory resolves, preserving ordinary Win32 canceled file/.. components,
+regular/symlink leaves and genuinely absent parent chains. Added shared blocker
+depths/positive controls, Unix symlink-target control and Windows actual-read
+file/.. positive. Independent Luna731 approved source/spec slice.
+
+Two Windows synthetic-event fixtures now canonicalize root before constructing
+DB/events, matching notify's exact registered-root producer rather than the
+caller's possible RUNNER~1 temp spelling. Both prove directory case mode.
+Added test-build-only Windows event/rebind/continuity diagnostics; no speculative
+production event-filter broadening. Luna741 approved fixture/diagnostic slice
+(the subsequent insensitive-mode assertion follows its recommendation).
+
+Local42observer+12policy tests PASS; affected all-target/all-feature Clippy,
+strict-strings, fmt, strict OpenSpec and planned IssueOps PASS. New Windows
+native branches and remaining epoch failures are UNVERIFIED; next ordinary
+commit/push must obtain fresh native trace. Prior ddc performance/artifact proofs
+remain historical; do not claim new-head artifact/cost equivalence without proof.
+All acceptance rows remain unchecked and three real fix threads stay open.

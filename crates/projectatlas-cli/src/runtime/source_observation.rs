@@ -693,6 +693,13 @@ impl SourceObservationEntry {
         if self.continuity_lost.load(Ordering::Acquire)
             || self.policy_selection.recursive_rebind_pending()
         {
+            #[cfg(all(test, windows))]
+            eprintln!(
+                "source observer drain refused: root={:?}, continuity_lost={}, recursive_rebind={}",
+                self.binding.root,
+                self.continuity_lost.load(Ordering::Acquire),
+                self.policy_selection.recursive_rebind_pending()
+            );
             self.invalidate();
             return Ok(true);
         }
@@ -727,6 +734,17 @@ impl SourceObservationEntry {
                         );
                         let mut event_changes = self.preserve_consumed_event(classified)?;
                         event_changes.requires_full_scan |= inputs.affects(&filtered);
+                        #[cfg(all(test, windows))]
+                        if event_changes.has_changes() {
+                            eprintln!(
+                                "source observer event invalidated epoch: root={:?}, database={:?}, event={filtered:?}, full={}, source={:?}, documents={:?}",
+                                self.binding.root,
+                                self.binding.database,
+                                event_changes.requires_full_scan,
+                                event_changes.paths,
+                                event_changes.document_paths
+                            );
+                        }
                         changes.merge(event_changes);
                     }
                 }
@@ -3988,6 +4006,14 @@ mod tests {
         let root = temp.path().join("MiXeDAtlasRoot");
         let metadata = root.join(".projectatlas");
         fs::create_dir_all(&metadata)?;
+        // Native notify paths retain the exact registered canonical root;
+        // the temporary directory may instead use a DOS short-name ancestor.
+        let root = root.canonicalize()?;
+        let metadata = root.join(".projectatlas");
+        require(
+            !crate::project_state::windows_filesystem::case_sensitive(&metadata)?,
+            "case-insensitive observer fixture has a case-sensitive metadata directory",
+        )?;
         let database = metadata.join("ProjectAtlas.db");
         fs::write(&database, b"SQLite format 3\0")?;
         let sidecars = ["-wal", "-shm", "-journal"].map(|suffix| {
@@ -4058,6 +4084,12 @@ mod tests {
         let root = parent.join("Root");
         let metadata = root.join(".projectatlas");
         fs::create_dir_all(&metadata)?;
+        let root = root.canonicalize()?;
+        let metadata = root.join(".projectatlas");
+        require(
+            crate::project_state::windows_filesystem::case_sensitive(&metadata)?,
+            "case-sensitive fixture directory did not inherit native case sensitivity",
+        )?;
         let database = metadata.join("ProjectAtlas.db");
         fs::write(&database, b"SQLite format 3\0")?;
         let binding = SourceBinding::new(&database, &root, None)?;

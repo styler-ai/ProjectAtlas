@@ -61,6 +61,11 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a supported selected config changes the effective excludes pathname
 - **THEN** accepted reconciliation updates external watch coverage, including absent paths, and discovers later edits to the newly selected input without per-event-path reconstruction of global policy
 
+#### Scenario: A selected policy parent is a regular file
+- **WHEN** a selected policy pathname requires traversing an existing regular file as a directory, directly or through a symlink target
+- **THEN** watch admission refuses the impossible parent and releases partial native coverage on every supported platform, even when the operating system reports the child as missing
+- **AND** regular-file leaves, genuinely absent parent chains and native ordinary Win32 parent normalization retain their supported behavior
+
 #### Scenario: Selected source directory is replaced
 - **WHEN** a supported selected source directory is replaced at the same canonical pathname during CLI/MCP observation while its explicit external database and configuration remain available
 - **THEN** structural uncertainty invalidates the prior warm epoch, recursive coverage is restored before cold source sampling, and accepted refresh/read results reflect the replacement source while preserving database/project identity and all approved purposes
