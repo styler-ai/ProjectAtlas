@@ -1,3 +1,98 @@
+# New Ec3 security finding — cumulative document rows (supersedes gate-only status)
+
+Public/local HEAD ec3d5cf remains PR745 OPEN/unmerged. Codex code review completed
+without findings; security review completed with NEW report4448000523:
+https://github.com/styler-ai/ProjectAtlas/pull/745#discussion_r4448000523.
+Static triage of this separately supplied new finding completed inline/rendered
+one CONFIRMED, then phase explicitly LEFT before edits/tests. Preserved report,
+normalization and full assessment: /tmp/projectatlas-739-document-rows-static-triage.json.
+No current whole-native Ec3 clean verdict; old6f9 collection remains qualified.
+
+Confirmed shared gap: cold paged verifier skips both matcher/prefix quotas for
+normalization errors, indexed-heading targets and case-conflict shortcuts. Original
+deadline still applies; no outside-root read or code execution claim. Primary
+owns source; Luna741 approved plan (read-only): one cumulative1,000,000-row allowance
+after cooperative check and before any normalization/shortcut, private typed
+DocumentRows marker, existing full PolicyUnavailable/no automatic quota retry.
+Keep256-row keyset producer plus fixed-page/sentinel read-ahead. No SQL/schema,
+dependency, public API/error or derivation contract change. Private value object
+consolidates existing fault knobs; alternatives SQL normalization/COUNT rejected.
+
+Spec/design/proposal updated; tasks2.1/2.2 REOPENED local/live, matching mitigations
+unchecked, allfiveacceptance and3.1 unchecked,1.1 checked. Issue body exact readback;
+strictOpenSpec/scopedIssueOps PASS after transition. Prior production proofs reused
+only where unaffected, new artifact/cost/adapter/handoff readiness still required.
+
+CAUSAL beforeguard test56953 TERMINAL101: one real540-row/three-page outside-link
+fixture FAILED 'document row allowance ignored shortcut ../outside at limit 0'.
+Log /tmp/projectatlas-739-document-rows-before-fix.log. Primary then added guard
+and expanded fixture to6shortcut/ordinary families, including10,800outside rows
+(above10k graphpage ceiling), zero/pageboundary/one-short refusal and exact-count
+success, typed nonretry, cancellation/publication/identity/purpose preservation.
+MCP existing quota dispatch test includesDocumentRows marker/wire-compatibility.
+Focused46086 and54615 TERMINAL101 were fixture-only failures: parser intentionally
+rejects dir//target and bare'.' before persistence. Replaced with admitted nested
+colon and invalid-fragment selectors, preserving actual producer proof. Corrected
+85206 TERMINAL0:1PASS2.64s. Added default-wrapper10,800-row positive, then91306
+TERMINAL0:document_40PASS24.73s; MCPquota1PASS.20s; CLIalltargets/allfeaturesClippy,
+strictstrings/fmt/diff PASS. No local test process remains. Logs document-rows-
+{document-regressions,mcp-quota,clippy,strings}.log; no suppressed failure.
+Luna741 actualsource/spec review APPROVED with no source blocker, explicitly
+notwholeissueacceptance. Spec/design refined per review: each continuation rereads
+one sentinel; totaldecoded work also includes those prior repeated sentinels,
+with at most one current over-limit256-rowpage+sentinel. Optional optimization
+to stop before that extra page deliberately omitted as unnecessary to boundedness.
+StrictOpenSpec/scopedIssueOps pass. Next commit source/spec/ownedmemory, build
+clean default artifact, freeze140inputs, measure affected costs/real adapters,
+update handoff/tasks only when complete, then normal push/fresh gates.
+
+OldEc3 source41528395756 andCodeQL41528385905 wereLIVE at last poll; don't infer
+failure or restart on observation yield. Their completion isn't final proof for
+this new product edit. After focused/regressions: actualdiff Luna741 review, fresh
+defaultartifact/boundedcost/realpositive adapters and inputs-based reuse, owned
+handoff/taskcompletion, normalcleanpush andfreshaffected-hosted/securityintake,
+resolveNEWthread withproof, finalreadiness/acceptance then normalmerge/nativeclose739
+BEFORE738→708→715RC1. GoalACTIVE; stable publication remains unauthorized.
+
+# Latest publication ec3 — normal push complete; final gates running (historical)
+
+PUBLIC/local HEADec3d5cfdeb99c6ffe7810c8241cc577f39e34b3b confirmedremote;PR745OPEN.
+Sourcea5/frozenCLI0358/manifest597 unchangedbyEc3metadata, all140saved/Gitinputs
+matched /tmp/projectatlas-739-child-signal-metadata-binding.json. Normalpush56376/
+wrapper1152690/git1152843 TERMINAL0 at2026-11-02T21:26:35.853365Z; DO NOTrepollaslive.
+1819PASS/0FAIL/12ignored34targets +allrequiredRust/docs/security/repository gates.
+Log/receipt /tmp/projectatlas-739-child-signal-push{.log,-session.json}. Clean
+immediatelyafterpush; THISsubsequentownmemoryupdate isdirty—preserveuntilfinalmeta.
+
+Fresh Ec3 SOURCE41528395756 LIVE; CodeQL41528385905 LIVE (7languageanalyses),
+PRstate41528389316 launched. PRbodyrewrittenaroundcurrenta5/Ec3/artifact/retained76
+proof andtasks2.1/2.2complete/3.1+fiveacceptancepending; EXACTappreadback.
+Do NOTassumeprevious6f9 CodeQL34assessment isfreshEc3scan. Preparedintake
+/tmp/projectatlas-739-child-signal-exact-intake.py expectsEc3 andretainsallmarkers/
+oldresources/advisory; waitall7analysesandbothbots, normalizeWHOLEinputsbeforeverdict.
+No sourcechanges unlessconfirmedmaterialnewfinding; productionbytes unchanged.
+
+ALL8 genuineproductfixthreads NOW individuallyreplied/readback/resolved using
+completed6f9nativeproof andunchangedproduction/ownedA5testproof. CurrentGraphQL
+20threads/0UNRESOLVED verifiedbybundledthread-awarefetch. Receipts
+/tmp/projectatlas-739-child-signal-{resolved-thread-state,feedback-closure}.json.
+ReplyIDs:doconly4447855673,fullfallback4447856277,policyresource4447856784,
+fullnoop4447857327,prefix4447857875,ancestor4447858384,Unicode4447859025,
+fence4447871126. Unicodeinitialreadbacktruncateddiff_hunk; locatedEXISTINGreply,
+verifiedbodyviafield-onlyAPI, thenresolved; NOduplicatereply. Publicsecuritysummary
+6563449602 updated/EXACTreadbackfor6f9allnativepassed+all20resolved; stillscoped6f9.
+AutoMergeRequestNULL confirmedbefore resolutions; no prematuremerge.
+
+Luna741 finalacceptancePREP COMPLETE: firstfouroutcomes (intent,implementation,
+spec/N/Aarchitecture,causalproof) haveNOadditionalgap, explicitlyqualifying6f9
+nativeproof/productidentity andA5correctedtestproof. Finalreadinessconditional
+onnewEc3affected-inputgates/freshfindingreconciliation; NOTwholeissueapproval.
+No agents duringstatictriage; waitreviewercomplete beforeenteringfinalinlinephase.
+Task1.1/2.1/2.2checked;3.1/fiveacceptanceunchecked. GoalACTIVE739onlythen738/708/715RC1.
+Old8OPEN/nextnormalpushnotesbelowaresuperseded. Next:monitorSAMEfreshjobs, address
+actualnewfindings, finishindependentreadiness+3.1/fiveacceptance, normalmetadata
+inputs-basedgate/reuse, normalmerge/native739CLOSED. No stablepublication.
+
 # Active RC1 checkpoint
 
 Older detailed checkpoints are in Git a5ac546 and predecessors. Live source,

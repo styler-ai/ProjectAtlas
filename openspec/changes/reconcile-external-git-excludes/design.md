@@ -513,7 +513,21 @@ resource, limit and observed work. It must not masquerade as incremental
 Entries/SourceBytes work that triggers a fresh full-scan retry. Staging and fresh
 publication revalidation deliberately construct separate matchers and each has
 its own pass quota; both retain the same cooperative whole-operation deadline.
-No hard unresolved-row cap or partial successful publication is introduced.
+Cold verification separately admits at most 1,000,000 returned document rows per
+pass before normalization or any early exit. This generous cumulative work
+allowance is independent of the 256-row keyset page size and existing policy and
+prefix limits. Normalization failures, indexed-heading targets and case-conflict
+shortcuts all count. Every page decodes one lookahead that is reread on the next
+page. At exhaustion, read-ahead is bounded by one current 256-row page plus its
+lookahead; the CLI stops before normalizing the first disallowed returned row.
+No repository-wide row collection or partial successful
+publication is introduced. Row exhaustion uses the same private typed terminal
+work marker and public PolicyUnavailable guidance as the other quotas, so neither
+incremental nor observed-MCP fallback can restart it. The query, schema, public
+errors and derivation contract stay unchanged. A local integer counter suffices;
+SQL filtering would duplicate normalization semantics without bounding other
+early exits. Test exact and exceeded allowances across pages, all shortcut
+families, cancellation, state preservation and positive target-change discovery.
 A failed matcher pass is terminal, including a partial native parser failure;
 retry requires a fresh matcher. Keep an internal, non-serialized typed policy
 resource on quota verification refusals so the observed MCP watch owner also

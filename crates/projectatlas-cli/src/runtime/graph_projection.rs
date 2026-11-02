@@ -4311,9 +4311,29 @@ pub(super) fn nonindexed_document_projection_changed(
         nodes,
         options,
         control,
-        PolicyMatchLimits::default(),
-        MAX_DOCUMENT_PREFIX_PROBES,
+        DocumentVerificationLimits::default(),
     )
+}
+
+/// Independent cumulative work allowances for one paged document verification pass.
+#[derive(Clone, Copy)]
+struct DocumentVerificationLimits {
+    /// Hierarchical policy inputs and directory-context loads.
+    policy: PolicyMatchLimits,
+    /// Native path-admission calls across all inspected targets.
+    prefix_probes: u64,
+    /// Returned document rows, including every normalization/lookup shortcut.
+    rows: u64,
+}
+
+impl Default for DocumentVerificationLimits {
+    fn default() -> Self {
+        Self {
+            policy: PolicyMatchLimits::default(),
+            prefix_probes: MAX_DOCUMENT_PREFIX_PROBES,
+            rows: 1_000_000,
+        }
+    }
 }
 
 /// Keep explicit policy accounting at the real paged verifier, including fault tests.
@@ -4323,8 +4343,7 @@ fn nonindexed_document_projection_changed_with_limits(
     nodes: &[Node],
     options: &projectatlas_fs::ScanOptions,
     control: &IndexWorkControl,
-    limits: PolicyMatchLimits,
-    prefix_probe_limit: u64,
+    limits: DocumentVerificationLimits,
 ) -> Result<(bool, u64), CliError> {
     const DOCUMENT_INPUT_PAGE: u32 = 256;
     let mut page =
@@ -4341,12 +4360,30 @@ fn nonindexed_document_projection_changed_with_limits(
         nodes,
         &scan_policy,
         control,
-        limits,
-        prefix_probe_limit,
+        limits.policy,
+        limits.prefix_probes,
     )?;
+    let mut inspected_rows = 0_u64;
     loop {
         for row in &page.rows {
             control.check(IndexWorkStage::RepositoryTraversal)?;
+            inspected_rows = inspected_rows.saturating_add(1);
+            if inspected_rows > limits.rows {
+                return Err(CliError::VerificationIncomplete(Box::new(
+                    super::IndexVerificationIncomplete {
+                        policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
+                        project_root: lossless_project_root_display(root),
+                        worktree: None,
+                        status: IndexReadStatus::VerificationIncomplete,
+                        reason: super::IndexVerificationReason::PolicyUnavailable,
+                        scope: IndexRefreshScope::Full,
+                        message: format!(
+                            "document verification exceeds row work: observed {inspected_rows}, limit {}",
+                            limits.rows,
+                        ),
+                    },
+                )));
+            }
             let Ok(target) = normalize_document_target(row.source.as_str(), row.reference.as_str())
             else {
                 continue;
@@ -17223,6 +17260,179 @@ function helper() {}
     }
 
     #[test]
+    fn document_verification_charges_rows_before_all_shortcuts_across_pages()
+    -> Result<(), Box<dyn Error>> {
+        use std::fmt::Write;
+
+        for (selector, reason) in [
+            ("../outside", DocumentTargetUnresolvedReason::OutsideRoot),
+            (
+                "dir/target:invalid",
+                DocumentTargetUnresolvedReason::Unsupported,
+            ),
+            (
+                "target.md#invalid",
+                DocumentTargetUnresolvedReason::NoStaticTarget,
+            ),
+            ("target.md", DocumentTargetUnresolvedReason::Missing),
+            ("TARGET.md", DocumentTargetUnresolvedReason::CaseConflict),
+            ("absent.md", DocumentTargetUnresolvedReason::Missing),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+            fs::write(root.join("target.md"), "# Existing heading\n")?;
+            let files = if selector == "../outside" { 60 } else { 3 };
+            for file in 0..files {
+                let mut text = String::new();
+                for target in 0..180 {
+                    writeln!(text, "[target]({selector}#missing-{file}-{target})")?;
+                }
+                fs::write(root.join(format!("guide-{file}.md")), text)?;
+            }
+            let plan = super::super::ScanRuntimePlan::for_path(None, root, Some(100_000))?;
+            let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+            let mut store = super::super::open_atlas_store_for_project(
+                &root.join(".projectatlas/projectatlas.db"),
+                root,
+            )?;
+            super::super::refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "guide-0.md",
+                "Retain authored document purpose",
+                projectatlas_core::PurposeSource::Agent,
+            )?;
+            let publication = store.index_publication()?;
+            let identity = store.project_instance_id()?;
+            let authored_revision = store.authored_purpose_revision()?;
+            let control = super::super::standalone_index_work_control();
+            let nodes = projectatlas_fs::scan_repo(root, &plan.scan_options)?;
+            // Prove the parser and persisted producer reach the intended shortcut.
+            let mut after = None;
+            let mut count = 0_u64;
+            loop {
+                let page =
+                    store.repository_unresolved_documents_page(after.as_ref(), 256, &control)?;
+                for row in &page.rows {
+                    require_eq(&row.reason, &reason, selector)?;
+                }
+                count += page.rows.len() as u64;
+                if !page.truncated {
+                    break;
+                }
+                after = page.rows.last().map(|row| row.digest);
+            }
+            require_eq(
+                &count,
+                &(180 * files),
+                &format!("fixture {selector} must span real keyset pages"),
+            )?;
+            if selector == "../outside" {
+                require(
+                    count > u64::from(GraphLimits::MAX_ROWS),
+                    "positive fixture must exceed the per-query graph row ceiling",
+                )?;
+            }
+            for limit in [0, 256, count - 1] {
+                let error = super::nonindexed_document_projection_changed_with_limits(
+                    &store,
+                    root,
+                    &nodes,
+                    &plan.scan_options,
+                    &control,
+                    super::DocumentVerificationLimits {
+                        rows: limit,
+                        ..super::DocumentVerificationLimits::default()
+                    },
+                )
+                .err()
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "document row allowance ignored shortcut {selector} at limit {limit}"
+                    ))
+                })?;
+                require(
+                    matches!(&error, CliError::VerificationIncomplete(state)
+                        if state.policy_work_limit == Some(super::super::VerificationWorkLimit::DocumentRows)
+                            && state.reason == super::super::IndexVerificationReason::PolicyUnavailable
+                            && state.scope == IndexRefreshScope::Full
+                            && state.message.contains(&format!("observed {}, limit {limit}", limit + 1))),
+                    "row refusal lost its typed resource or cumulative work",
+                )?;
+                require(
+                    !super::super::incremental_refresh_needs_full(&error),
+                    "row refusal restarted through full fallback",
+                )?;
+            }
+            require_eq(
+                &super::nonindexed_document_projection_changed_with_limits(
+                    &store,
+                    root,
+                    &nodes,
+                    &plan.scan_options,
+                    &control,
+                    super::DocumentVerificationLimits {
+                        rows: count,
+                        ..super::DocumentVerificationLimits::default()
+                    },
+                )?,
+                &(false, 2 * count.div_ceil(256)),
+                "exact row allowance must permit every page and shortcut",
+            )?;
+            if selector == "../outside" {
+                require_eq(
+                    &super::nonindexed_document_projection_changed(
+                        &store,
+                        root,
+                        &nodes,
+                        &plan.scan_options,
+                        &control,
+                    )?,
+                    &(false, 2 * count.div_ceil(256)),
+                    "default allowance must admit more than the graph query row ceiling",
+                )?;
+            }
+            require_eq(
+                &store.index_publication()?,
+                &publication,
+                "row refusal publication",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "row refusal identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &authored_revision,
+                "row refusal authored purposes",
+            )?;
+            control.cancel();
+            require(
+                matches!(
+                    super::nonindexed_document_projection_changed_with_limits(
+                        &store,
+                        root,
+                        &nodes,
+                        &plan.scan_options,
+                        &control,
+                        super::DocumentVerificationLimits {
+                            rows: 0,
+                            ..super::DocumentVerificationLimits::default()
+                        },
+                    ),
+                    Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. })
+                        | CliError::Db(projectatlas_db::DbError::IndexWork(
+                            IndexWorkFailure::Cancelled { .. }
+                        )))
+                ),
+                "row accounting replaced original cancellation",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn document_policy_probe_reuses_work_across_pages_and_preserves_state_on_refusal()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -17261,8 +17471,10 @@ function helper() {}
             &nodes,
             &plan.scan_options,
             &control,
-            projectatlas_fs::PolicyMatchLimits::new(64, 64 * 1024),
-            super::MAX_DOCUMENT_PREFIX_PROBES,
+            super::DocumentVerificationLimits {
+                policy: projectatlas_fs::PolicyMatchLimits::new(64, 64 * 1024),
+                ..super::DocumentVerificationLimits::default()
+            },
         )?;
         require_eq(
             &result,
@@ -17275,8 +17487,10 @@ function helper() {}
             &nodes,
             &plan.scan_options,
             &control,
-            projectatlas_fs::PolicyMatchLimits::default(),
-            6 * 256 + 4,
+            super::DocumentVerificationLimits {
+                prefix_probes: 6 * 256 + 4,
+                ..super::DocumentVerificationLimits::default()
+            },
         )
         .err()
         .ok_or_else(|| std::io::Error::other("paged native prefix quota was ignored"))?;
@@ -17296,8 +17510,10 @@ function helper() {}
             &nodes,
             &plan.scan_options,
             &control,
-            projectatlas_fs::PolicyMatchLimits::new(0, u64::MAX),
-            super::MAX_DOCUMENT_PREFIX_PROBES,
+            super::DocumentVerificationLimits {
+                policy: projectatlas_fs::PolicyMatchLimits::new(0, u64::MAX),
+                ..super::DocumentVerificationLimits::default()
+            },
         )
         .err()
         .ok_or_else(|| std::io::Error::other("policy quota was ignored"))?;

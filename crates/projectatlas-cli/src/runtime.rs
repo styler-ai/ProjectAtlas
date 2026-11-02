@@ -443,6 +443,8 @@ pub(crate) enum VerificationWorkLimit {
     Policy(projectatlas_fs::PolicyMatchResource),
     /// Native document-prefix metadata and canonicalization probes.
     DocumentPrefixes,
+    /// Returned unresolved-document rows, including normalization and lookup shortcuts.
+    DocumentRows,
 }
 
 /// Bounded typed report returned when source verification is incomplete.

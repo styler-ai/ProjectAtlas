@@ -17561,6 +17561,7 @@ mod tests {
                 projectatlas_fs::PolicyMatchResource::DirectoryContexts,
             ),
             crate::runtime::VerificationWorkLimit::DocumentPrefixes,
+            crate::runtime::VerificationWorkLimit::DocumentRows,
         ] {
             let quota = incomplete(Some(resource));
             let encoded: serde_json::Value =

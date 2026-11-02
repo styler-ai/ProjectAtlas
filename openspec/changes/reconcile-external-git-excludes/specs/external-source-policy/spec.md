@@ -167,8 +167,15 @@ Document resolution and the cold unresolved-document probe SHALL reuse native hi
 
 #### Scenario: Multiple pages reuse loaded policy
 - **WHEN** a cold probe checks distinct absent targets across multiple keyset pages under the same local policy
-- **THEN** one pass reuses its loaded native policy rather than rebuilding it for each row, without retaining a repository-wide target-reason cache or imposing a document-row cutoff
+- **THEN** one pass reuses its loaded native policy rather than rebuilding it for each row, without retaining a repository-wide target-reason cache; a cumulative verification-row allowance remains separate from the per-page result limit
 - **AND** the original cooperative control applies across all pages and later operations discover fresh policy
+
+#### Scenario: Every paged document row consumes verification work
+- **WHEN** cold verification pages unresolved document relations, including selectors that fail normalization, indexed targets with unresolved headings and case-conflict targets
+- **THEN** every returned row consumes the same cumulative allowance before normalization or any early exit; the default admits at most 1,000,000 rows per pass, independent of the 256-row pages and existing policy/native-prefix quotas
+- **AND** exhaustion returns typed full-scope PolicyUnavailable incomplete-verification guidance with observed work and limit, cannot restart through incremental or observed-MCP fallback, and preserves last-valid publication, project identity and approved purposes
+- **AND** each bounded query may decode its single continuation lookahead, which is reread on the next page; exhaustion can read ahead by at most one current 256-row page plus its lookahead, without unbounded row materialization or further pagination after refusal
+- **AND** ordinary multi-page reads at the allowance complete and later operations retain fresh target-change detection and the original cancellation/deadline
 
 #### Scenario: Policy work and retained contexts exhaust their bounds
 - **WHEN** local hierarchical policy parsing or directory-context loads exceed the pass limits, including reloads after bounded-cache eviction
