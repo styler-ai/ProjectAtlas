@@ -156,9 +156,35 @@ callback, including those sharing an armed wake. Fence the actual initial and
 incremental/full refresh calls with that generation. If uncertain ingress overlaps
 a refresh, reload/rebind and reconcile again under the same original control
 before counting a completed watch cycle; a change-and-revert cannot leave the
-transient candidate as the final accepted result. No new timeout or retry budget
-is introduced. A causal fixture exercises real publication while policy changes
-and reverts inside this production fence.
+transient candidate as the final accepted result. A causal fixture exercises real
+publication while policy changes and reverts inside this production fence.
+
+Sustained unrelated callbacks can otherwise repeat this expensive full refresh
+until its existing deadline. Bound each initial or subsequent fence to three
+reconciliation attempts. On repeated overlap, retain uncertainty and use the
+existing watcher-unavailable/polling handoff instead of accepting an unstable
+native result or removing the generation check. Drop native observation before
+polling. Carry that refresh's original IndexWorkControl into the first polling
+plan reload and refresh; cancellation, deadline, policy-work quota and ordinary
+verification failures must propagate, never masquerade as a native observation
+failure that grants fresh work. Later completed polling cycles retain their
+existing independent controls. Preserve the total requested finite cycle count
+when a later native cycle hands off after earlier accepted cycles. Polling keeps
+its established sampling semantics: changes that occur and revert entirely
+between polling samples are not promised as separately observed events.
+
+Keep this at the private policy-fence and runtime watch owners: a concrete
+attempt counter, existing Watcher failure and controlled first polling helper are
+sufficient; no worker, public error variant, schema or alternate source snapshot
+is required. An unbounded retry under only the thirty-minute ceiling permits
+avoidable work amplification. Discarding Unicode events or accepting unchanged
+end-of-scan policy bytes loses transient change-and-revert correctness, while
+failing the command after finite normal overlap loses the existing portable
+watch workflow. Protect the choice with a bounded causal pre-fix failure,
+real-refresh finite-overlap controls, cancellation/deadline and first-poll budget
+proof, initial/subsequent handoff coverage and a real CLI sibling-flood scenario
+with subsequent legitimate policy/source edits. Reuse unchanged MCP warm-epoch
+and native replacement controls; this does not add universal local availability.
 
 Replacing the selected source directory at the same pathname can also leave its recursive registration on the retired object, especially with an external database that survives the replacement. Retain structural uncertainty until the cold owner rebinds recursive coverage under the original work control, before exact source sampling; never add an unconditional warm-read rewatch. In the source-observation adapter, publish that uncertainty under the same receiver fence as the event and ingress sequence so final acceptance cannot acknowledge an empty queue while a rebind marker has already become visible. Ordinary access events without rescan retain their existing ignored behavior before any marker mutation; notify errors and genuine rescan/overflow still invalidate continuity. Add a deterministic callback/fence negative control and permanent CLI/MCP replacement proof with external database/config, unchanged project identity and all approved purposes, updated source results and no accidental conventional database creation. Existing root/config and registered-worktree lifecycle admission remain authoritative; this does not authorize bypassing an identity refusal or adopting a different root.
 

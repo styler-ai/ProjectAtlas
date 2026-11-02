@@ -87,6 +87,8 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions as FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
+const EXTERNAL_POLICY_RULES_FILE: &str = "rules";
+const XDG_CONFIGURATION_DIRECTORY: &str = "xdg";
 
 const OBSERVED_SOURCE_PATH: &str = "source.rs";
 const OBSERVED_DOCUMENT_TARGET_PATH: &str = "target.rs";
@@ -13151,7 +13153,7 @@ fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<
     let home_text = home
         .to_str()
         .ok_or_else(|| io::Error::other("fixture home is not UTF-8"))?;
-    let xdg = home.join("xdg");
+    let xdg = home.join(XDG_CONFIGURATION_DIRECTORY);
     let xdg_text = xdg
         .to_str()
         .ok_or_else(|| io::Error::other("fixture XDG path is not UTF-8"))?;
@@ -13421,7 +13423,7 @@ fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<
     Ok(())
 }
 
-/// Capture every approved purpose, including its source and review status.
+/// Capture active approved purposes, including their source and review status.
 fn approved_purposes(
     store: &AtlasStore,
 ) -> Result<Vec<projectatlas_core::Purpose>, Box<dyn Error>> {
@@ -13697,6 +13699,223 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
     check_database_object_document_alias(&mcp_contract_executable())
 }
 
+// Inotify delivers the high-frequency individual callbacks used by this native
+// flood reproduction. Shared fence/control units run on every native platform.
+#[cfg(target_os = "linux")]
+#[test]
+fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(), Box<dyn Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    for later_handoff in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().canonicalize()?;
+        let root = directory.join(TEST_REPO_DIR);
+        fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(
+            root.join("README.md"),
+            "# Watch\n[source](src/file0000.rs)\n[later](src/later.rs)\n",
+        )?;
+        // Enough ordinary source work to overlap native ingress without sleeps
+        // or a production hook inside reconciliation.
+        for ordinal in 0..512 {
+            fs::write(
+                root.join(format!("src/file{ordinal:04}.rs")),
+                format!("pub fn item_{ordinal}() {{}}\n"),
+            )?;
+        }
+        let database = directory.join("state/atlas.db");
+        let rules = directory.join(EXTERNAL_POLICY_RULES_FILE);
+        let git_config = directory.join("selected.gitconfig");
+        fs::write(&rules, "")?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        let executable = mcp_contract_executable();
+        let command = || {
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(&root)
+                .args(["--format", "json", "--db"])
+                .arg(&database)
+                .env("GIT_CONFIG_GLOBAL", &git_config)
+                .env("GIT_CONFIG_SYSTEM", "")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "XDG_CONFIG_HOME",
+                    directory.join(XDG_CONFIGURATION_DIRECTORY),
+                )
+                .env("PROJECTATLAS_NO_TELEMETRY", "1");
+            command
+        };
+        Command::from_std(command())
+            .arg("init")
+            .timeout(Duration::from_secs(60))
+            .assert()
+            .success();
+        let (identity, purposes, revision, generation) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Retain watch guide responsibility",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                "src/file0000.rs",
+                "Retain source responsibility",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                mcp_database_snapshot(&database)?.authored_purposes,
+                store.authored_purpose_revision()?,
+                store.index_publication()?,
+            )
+        };
+        if later_handoff {
+            fs::write(root.join("src/ready.rs"), "pub fn ready() {}\n")?;
+        }
+        let mut child = command()
+            .arg("watch")
+            .arg(&root)
+            .args(["--poll-seconds", "1", "--max-cycles", "4"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut actor = None;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            if later_handoff {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while AtlasStore::open_read_only(&database)?.index_publication()? == generation {
+                    if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                        return Err(io::Error::other(
+                            "native watch did not publish its initial cycle",
+                        )
+                        .into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // No flood is active during the initial publication fence.
+                thread::sleep(Duration::from_millis(250));
+            }
+            let stop = Arc::clone(&stop);
+            let noise = directory.join("λ-sibling");
+            let rules = rules.clone();
+            let later = root.join("src/later.rs");
+            actor = Some(thread::spawn(move || -> io::Result<usize> {
+                let started = Instant::now();
+                let mut writes = 0;
+                let mut policy_changed = false;
+                let mut source_added = false;
+                while !stop.load(Ordering::Acquire) {
+                    fs::write(&noise, writes.to_string())?;
+                    writes += 1;
+                    // Separate legitimate operator edits must survive the flood.
+                    if !policy_changed && started.elapsed() >= Duration::from_millis(400) {
+                        fs::write(&rules, "src/file0000.rs\n")?;
+                        policy_changed = true;
+                    }
+                    if !source_added && started.elapsed() >= Duration::from_millis(1_400) {
+                        fs::write(&later, "pub fn later() {}\n")?;
+                        source_added = true;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(writes)
+            }));
+            if later_handoff {
+                fs::write(root.join("src/trigger.rs"), "pub fn trigger() {}\n")?;
+            }
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while child.try_wait()?.is_none() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other(
+                        "native policy flood prevented bounded watch completion",
+                    )
+                    .into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })();
+        stop.store(true, Ordering::Release);
+        let writes = match actor {
+            Some(actor) => actor
+                .join()
+                .map_err(|_panic| io::Error::other("policy flood actor panicked"))
+                .and_then(|result| result),
+            None => Ok(0),
+        };
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
+        let output = child.wait_with_output()?;
+        operation?;
+        rust_binding_require(writes? > 0, "native policy flood produced no callbacks")?;
+        rust_binding_require(
+            output.status.success(),
+            &format!("watch failed: {}", String::from_utf8_lossy(&output.stderr)),
+        )?;
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        require_json_string(&report, &["mode"], "portable-polling")?;
+        require_json_usize(&report, &["cycles"], 4)?;
+        require_json_contains(&report, &["fallback_reason"], "bounded native refresh")?;
+        let relations = Command::from_std(command())
+            .args([
+                "symbols",
+                "relations",
+                "--view",
+                "detailed",
+                "--file",
+                "README.md",
+                "--direction",
+                "outbound",
+                "--relation",
+                "documents",
+                "--limit",
+                "10",
+            ])
+            .timeout(Duration::from_secs(60))
+            .output()?;
+        rust_binding_require(
+            relations.status.success(),
+            "post-flood document query failed",
+        )?;
+        let relations: Value = serde_json::from_slice(&relations.stdout)?;
+        let rows = relations["symbol_relations"]["rows"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("post-flood document rows missing"))?;
+        let mut outcomes = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["relation"]["resolution"]["status"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    row["document_unresolved_reason"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        outcomes.sort_unstable();
+        rust_binding_equal(
+            &outcomes,
+            &vec![("resolved", ""), ("unresolved", "ignored")],
+        )?;
+        let store = AtlasStore::open_read_only(&database)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(
+            &mcp_database_snapshot(&database)?.authored_purposes,
+            &purposes,
+        )?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
     const EXTERNAL_POLICY_DIRECTORY: &str = "policy/current/nested";
@@ -13823,7 +14042,9 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         let git_config = directory
             .join(EXTERNAL_POLICY_DIRECTORY)
             .join(EXTERNAL_GIT_CONFIGURATION_FILE);
-        let rules = directory.join(EXTERNAL_POLICY_DIRECTORY).join("rules");
+        let rules = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_POLICY_RULES_FILE);
         write_project(&root, "initial_target")?;
         fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY))?;
         fs::write(root.join("policy-target.rs"), "pub fn policy_target() {}\n")?;

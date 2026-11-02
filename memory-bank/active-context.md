@@ -444,3 +444,153 @@ and native closure739 BEFORE738->708->715 RC1 publication/independent install.
 GoalACTIVE; RC1 unpublished;050Latest;715 stable promotion needs later instruction.
 Preserve parked738/708 and three private715 specification edits. No fixed ETA
 while a required hosted gate is failing.
+
+
+## Current public checkpoint — c431fdb source verification live
+
+Normalpush66804/wrapper407506/git407510 TERMINAL0 at2026-11-02T17:07:43.332120Z.
+All1814tests/34suites PASS,0FAIL/12ignored; required Rust/docs/dependency/
+OpenSpec/IssueOps/Atlas scan+lowpurpose lint PASS. Do NOT repoll/restart push.
+Public/local HEAD c431fdb39bcf75b7c95ec788a6ca146f832a750b, verified app exacthead;
+PR745OPEN/unmerged/Refs739, base/main6927ed0ca64788db6947b4d43eafce29aac5ed61.
+Selected clean immediately after push; only later memory updates. Commit adds
+CIresource parity+freshcostdocs+2.1completion/proposal/memory; NO Rust/buildinput
+changes. /tmp/projectatlas-739-platform-debug-commit-source-binding.json verifies
+all140 frozen committed AND saved inputs match c431 and exact dff CLI artifact.
+No redundant optimized rebuild/proof required for this metadata/CI follow-up.
+
+Fresh SOURCE41488165395 LIVE on exactc431; plan125424735486SUCCESS. Currentjobs:
+repository125425270332, Rust125425270378, Windows125425270659,
+Windowsdiagnostics125425270703, MacARM125425270707, Linux125425270745 LIVE;
+MacIntel125425271172 queued atlastread. Preserve thesehandles; no restartmerely
+forobstimeout. Sourcepolicy/native/installed/fullplatform gates stillpending.
+PRstate41488161702/41488315311SUCCESS. Metadata41488314690 LIVE followsSAMEsource
+proof; bodyedit cannotcancel/rerun it. CodeQLdynamic41488159691LIVE; needall7
+exactc431analyses before finalcompleteintake. Codexsummary6562604562 at17:08:19Z
+bothcode+SecurityRUNNINGexactc431, no quotaerror. Fourretainedadvisorythreads are
+not newverdicts; 7genuine fixthreads remainOPEN.
+
+Previous1bSOURCE41480033316 nowTERMINALCANCELLED by configurednewsourcecommit
+concurrency, NOTobservation-timeoutrestart. ARM125396656378 fullSUCCESS.
+Windows native causal/legal/coldrestartunits andrealhostreaderSUCCESS; later
+pluginproof interrupted. MacIntel125396656272 PHP SUCCESS16:21–16:34:45, native
+policyunits SUCCESS16:34:45–16:40:04. Resourceproof CANCELLED17:08:23 while release
+service rustc wasstillcompiling17:07:10, not atestassertionfailure/stepdeadline.
+Logs /tmp/projectatlas-739-native-rename-macos-x64-ci{,-clean}.log. Linuxfailed
+ENOSPC atcopy boundary; exactnewDEBUG1nativejobpositive remainsrequired.
+
+Luna741 finalbounded acceptance audit: CONDITIONALAPPROVAL, no new source/spec
+blocker; reviewed source/cost/proof supports firstfourdimensions subjecttofresh
+hostedproof. Notfinalreadiness. Luna731 boundedCIactualdiff APPROVED pending
+freshLinuxcopypositive. Same reviewers reusable; primary owns allwrites.
+Issue739 bodyprogress wording nowagreeschecked2.1/pending2.2/3.1/fiveacceptance,
+appmutationEXACTreadback. Two unansweredgenuine threads nowtechnicalreplies:
+ancestor4445255796 andUnicode4445256259, bothexactreadback; stillOPEN. Freshapp
+inventory18threads/7unresolved,no newfinding. PRbody updatedcurrentdffcost/
+140sourcebinding/nativeproof/CIresourcefix andEXACTappreadback atpublicc431;
+/tmp/projectatlas-739-platform-debug-pr-body.md. Prior32staticassessment
+reported57/current1b remainsqualified; freshc431nativeflowreconciliationpending.
+Prepared NOTRUN /tmp/projectatlas-739-platform-debug-exact-intake.py targets
+c431/PRheadref, normalizesWHOLEcollectionbeforeverdict. No currentheadscanclaim.
+
+Next: monitorSAMEfreshsource, establishLinuxinstalledreaderpositive and allnative
+platforms, finalexactheadCodeQL/bots/threadreview, thencomplete2.2/3.1/fiveacceptance
+withreviewproof andnormalmerge/native739CLOSED BEFORE738->708->715RC1. Finaltask
+metadata stillneedsnormalpublish/requiredchecks, no bypass. GoalACTIVE;
+RC1unpublished/050Latest; stablepromotionrequireslaterinstruction. Preserveparked
+738/708 andthreeprivate715specedits. No fixedETA while requiredproofpending.
+
+
+## Policy-fence security follow-up — implementation verified locally
+
+Public/local committedHEAD c431fdb39bcf75b7c95ec788a6ca146f832a750b, PR745OPEN
+unmerged. CurrentDIRTY follow-up source/spec/tests/inventory/memory is primary's
+authorized #739 work; sourcecommit next, NOTyetpublic. Newsecurityreport4445386019
+at c431 policy_watch855 is confirmed bounded LOCALresourceamplification: each
+uncertain callback advancesgen, so initial/latercontinuousCLI fences repeatfull
+reconciliation untiloriginal30mdeadline. Notinfinite/budgetrenewal/remoteexecution.
+One-reportcollection normalizedBEFOREverdict, staticappRENDERED1confirmed;
+/tmp/projectatlas-739-policy-fence-{review-report,normalized-input,static-triage}.json.
+Staticphase explicitlyLEFT before fixes/tests/agents. Userauthorizedallsecurity
+fixes; no permissionpending. Luna741independentPLAN APPROVED, primarywroteall.
+
+2.1 REOPENED locally+liveissue739 withbothmitigationsunchecked,1.1checkedonly;
+2.2/3.1/fiveacceptance allunchecked. WhatChanges/spec/design/proposal boundthree
+nativeattempts perinitial/laterrefresh thenexistingpolling, ACTIVEcontrolfirst
+pollreload/refresh, laternormalpercyclecontrols/totalfinitecycles. Generation
+fencepreserved; pollinghasordinarybetween-samplestransientlimit. No publicenum,
+schema or derivationchange (still26/23). No database/queryproductchange.
+
+Implementation runtime/policy_watch.rs MAX_POLICY_FENCE_ATTEMPTS3, retainsflags
+andchecksoriginalcontrolbeforeWatcherfallback. Bothrun_notifywatchfencecallers
+dropnativewatcher anddirectlyusecontrolledfirstpoll; latercaller subtracts
+acceptedcyclesandaddsreturnedcount. Existingpollwrappercreatesnormalfirstcontrol;
+privatecontrolledhelperusesplan.reload_controlled+refresh_index_controlled
+firstsample, existingfreshpercyclebehaviorlater. Typedwork/quota/verification
+errorsnotconvertedtoWatcher. SharedMCPobservernotchanged.
+
+Causalprefixtest --all-features --bin projectatlas fails oldloopafter4safely
+capped realrefreshattempts; /tmp/projectatlas-739-policy-fence-before-fix-bin.log.
+Twoinitialwrong --libselectorsran0tests, NOTcoverage. Correctedteststargetbinary.
+4cli_policy_fence_*PASS:bounds3,latecancel,originalABA/preentry.
+1polling_handoff_preserves_active_control_and_authored_statePASS:cancel/expired
+firstpollnopublication/statechange+positiveidentity/purposes/source. Existing
+watch_work_failure...PASS. Logs policy-fence-{focused,control-proof,existing-
+budget-proof}.log. Unitcompileinitialnodefieldharnesserrorfixed to node.node.
+
+RealLinuxCLI proof37215TERMINAL0 /tmp/projectatlas-739-policy-fence-native-cli-
+proof.{py,json,log}: predecessorimmutabledfftimesout8s with6837unrelatedwrites;
+changeddefaultdebugCLI initial3.37s/later4.04s bothportable-polling4cycles plus
+selectedpolicy/sourceedits,unchangedallapprovedincldormant/identity/revision.
+Firstscriptmodeexpectedpolling notexistingportable-polling; preservedmodeharness
+failure,correctedwithoutproductchange. No generalSLO. Currentdebugbinarymaynow
+beallfeaturetestbuild; JSONrecordsactualearlierdefaultbinarySHA.
+
+PERMANENT continuous_cli_policy_flood_preserves_polling_and_later_edits added
+toe2e_navigation; Linuxinotifyhighfrequencycase, bothinitial/laterhandoffs, bounded
+noiseactorstop/join+childkill/wait,error/deadlinecleanup,4cycles,realdocument
+ignored/resolvedoutcomes+authoredstate. Firstpurposeexpectationusedactive-only
+helper; productpurposesremainDORMANTnotlost. CorrectednewcasewithEXISTING
+mcp_database_snapshot.authored_purposes, helperdocclarifiedactivewithoutchanging
+itsbehavior. No rawnewSQL/productDBchange. Otherplatformssharerefenceunits;
+newcontrolledpollunitexplicitinall4nativeCIjobs,original10mincapunchanged.
+
+Luna741source/E2Ereview foundno furthercodeblocker; caughtpairedinventorygap,now
+CLOSED byreview. Inventory225tests,newLinuxcfgrow,normalizednavigationhash
+e8a3ffc5634e65da75f7c7bc0214573142c70fd5d79ffd464785e156303e75c4 inJSON+
+source_contract. HISTORICAL440symbols/frozenfacetsunchanged. Repeatedrules/xdg
+fixturepathliteralscentralizedatfileowner,samepathbytes.
+FINAL79213TERMINAL0:3inventoryenforcement/tampertestsPASS,permanentE2E1PASS10.99s,
+CLIalltarget/allfeatureClippyPASS,strictstringsPASS,fmt/strictOpenSpec/diffPASS.
+Correctstringgatecargo projectatlas-lints strict-strings (alias); initialwrong
+packagecargo-projectatlas-lintsnotfoundNOTcoverage. ReviewpublicationAPPROVED
+forboundedsource+E2E+inventory, NOTwholeissueacceptance.
+
+C431hostedSOURCE41488165395 stillLIVE: Rust/repository/diag/Linux/ARMfullSUCCESS.
+Linuxhostreader125425270745PASS17:28:59–17:30:35 verifies ENOSPCfix. Windows
+125425270659 lateobsoleteMCPhandoff; MacIntel125425271172 lateforwarderlifecycle,
+bothpastresource/hostreaderproof,notterminalyet. Preservehandles. All7CodeQL
+c43141488159691SUCCESS; Rust2079171492=25,Actions2079021320=2,fiveothers0.
+CompletePRrefREST27native+33wholeinputintake saved platform-debug-exact-*;
+WHOLE33normalizedBEFOREanynewaggregateverdict. All13previousreportedRustfiles
+byteunchanged57->c431 (beforethisnewdirtyfix); Actionsfullfacts/flowsidentical
+afterEXACT5lineenvmapping. Newwhole33finalsourceassessmentNOTcompleted/rendered.
+Prior32reported57/current1bassessmentstaysqualified; new1fenceconfirmed.
+Botcodec431COMPLETEDfalse/false;SecurityCOMPLETEDtrue/true(newfence).
+
+19threads/8unresolved:previous7genuine+newfence. Newreply4445535052 exactreadback,
+threadOPEN. Liveissue739reopenmirrorEXACT. PRbodyandpublicsecuritysummary6563449602
+updatedEXACTreadbackqualifynew1outsideprior32; no currentclean-scanclaim.
+Atlas050exact739briefreturnedpolicy_drift/fullrefresh aftercandidate26scan;
+preserveprivateDB,purposes; no orientationdowngrade/reset/scan. Exactbounded
+sourceevidenceused, notstalegraph.
+
+NEXT: finalcheapIssueOps,sourcecommitONLYintended739files; defaultreleasebuild/
+freezecurrentcommittedsourceBEFOREnormalpush, freshaffectedcost/upgrade+adapters
+(includenewflood) andfinalcostdocs+sourcebinding; metadatacommitwith2.1checked
+ONLYafterproportionateproofthenNORMALcleansinglepushrequiredhooks. Thisavoids
+extraCIcyclejustforartifactdocs. Newproductionbytesinvalidate dffascurrentproof:
+keepdff/c431historical,neverassumebinaryidentity. Thenfreshnative/securityfull
+headreconcileand8genuinefeedback/tasks/acceptance;normal739merge/nativeclosure
+BEFORE738->708->715RC1publish/independentinstall. GoalACTIVE,RC1absent/050Latest;
+preserveparkedwork/private715edits,stablepromotionrequireslaterinstruction.

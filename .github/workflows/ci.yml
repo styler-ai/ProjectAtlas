@@ -495,6 +495,7 @@ jobs:
           cargo test --locked -p projectatlas-fs --lib --all-features
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::polling_handoff_preserves_active_control_and_authored_state -- --exact
 
       - name: Managed project-state ownership platform regressions
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')

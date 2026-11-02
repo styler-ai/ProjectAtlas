@@ -18,6 +18,8 @@ const MAX_POLICY_SYMLINKS: usize = 64;
 const MAX_POLICY_WATCH_DIRECTORIES: usize = 256;
 /// Bound selection convergence while establishing cold native observation.
 const MAX_POLICY_WATCH_ATTEMPTS: usize = 3;
+/// Bound full reconciliation while uncertain ingress prevents a native refresh fence.
+const MAX_POLICY_FENCE_ATTEMPTS: usize = 3;
 /// Git's directory whose children change the registered worktree inventory.
 const REGISTRATIONS_DIRECTORY: &str = "worktrees";
 /// One uncertain event is queued until its controlled recheck consumes the wake.
@@ -844,15 +846,15 @@ impl PolicyWatchSelection {
             != 0
     }
 
-    /// Retry a continuous-CLI refresh overlapped by uncertain policy ingress.
-    /// Each retry uses the original work control and asks the existing cold owner to rebind.
+    /// Retry bounded continuous-CLI refresh overlap before requesting polling fallback.
+    /// Every attempt retains the original control and asks the cold owner to rebind.
     pub(super) fn reconcile_with_policy_fence<T>(
         &self,
         control: &IndexWorkControl,
         mut reconcile: impl FnMut(bool) -> Result<T, CliError>,
     ) -> Result<T, CliError> {
         let mut retry = false;
-        loop {
+        for _ in 0..MAX_POLICY_FENCE_ATTEMPTS {
             control.check(IndexWorkStage::RepositoryTraversal)?;
             let observed = self
                 .policy_recheck_state
@@ -872,6 +874,11 @@ impl PolicyWatchSelection {
             }
             retry = true;
         }
+        self.retain_policy_recheck();
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        Err(CliError::Watcher(
+            "policy ingress overlapped the bounded native refresh attempts".to_string(),
+        ))
     }
 
     /// Preserve unknown native coverage until the cold owner successfully re-registers it.
@@ -1028,6 +1035,94 @@ mod tests {
         require(
             selection.take_policy_recheck() && selection.take_structural_policy_recheck(),
             "a later coalesced structural event lost rebind uncertainty",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_policy_fence_bounds_repeated_overlapping_refreshes() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(root.join("source.rs"), "pub fn source() {}\n")?;
+        let config = base.join("external.toml");
+        fs::write(&config, "")?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(selected(&root, &[config])?))?;
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(base.join("λ-sibling"));
+        let plan = super::super::ScanRuntimePlan::for_path(None, &root, None)?;
+        let mut store = super::super::open_atlas_store_for_project(
+            &root.join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        let options = super::super::SymbolBuildOptions::new(100_000, Some(1), None);
+        let control = super::super::standalone_index_work_control();
+        let mut calls = 0;
+        let result = selection.reconcile_with_policy_fence(&control, |_retry| {
+            calls += 1;
+            if calls > 3 {
+                return Err(CliError::InvalidInput(
+                    "test stopped repeated native refresh before its operation deadline"
+                        .to_string(),
+                ));
+            }
+            if !selection.observe(&event) {
+                return Err(CliError::InvalidInput(
+                    "fence did not consume the preceding uncertain wake".to_string(),
+                ));
+            }
+            super::super::refresh_index_controlled(&mut store, &plan, &options, &control)
+        });
+        require(
+            matches!(result, Err(CliError::Watcher(_))) && calls == 3,
+            &format!("native overlap did not request bounded polling: calls={calls}"),
+        )?;
+        require(
+            selection.take_policy_recheck(),
+            "bounded native failure discarded policy uncertainty",
+        )?;
+        require(
+            store.load_node_by_path("source.rs")?.is_some(),
+            "native retry lost its complete source publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_policy_fence_preserves_cancellation_at_the_attempt_limit() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(selected(&root, &[base.join("external.toml")])?))?;
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(base.join("λ-sibling"));
+        let control = super::super::standalone_index_work_control();
+        let mut calls = 0;
+        let result = selection.reconcile_with_policy_fence(&control, |_retry| {
+            calls += 1;
+            selection.observe(&event);
+            if calls == 3 {
+                control.cancel();
+            }
+            Ok(())
+        });
+        require(
+            calls == 3 && matches!(result, Err(CliError::IndexWork(_))),
+            "attempt exhaustion hid cancellation behind native fallback",
+        )?;
+        require(
+            selection.take_policy_recheck(),
+            "cancelled native attempts discarded policy uncertainty",
         )?;
         Ok(())
     }

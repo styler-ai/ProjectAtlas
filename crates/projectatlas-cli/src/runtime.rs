@@ -8222,7 +8222,7 @@ pub(crate) fn run_notify_watch_loop(
     )?;
     let debounce = Duration::from_secs(poll_seconds.max(1));
     let mut cycles = 0;
-    let mut last_refresh = policy_selection.reconcile_with_policy_fence(&control, |retry| {
+    let mut last_refresh = match policy_selection.reconcile_with_policy_fence(&control, |retry| {
         if retry {
             current_plan = plan.reload_controlled(&control)?;
             policy_selection.require_recursive_rebind();
@@ -8237,7 +8237,22 @@ pub(crate) fn run_notify_watch_loop(
             )?;
         }
         refresh_index_controlled(store, &current_plan, symbol_options, &control)
-    })?;
+    }) {
+        Ok(report) => report,
+        Err(error @ CliError::Watcher(_)) => {
+            drop(watcher);
+            return run_polling_watch_loop_controlled(
+                store,
+                plan,
+                poll_seconds,
+                max_cycles,
+                symbol_options,
+                Some(error.to_string()),
+                &control,
+            );
+        }
+        Err(error) => return Err(error),
+    };
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
         runtime_ingress.begin_drain();
@@ -8263,7 +8278,7 @@ pub(crate) fn run_notify_watch_loop(
                 &mut registered_policy_directories,
                 &control,
             )?;
-            last_refresh = policy_selection.reconcile_with_policy_fence(&control, |retry| {
+            last_refresh = match policy_selection.reconcile_with_policy_fence(&control, |retry| {
                 if retry {
                     current_plan = plan.reload_controlled(&control)?;
                     policy_selection.require_recursive_rebind();
@@ -8286,7 +8301,24 @@ pub(crate) fn run_notify_watch_loop(
                         &control,
                     )
                 }
-            })?;
+            }) {
+                Ok(report) => report,
+                Err(error @ CliError::Watcher(_)) => {
+                    drop(watcher);
+                    let mut report = run_polling_watch_loop_controlled(
+                        store,
+                        plan,
+                        poll_seconds,
+                        max_cycles.saturating_sub(cycles),
+                        symbol_options,
+                        Some(error.to_string()),
+                        &control,
+                    )?;
+                    report.cycles += cycles;
+                    return Ok(report);
+                }
+                Err(error) => return Err(error),
+            };
             cycles += 1;
         }
     }
@@ -8623,9 +8655,32 @@ pub(crate) fn run_polling_watch_loop(
     symbol_options: &SymbolBuildOptions,
     fallback_reason: Option<String>,
 ) -> Result<WatchReport, CliError> {
+    let control = index_work_control(symbol_options);
+    run_polling_watch_loop_controlled(
+        store,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        fallback_reason,
+        &control,
+    )
+}
+
+/// Preserve active work through the first sample when native observation hands off.
+fn run_polling_watch_loop_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    fallback_reason: Option<String>,
+    control: &IndexWorkControl,
+) -> Result<WatchReport, CliError> {
+    control.check(IndexWorkStage::RepositoryTraversal)?;
     let mut cycles = 0;
-    let mut current_plan = plan.reload()?;
-    let mut last_refresh = refresh_index(store, &current_plan, symbol_options)?;
+    let mut current_plan = plan.reload_controlled(control)?;
+    let mut last_refresh = refresh_index_controlled(store, &current_plan, symbol_options, control)?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
         thread::sleep(Duration::from_secs(poll_seconds.max(1)));
@@ -16057,6 +16112,108 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             }
             Err(source) => Err(source),
         }
+    }
+
+    #[test]
+    fn polling_handoff_preserves_active_control_and_authored_state() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source.rs");
+        fs::write(&source, "pub fn initial() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let mut store = open_atlas_store_for_project(
+            &temp.path().join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        refresh_index(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "source.rs",
+            "Retain source responsibility",
+            PurposeSource::Agent,
+        )?;
+        let publication = store.index_publication()?;
+        let identity = store.project_instance_id()?;
+        let revision = store.authored_purpose_revision()?;
+        let node = store.load_node_by_path("source.rs")?;
+        fs::write(&source, "pub fn changed() {}\n")?;
+        let cancelled = standalone_index_work_control();
+        cancelled.cancel();
+        let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+        for control in [cancelled, expired] {
+            let result = run_polling_watch_loop_controlled(
+                &mut store,
+                &plan,
+                0,
+                1,
+                &options,
+                Some("native policy observation unavailable".to_string()),
+                &control,
+            );
+            require_eq(
+                &matches!(result, Err(CliError::IndexWork(_))),
+                &true,
+                "first polling sample renewed stopped native work",
+            )?;
+            require_eq(
+                &store.index_publication()?,
+                &publication,
+                "stopped handoff publication",
+            )?;
+            require_eq(
+                &store.load_node_by_path("source.rs")?,
+                &node,
+                "stopped handoff source",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "stopped handoff identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "stopped handoff purposes",
+            )?;
+        }
+        let report = run_polling_watch_loop_controlled(
+            &mut store,
+            &plan,
+            0,
+            1,
+            &options,
+            Some("native policy observation unavailable".to_string()),
+            &standalone_index_work_control(),
+        )?;
+        require_eq(
+            &report.mode.as_str(),
+            &WATCH_MODE_POLLING,
+            "polling handoff mode",
+        )?;
+        require_eq(&report.cycles, &1, "polling handoff cycles")?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "successful handoff identity",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &revision,
+            "successful handoff purposes",
+        )?;
+        let current = store.load_node_by_path("source.rs")?;
+        require_eq(
+            &current.as_ref().map(|node| node.purpose.status),
+            &Some(PurposeStatus::Approved),
+            "successful handoff approved purpose",
+        )?;
+        let source_changed = current.as_ref().map(|node| &node.node.content_hash)
+            != node.as_ref().map(|node| &node.node.content_hash);
+        require_eq(
+            &source_changed,
+            &true,
+            "successful handoff did not reconcile source",
+        )?;
+        Ok(())
     }
 
     #[test]

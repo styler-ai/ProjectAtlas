@@ -101,6 +101,13 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **AND** known source/root/control, unknown-parent, rescan and native-error events retain their existing bounded admission and coverage behavior
 - **AND** exact captured SQLite runtime notifications reach controlled runtime filtering without first arming policy uncertainty, so a Unicode source-root name and explicit external database preserve cold/warm reads and source edits; structural main-file changes, alias retarget uncertainty and genuine policy events remain observable
 
+#### Scenario: Sustained uncertain ingress bounds native refresh attempts
+- **WHEN** uncertain sibling callbacks repeatedly overlap an initial or subsequent continuous CLI refresh
+- **THEN** native generation fencing permits at most three reconciliation attempts for that refresh before using the existing polling observation mode, instead of repeatedly rescanning until the whole-operation deadline
+- **AND** the handoff releases native observation and carries the active cancellation/deadline into its first polling plan reload and reconciliation; typed work or verification failures propagate without fallback or a fresh budget
+- **AND** finite overlap still reconciles transient selected-policy edits before accepting a native cycle, while polling preserves current policy/source outcomes, identity, approved purposes, later edits and the requested total finite cycle count
+- **AND** later completed polling cycles retain their existing per-cycle work controls and sampling semantics, without promising changes that occur and revert between polling samples; no new command, public error enum, schema, callback filesystem lookup or universal hostile-filesystem availability guarantee is introduced
+
 #### Scenario: Selected source directory is replaced
 - **WHEN** a supported selected source directory is replaced at the same canonical pathname during CLI/MCP observation while its explicit external database and configuration remain available
 - **THEN** structural uncertainty invalidates the prior warm epoch, recursive coverage is restored before cold source sampling, and accepted refresh/read results reflect the replacement source while preserving database/project identity and all approved purposes
