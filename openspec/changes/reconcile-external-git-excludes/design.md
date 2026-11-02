@@ -42,6 +42,12 @@ producer path. Force the alias case on Unix to reproduce the fixture fault, then
 prove real native events for writes through both selected and canonical root
 spellings using distinct leaves so a delayed earlier event cannot satisfy the
 next observation. Preserve the existing stale-read/mutation invalidation assertions.
+The database-alias retarget fixture follows the same producer rule: force a
+selected-root symlink on Unix, retain raw operator DB/root selections for I/O,
+and derive structural/retarget event paths from the captured binding root. A
+selected spelling is not a valid injected FSEvents callback merely because it
+names the same object. Keep native target-sidecar delivery and genuine config/
+ignore controls; do not add a production normalization exception for this fixture.
 
 Windows parent-component fixtures must use ordinary Win32 spelling: a raw
 verbatim `\\?\` path containing `..` is an invalid native filename, not proof
@@ -115,6 +121,18 @@ Do not add a retry budget, suppress initial or one-shot root admission, or weake
 root/lifecycle/DB binding. Exercise the actual batch helper causally, including
 child-before-root ordering, ordinary/non-regular policy and native-error controls;
 the standalone test helper's fallback must not mask the production failure.
+
+Moving continuous notify reconciliation to a caller-controlled entry point must
+retain the existing incremental-limit fallback at that production owner. A
+resource refusal for incremental entry/source-byte work or dependency closure
+requires complete discovery and one atomic publication under the SAME original
+control, not termination or a new polling budget. Keep raw captured/read-only
+incremental consumers and their existing typed admission/fallback owners distinct.
+Cancellation, deadline and unrelated failures still propagate; full reconciliation
+retains its own resource/error controls. The oversized-batch regression must call
+the actual controlled production entry, cover source and document-only batches,
+discover an addition absent from the events, preserve identity/purposes and publish
+one generation, with stopped controls retaining the last valid publication.
 
 Runtime-event suppression must identify an admitted filename namespace, not any
 source path that resolves to the same object. An explicit operator DB symlink

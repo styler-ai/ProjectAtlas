@@ -2149,12 +2149,16 @@ mod tests {
     #[test]
     fn database_alias_retarget_and_policy_events_remain_observable() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let root = temp.path().join("repo");
-        fs::create_dir(&root)?;
+        let actual_root = temp.path().join("repo");
+        fs::create_dir(&actual_root)?;
+        let root = temp.path().join("selected-root");
+        std::os::unix::fs::symlink(&actual_root, &root)?;
         let (database, _source) = indexed_project(&root)?;
         let selected = root.join("selected.db");
         std::os::unix::fs::symlink(&database, &selected)?;
         let binding = SourceBinding::new(&selected, &root, None)?;
+        // Match native registration paths while retaining the raw operator selector.
+        let native_selected = binding.root.join("selected.db");
         let options = projectatlas_fs::ScanOptions::default();
         for kind in [
             EventKind::Create(notify::event::CreateKind::File),
@@ -2165,7 +2169,7 @@ mod tests {
                 observer_event_changes(
                     &binding,
                     &options,
-                    &Event::new(kind).add_path(selected.clone()),
+                    &Event::new(kind).add_path(native_selected.clone()),
                 )
                 .has_changes(),
                 "database namespace replacement was acknowledged as an ordinary self-write",
@@ -2183,7 +2187,7 @@ mod tests {
             observer_event_changes(
                 &binding,
                 &options,
-                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(selected),
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(native_selected),
             )
             .has_changes(),
             "retargeted database alias was filtered by stale target authority",

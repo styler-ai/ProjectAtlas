@@ -3636,7 +3636,7 @@ pub(crate) fn reconcile_hydrated_index_controlled(
                 document_paths: delta.paths.clone(),
                 paths: delta.paths,
             };
-            let refresh = match refresh_index_for_changes_from_source_controlled(
+            let refresh = match attempt_incremental_refresh_controlled(
                 store,
                 plan,
                 &changes,
@@ -3644,7 +3644,8 @@ pub(crate) fn reconcile_hydrated_index_controlled(
                 Some(assessment.source),
                 control,
             ) {
-                Ok(refresh) => refresh,
+                Ok(Some(refresh)) => refresh,
+                Ok(None) => refresh_index_controlled(store, plan, symbol_options, control)?,
                 Err(CliError::RefreshRequired(report))
                     if report.reason == IndexRefreshReason::DependencyClosureLimit =>
                 {
@@ -8630,7 +8631,7 @@ pub(crate) fn refresh_index_from_assessment_controlled(
                 document_paths: delta.paths.clone(),
                 paths: delta.paths,
             };
-            match refresh_index_for_changes_from_source_controlled(
+            match attempt_incremental_refresh_controlled(
                 store,
                 plan,
                 &changes,
@@ -8638,7 +8639,10 @@ pub(crate) fn refresh_index_from_assessment_controlled(
                 Some(assessment.source),
                 control,
             ) {
-                Ok(report) => return Ok(report),
+                Ok(Some(report)) => return Ok(report),
+                Ok(None) => {
+                    return refresh_index_controlled(store, plan, symbol_options, control);
+                }
                 Err(error) if incremental_refresh_needs_full(&error) => {}
                 Err(error) => return Err(error),
             }
@@ -8765,13 +8769,7 @@ pub(crate) fn refresh_index_for_changes(
     symbol_options: &SymbolBuildOptions,
 ) -> Result<IndexRefreshReport, CliError> {
     let control = index_work_control(symbol_options);
-    match refresh_index_for_changes_controlled(store, plan, changes, symbol_options, &control) {
-        Err(error) if incremental_refresh_needs_full(&error) => {
-            let reuse = publication_contract_matches(store, plan)?;
-            refresh_full_index_controlled(store, plan, symbol_options, reuse, &control)
-        }
-        result => result,
-    }
+    refresh_index_for_changes_controlled(store, plan, changes, symbol_options, &control)
 }
 
 /// Identify explicit-refresh uncertainty that can safely use complete reconciliation.
@@ -8796,17 +8794,25 @@ pub(crate) fn refresh_index_for_changes_controlled(
     symbol_options: &SymbolBuildOptions,
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
-    refresh_index_for_changes_from_source_controlled(
+    match attempt_incremental_refresh_controlled(
         store,
         plan,
         changes,
         symbol_options,
         None,
         control,
-    )
+    ) {
+        Ok(Some(report)) => Ok(report),
+        Ok(None) => refresh_index_controlled(store, plan, symbol_options, control),
+        Err(error) if incremental_refresh_needs_full(&error) => {
+            let reuse = publication_contract_matches(store, plan)?;
+            refresh_full_index_controlled(store, plan, symbol_options, reuse, control)
+        }
+        Err(error) => Err(error),
+    }
 }
 
-/// Consume optional exact discovery instead of inspecting affected paths again.
+/// Consume optional exact discovery with the existing explicit full-refresh route.
 fn refresh_index_for_changes_from_source_controlled(
     store: &mut AtlasStore,
     plan: &ScanRuntimePlan,
@@ -8815,11 +8821,38 @@ fn refresh_index_for_changes_from_source_controlled(
     captured: Option<CapturedSourceState>,
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
+    match attempt_incremental_refresh_controlled(
+        store,
+        plan,
+        changes,
+        symbol_options,
+        captured,
+        control,
+    )? {
+        Some(report) => Ok(report),
+        None => refresh_index_controlled(store, plan, symbol_options, control),
+    }
+}
+
+/// Attempt incremental publication without performing a full refresh.
+///
+/// A completed report is `Some`; `None` selects full reconciliation before it runs.
+/// Keep that selection distinct from incremental limit failures so full failures
+/// are never retried by an outer incremental fallback. The optional report stays
+/// inline without adding a heap allocation to every warm refresh.
+fn attempt_incremental_refresh_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    changes: &WatchChangeSet,
+    symbol_options: &SymbolBuildOptions,
+    captured: Option<CapturedSourceState>,
+    control: &IndexWorkControl,
+) -> Result<Option<IndexRefreshReport>, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     control.check(IndexWorkStage::RepositoryTraversal)?;
     if changes.requires_full_scan || !publication_contract_matches(store, plan)? {
-        return refresh_index_controlled(store, plan, symbol_options, control);
+        return Ok(None);
     }
     let changed_event_path_count = changes.paths.union(&changes.document_paths).count();
     if changed_event_path_count > MAX_INCREMENTAL_CHANGED_PATHS {
@@ -8920,7 +8953,7 @@ fn refresh_index_for_changes_from_source_controlled(
             .get(path)
             .is_some_and(|node| node.kind == NodeKind::Folder)
     }) {
-        return refresh_index_controlled(store, plan, symbol_options, control);
+        return Ok(None);
     }
     graph_projection::cleanup_abandoned_repository_graph_staging(store, root, control)?;
     direct_document_paths.extend(
@@ -8948,7 +8981,7 @@ fn refresh_index_for_changes_from_source_controlled(
     };
     if nodes.is_empty() && absent_paths.is_empty() && direct_document_paths.is_empty() {
         revalidate_staged_publication_inputs_controlled(plan, &expected_nodes, None, control)?;
-        return Ok(empty_index_refresh_report(plan.text_options));
+        return Ok(Some(empty_index_refresh_report(plan.text_options)));
     }
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
@@ -9041,11 +9074,11 @@ fn refresh_index_for_changes_from_source_controlled(
         control,
     )?;
     let outcome = publish_index_batch(store, batch, &plan.scan_options, control)?;
-    Ok(IndexRefreshReport {
+    Ok(Some(IndexRefreshReport {
         text_index: outcome.text_index,
         structural_summaries: outcome.structural_summaries,
         symbols: outcome.symbols,
-    })
+    }))
 }
 
 /// Fence operation-owned discovery against the current publication and selected plan.
@@ -14562,90 +14595,199 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
-    fn oversized_watch_batch_reconciles_complete_state_in_one_publication()
-    -> Result<(), Box<dyn Error>> {
+    fn incremental_attempt_selects_full_before_running_reconciliation() -> Result<(), Box<dyn Error>>
+    {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
-        fs::write(root.join("lib.rs"), "pub fn previous() {}\n")?;
-        fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+        fs::create_dir(root.join("removed"))?;
+        fs::write(root.join("removed/child.rs"), "pub fn retained() {}\n")?;
         let plan = ScanRuntimePlan::for_path(None, root, None)?;
         let options = SymbolBuildOptions::new(1_024, Some(1), None);
-        let mut store =
-            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
         run_scan_pipeline(&mut store, &plan, &options)?;
-        store.set_purpose(
-            "lib.rs",
-            "Expose the library entry point",
-            PurposeSource::Agent,
-        )?;
-        let before = publication_base_generation(&store)?;
-        let identity = store.project_instance_id()?;
-        fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
-        fs::write(root.join("late.rs"), "pub fn late() {}\n")?;
-
-        // Event overflow requires exact discovery, including a live addition
-        // not present in the retained event set. None of these deleted paths
-        // should be published, and the known source edit must not be lost.
-        let changes = WatchChangeSet {
-            requires_full_scan: false,
-            document_paths: HashSet::new(),
-            paths: (0..=MAX_INCREMENTAL_CHANGED_PATHS)
-                .map(|index| root.join(format!("deleted_{index}.rs")))
-                .chain(std::iter::once(root.join("lib.rs")))
-                .collect(),
+        let publication = store.index_publication()?;
+        let control = index_work_control(&options);
+        let full = WatchChangeSet {
+            requires_full_scan: true,
+            ..WatchChangeSet::default()
         };
-        let report = refresh_index_for_changes(&mut store, &plan, &changes, &options)?;
         require_eq(
-            &report.text_index.candidates,
-            &3,
-            "full fallback covers every current file",
-        )?;
-        require_eq(&report.symbols.candidates, &3, "complete symbol inventory")?;
-        require_eq(
-            &report.symbols.parsed,
-            &2,
-            "changed and newly discovered sources parsed",
-        )?;
-        require_eq(
-            &report.symbols.unchanged,
-            &1,
-            "unrelated valid parser facts reused",
-        )?;
-        require_eq(
-            &store.overview()?.files,
-            &3,
-            "deleted event paths remain absent",
-        )?;
-        require_eq(
-            &store.load_file_text("lib.rs")?.map(|text| text.content),
-            &Some("pub fn updated() {}\n".to_string()),
-            "retained edit published",
-        )?;
-        require_eq(
-            &store.load_file_text("late.rs")?.is_some(),
+            &attempt_incremental_refresh_controlled(
+                &mut store, &plan, &full, &options, None, &control,
+            )?
+            .is_none(),
             &true,
-            "addition outside event set discovered",
+            "explicit full selection precedes full work",
+        )?;
+        let mut changed_contract = ScanRuntimePlan::for_path(None, root, None)?;
+        changed_contract
+            .scan_options
+            .exclude_path_prefixes
+            .push("different-contract".to_string());
+        require_eq(
+            &attempt_incremental_refresh_controlled(
+                &mut store,
+                &changed_contract,
+                &WatchChangeSet::default(),
+                &options,
+                None,
+                &control,
+            )?
+            .is_none(),
+            &true,
+            "contract mismatch selects full work",
+        )?;
+        fs::remove_dir_all(root.join("removed"))?;
+        let changes = WatchChangeSet {
+            paths: HashSet::from([root.join("removed")]),
+            ..WatchChangeSet::default()
+        };
+        require_eq(
+            &attempt_incremental_refresh_controlled(
+                &mut store, &plan, &changes, &options, None, &control,
+            )?
+            .is_none(),
+            &true,
+            "deleted indexed folder selects full work",
         )?;
         require_eq(
-            &publication_base_generation(&store)?,
-            &before
-                .checked_next()
-                .ok_or_else(|| io::Error::other("generation overflow"))?,
-            "fallback publishes exactly one complete generation",
+            &store.index_publication()?,
+            &publication,
+            "selection has not attempted full publication",
         )?;
         require_eq(
-            &store.project_instance_id()?,
-            &identity,
-            "fallback preserves identity",
+            &store.load_file_text("removed/child.rs")?.is_some(),
+            &true,
+            "last-valid source retained before full execution",
         )?;
-        require_eq(
-            &store
-                .load_node_by_path("lib.rs")?
-                .and_then(|node| node.purpose.purpose),
-            &Some("Expose the library entry point".to_string()),
-            "fallback preserves approved purpose",
-        )?;
-        verify_index_freshness(&store, root, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_watch_batch_reconciles_complete_state_in_one_publication()
+    -> Result<(), Box<dyn Error>> {
+        for documents_only in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            fs::write(root.join("lib.rs"), "pub fn previous() {}\n")?;
+            fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+            let plan = ScanRuntimePlan::for_path(None, root, None)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), None);
+            let mut store =
+                open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+            run_scan_pipeline(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "lib.rs",
+                "Expose the library entry point",
+                PurposeSource::Agent,
+            )?;
+            let before = publication_base_generation(&store)?;
+            let identity = store.project_instance_id()?;
+            fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
+            fs::write(root.join("late.rs"), "pub fn late() {}\n")?;
+
+            // Event overflow requires exact discovery, including a live addition
+            // not present in the retained event set. None of these deleted paths
+            // should be published, and the known source edit must not be lost.
+            let mut changes = WatchChangeSet {
+                requires_full_scan: false,
+                document_paths: HashSet::new(),
+                paths: (0..=MAX_INCREMENTAL_CHANGED_PATHS)
+                    .map(|index| root.join(format!("deleted_{index}.rs")))
+                    .chain(std::iter::once(root.join("lib.rs")))
+                    .collect(),
+            };
+            if documents_only {
+                changes.document_paths = std::mem::take(&mut changes.paths);
+            }
+            let cancelled = index_work_control(&options);
+            cancelled.cancel();
+            let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+            for (stopped, deadline) in [(cancelled, false), (expired, true)] {
+                let result = refresh_index_for_changes_controlled(
+                    &mut store, &plan, &changes, &options, &stopped,
+                );
+                let stopped_as_requested = if deadline {
+                    matches!(
+                        result,
+                        Err(CliError::IndexWork(
+                            IndexWorkFailure::DeadlineExceeded { .. }
+                        ))
+                    )
+                } else {
+                    matches!(
+                        result,
+                        Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+                    )
+                };
+                require_eq(
+                    &stopped_as_requested,
+                    &true,
+                    "oversized batch retains caller stop",
+                )?;
+                require_eq(
+                    &publication_base_generation(&store)?,
+                    &before,
+                    "stopped oversized batch retains publication",
+                )?;
+            }
+            let control = index_work_control(&options);
+            let report = refresh_index_for_changes_controlled(
+                &mut store, &plan, &changes, &options, &control,
+            )?;
+            require_eq(
+                &report.text_index.candidates,
+                &3,
+                "full fallback covers every current file",
+            )?;
+            require_eq(&report.symbols.candidates, &3, "complete symbol inventory")?;
+            require_eq(
+                &report.symbols.parsed,
+                &2,
+                "changed and newly discovered sources parsed",
+            )?;
+            require_eq(
+                &report.symbols.unchanged,
+                &1,
+                "unrelated valid parser facts reused",
+            )?;
+            require_eq(
+                &store.overview()?.files,
+                &3,
+                "deleted event paths remain absent",
+            )?;
+            require_eq(
+                &store.load_file_text("lib.rs")?.map(|text| text.content),
+                &Some("pub fn updated() {}\n".to_string()),
+                "retained edit published",
+            )?;
+            require_eq(
+                &store.load_file_text("late.rs")?.is_some(),
+                &true,
+                "addition outside event set discovered",
+            )?;
+            require_eq(
+                &publication_base_generation(&store)?,
+                &before
+                    .checked_next()
+                    .ok_or_else(|| io::Error::other("generation overflow"))?,
+                "fallback publishes exactly one complete generation",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "fallback preserves identity",
+            )?;
+            require_eq(
+                &store
+                    .load_node_by_path("lib.rs")?
+                    .and_then(|node| node.purpose.purpose),
+                &Some("Expose the library entry point".to_string()),
+                "fallback preserves approved purpose",
+            )?;
+            verify_index_freshness(&store, root, None)?;
+        }
         Ok(())
     }
 

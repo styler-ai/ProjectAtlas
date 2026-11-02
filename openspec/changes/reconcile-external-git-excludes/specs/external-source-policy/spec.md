@@ -71,6 +71,11 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** an exclusion changes the ignored-versus-missing classification of an absent document target without changing the indexed source inventory
 - **THEN** accepted refresh and subsequent CLI/MCP graph queries agree with full reconciliation and do not preserve a stale document reason merely because source nodes are unchanged
 
+#### Scenario: Incremental watch limits require complete reconciliation
+- **WHEN** a continuous notify batch exceeds the incremental entry/source-byte or dependency-closure bound
+- **THEN** the controlled production owner performs complete reconciliation with the original operation control, discovering current sources outside the retained event set and publishing one complete generation while preserving identity and approved purposes
+- **AND** source and document-only batches share this behavior, cancellation/deadline and unrelated failures propagate without a new polling budget, and stopped work preserves the last valid publication
+
 #### Scenario: Database aliases distinguish runtime state from source events
 - **WHEN** an explicit operator DB symlink or supported managed Windows short name uses a different spelling from SQLite's actual runtime cohort
 - **THEN** main/WAL/SHM/journal self-events in the selected and resolved target namespaces do not fabricate source drift, and real CLI/MCP reads and purpose updates remain usable without retargeting the selected SQLite path

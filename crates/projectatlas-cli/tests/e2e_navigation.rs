@@ -13700,7 +13700,11 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
 #[test]
 fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
     // Native platforms may split replacement notifications into several batches.
-    const WATCH_CYCLE_BUDGET: usize = 8;
+    // Keep the original replacement margin plus two closure reconciliation phases.
+    const WATCH_CYCLE_BUDGET: usize = 10;
+    // The large closure includes complete parser/graph publication in debug CI.
+    // This fixture bound is not an indexing or warm-read performance SLO.
+    const WATCH_PHASE_TIMEOUT: Duration = Duration::from_secs(60);
 
     /// Author the same project namespace on a different directory object.
     fn write_project(root: &Path, target: &str) -> Result<(), Box<dyn Error>> {
@@ -13740,7 +13744,7 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         database: &Path,
         name: &str,
     ) -> Result<(), Box<dyn Error>> {
-        let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+        let deadline = Instant::now() + WATCH_PHASE_TIMEOUT;
         loop {
             if watch_symbol_is_published(database, name)? {
                 return Ok(());
@@ -13769,6 +13773,13 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
         let config = directory.join("external.toml");
         let git_config = directory.join(EXTERNAL_GIT_CONFIGURATION_FILE);
         write_project(&root, "initial_target")?;
+        if surface == "cli" {
+            let mut expanded = String::from("pub fn initial_target() {}\n");
+            for ordinal in 0..=projectatlas_core::graph::GraphLimits::MAX_ROWS {
+                writeln!(&mut expanded, "pub fn closure_item_{ordinal}() {{}}")?;
+            }
+            fs::write(root.join(RUST_LIBRARY_PATH), expanded)?;
+        }
         let root_text = root
             .to_str()
             .ok_or_else(|| io::Error::other("fixture root is not UTF-8"))?;
@@ -13830,8 +13841,10 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             // A newly published sentinel proves that native coverage was installed,
             // rather than mistaking the earlier initializer's publication for readiness.
             let source = root.join(RUST_LIBRARY_PATH);
-            let mut text = fs::read_to_string(&source)?;
-            text.push_str("pub fn watcher_ready() {}\n");
+            let text = format!(
+                "pub fn watcher_ready() {{}}\n{}",
+                fs::read_to_string(&source)?
+            );
             fs::write(source, text)?;
             let mut command = StdCommand::new(&executable);
             command
@@ -13855,6 +13868,17 @@ fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), B
             let mut child = command.spawn()?;
             let operation = (|| -> Result<(), Box<dyn Error>> {
                 await_watch_symbol(&mut child, &database, "watcher_ready")?;
+                // One ordinary file event can exceed incremental graph limits even
+                // though native queue overflow never occurred. Recover through the
+                // same controlled production owner, then shrink the persisted closure.
+                let mut expanded = String::from("pub fn closure_target() {}\n");
+                for ordinal in 0..=projectatlas_core::graph::GraphLimits::MAX_ROWS {
+                    writeln!(&mut expanded, "pub fn closure_item_{ordinal}() {{}}")?;
+                }
+                fs::write(root.join(RUST_LIBRARY_PATH), expanded)?;
+                await_watch_symbol(&mut child, &database, "closure_target")?;
+                write_source(&root, "compact_target")?;
+                await_watch_symbol(&mut child, &database, "compact_target")?;
                 replace_project(&root, directory)?;
                 await_watch_symbol(&mut child, &database, "replacement_target")?;
                 write_source(&root, "edited_target")?;
