@@ -43,6 +43,11 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    # Bound hosted disk while tests make independent executable copies, as in CI.
+    # Keep debug assertions, unoptimized checks, and the release package profile.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 1
+      CARGO_PROFILE_TEST_DEBUG: 1
     outputs:
       package_version: ${{ steps.release_version.outputs.package_version }}
       release_tag: ${{ steps.release_version.outputs.tag }}
