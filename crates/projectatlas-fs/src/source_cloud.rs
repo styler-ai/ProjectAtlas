@@ -24,6 +24,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 const SOURCE_BYTES: [u8; 4096] = [b'x'; 4096];
 /// Child routing stays private to this single native test.
 const WORKER_ROOT_ENV: &str = "PROJECTATLAS_CLOUD_SOURCE_TEST_ROOT";
+/// Written only after the child completed both actual scans and native cleanup.
+const COMPLETION_FILE: &str = "cloud-source-proof-complete";
+/// Exact completion payload prevents a zero-test harness exit from proving work.
+const COMPLETION_BYTES: &[u8] = b"online-source,nested-population,hydrated-source,cleanup\n";
 /// Exact self-test selector, avoiding a second provider or recursive test run.
 const TEST_SELECTOR: &str =
     "source_reader::cloud_files::source_scan_hydrates_online_cloud_placeholders";
@@ -245,7 +249,8 @@ fn run_provider(root: &Path) -> io::Result<()> {
         ..CF_SYNC_POLICIES::default()
     };
     // SAFETY: All strings, root path and official input structures are live and
-    // correctly sized. Registration claims only this fixture's empty TempDir.
+    // correctly sized. The worker root is a trusted test-harness input; the
+    // normal parent invocation supplies its own empty TempDir.
     check("CfRegisterSyncRoot", unsafe {
         CfRegisterSyncRoot(
             provider.root.as_ptr(),
@@ -384,7 +389,10 @@ fn run_provider(root: &Path) -> io::Result<()> {
 #[test]
 fn source_scan_hydrates_online_cloud_placeholders() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(root) = std::env::var_os(WORKER_ROOT_ENV) {
-        return run_provider(Path::new(&root)).map_err(Into::into);
+        let root = Path::new(&root);
+        run_provider(root)?;
+        fs::write(root.join(COMPLETION_FILE), COMPLETION_BYTES)?;
+        return Ok(());
     }
     let temp = tempfile::tempdir()?;
     let mut child = Command::new(std::env::current_exe()?)
@@ -418,6 +426,11 @@ fn source_scan_hydrates_online_cloud_placeholders() -> Result<(), Box<dyn std::e
             String::from_utf8_lossy(&output.stderr)
         ))
         .into());
+    }
+    if fs::read(temp.path().join(COMPLETION_FILE))? != COMPLETION_BYTES {
+        return Err(
+            io::Error::other("Cloud Files worker did not complete actual source proof").into(),
+        );
     }
     Ok(())
 }

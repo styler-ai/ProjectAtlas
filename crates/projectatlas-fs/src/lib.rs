@@ -659,15 +659,25 @@ pub fn scan_path_with_policy_controlled(
     let options = &policy.options;
     #[cfg(windows)]
     let native_path = if path.is_absolute() {
-        Cow::Owned(std::path::absolute(path).map_err(|source| FsError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?)
-    } else {
         Cow::Borrowed(path)
+    } else {
+        // Ordinary selected-root spelling retains Win32 parent normalization;
+        // an explicitly selected verbatim root retains its native semantics.
+        Cow::Owned(
+            policy
+                .selected_root_alias
+                .as_deref()
+                .unwrap_or(root)
+                .join(path),
+        )
     };
     #[cfg(windows)]
-    let path = native_path.as_ref();
+    let native_path = std::path::absolute(native_path.as_ref()).map_err(|source| FsError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    #[cfg(windows)]
+    let path = native_path.as_path();
     let absolute = policy.absolute_target(path);
     if !absolute.exists() {
         control.check(IndexWorkStage::ScanFinalization)?;
@@ -1804,16 +1814,21 @@ mod tests {
                 indirect_parent.is_some_and(|node| node.path == "source.rs"),
                 "native Windows parent normalization changed the selected direct source",
             )?;
-            let missing_parent = scan_path_with_policy_controlled(
-                &policy,
-                &alias.join("missing/../source.rs"),
-                ScanLimits::default(),
-                &control,
-            )?;
-            require(
-                missing_parent.is_some_and(|node| node.path == "source.rs"),
-                "native Windows missing-parent normalization changed the direct source",
-            )?;
+            for path in [
+                alias.join("missing/../source.rs"),
+                PathBuf::from("missing/../source.rs"),
+            ] {
+                let missing_parent = scan_path_with_policy_controlled(
+                    &policy,
+                    &path,
+                    ScanLimits::default(),
+                    &control,
+                )?;
+                require(
+                    missing_parent.is_some_and(|node| node.path == "source.rs"),
+                    "native Windows absolute or relative missing-parent normalization changed the direct source",
+                )?;
+            }
         }
         Ok(())
     }
