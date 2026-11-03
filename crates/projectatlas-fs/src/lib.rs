@@ -21,7 +21,7 @@ use projectatlas_core::{
     IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
     normalized_extension, normalized_parent,
 };
-use source_reader::SourceRootReader;
+use source_reader::{SourceFileReader, SourceRootReader};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -548,7 +548,7 @@ pub fn scan_repo_controlled_with_work(
         true
     });
     builder.build_parallel().run(|| {
-        let source_reader = &source_reader;
+        let mut source_reader = source_reader.reader();
         let root = root.clone();
         let options = options.clone();
         let nodes = Arc::clone(&nodes);
@@ -580,7 +580,7 @@ pub fn scan_repo_controlled_with_work(
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path, &options, &budget, source_reader) {
+            match scanned_node(&root, path, &options, &budget, &mut source_reader) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -689,7 +689,13 @@ pub fn scan_path_with_policy_controlled(
         return Ok(None);
     }
     let source_reader = SourceRootReader::open(root)?;
-    let node = scanned_node(root, &absolute, options, &budget, &source_reader)?;
+    let node = scanned_node(
+        root,
+        &absolute,
+        options,
+        &budget,
+        &mut source_reader.uncached(),
+    )?;
     control.check(IndexWorkStage::ScanFinalization)?;
     Ok(node)
 }
@@ -1309,7 +1315,7 @@ fn scanned_node(
     path: &Path,
     options: &ScanOptions,
     budget: &ScanBudget,
-    source_reader: &SourceRootReader,
+    source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<Option<Node>> {
     budget.control.check(IndexWorkStage::SourceMetadata)?;
     let metadata = fs::symlink_metadata(path).map_err(|source| FsError::Io {
@@ -1423,7 +1429,7 @@ fn file_node(
     metadata: &fs::Metadata,
     options: &ScanOptions,
     budget: &ScanBudget,
-    source_reader: &SourceRootReader,
+    source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<Node> {
     let normalized = normalize_repo_path(root, path)?;
     let extension = normalized_extension(path);
@@ -1544,7 +1550,7 @@ fn hash_file(
     admitted_metadata: &fs::Metadata,
     budget: &ScanBudget,
     retain_content_prefix: bool,
-    source_reader: &SourceRootReader,
+    source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<(HashedFile, fs::Metadata)> {
     budget.control.check(IndexWorkStage::SourceHash)?;
     let (file, metadata) = source_reader.open_file(path, admitted_metadata, &budget.control)?;
@@ -1648,7 +1654,7 @@ mod tests {
                             &metadata,
                             &ScanOptions::default(),
                             &budget,
-                            &source_reader,
+                            &mut source_reader.uncached(),
                         )?
                         .content_hash
                             == Some(blake3::hash(original).to_hex().to_string()),
@@ -1701,7 +1707,7 @@ mod tests {
                         &metadata,
                         &ScanOptions::default(),
                         &budget,
-                        &source_reader,
+                        &mut source_reader.uncached(),
                     ) {
                         admitted.push(format!(
                         "ancestor={ancestor}, target_in_root={target_in_root}, same_file_object={same_file_object}, redirected_digest={}",
@@ -1855,7 +1861,7 @@ mod tests {
             &original_metadata,
             &ScanOptions::default(),
             &budget,
-            &reader,
+            &mut reader.uncached(),
         )?;
         let expected_mtime = system_time_to_ns(opened_metadata.modified()?)
             .map(|value| i64::try_from(value).unwrap_or(i64::MAX));
@@ -1893,7 +1899,7 @@ mod tests {
                     &original_metadata,
                     &ScanOptions::default(),
                     &budget,
-                    &reader
+                    &mut reader.uncached()
                 ),
                 Err(FsError::Io { .. })
             ),
@@ -1906,7 +1912,7 @@ mod tests {
                 &fs::symlink_metadata(&path)?,
                 &ScanOptions::default(),
                 &budget,
-                &reader,
+                &mut reader.uncached(),
             )?
             .content_hash
                 == Some(blake3::hash(saved).to_hex().to_string()),
@@ -1945,7 +1951,7 @@ mod tests {
             &replacement_metadata,
             &options,
             &budget,
-            &reader,
+            &mut reader.uncached(),
         );
         fs::rename(&root, temp.path().join("replacement-root"))?;
         fs::rename(&selected, &root)?;
@@ -1954,7 +1960,15 @@ mod tests {
             "walker metadata from a replacement root labeled selected-root bytes",
         )?;
         require(
-            file_node(&root, &path, &original_metadata, &options, &budget, &reader)?.content_hash
+            file_node(
+                &root,
+                &path,
+                &original_metadata,
+                &options,
+                &budget,
+                &mut reader.uncached(),
+            )?
+            .content_hash
                 == Some(blake3::hash(original).to_hex().to_string()),
             "restored selected root lost direct source admission",
         )?;
@@ -1983,7 +1997,7 @@ mod tests {
                 IndexWorkControl::new(IndexCancellation::new(), None),
             );
             matches!(
-                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget, &source_reader),
+                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget, &mut source_reader.uncached()),
                 Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
             )
         })

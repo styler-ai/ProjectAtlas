@@ -4,9 +4,19 @@ use crate::{FsError, FsResult};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use projectatlas_core::{IndexWorkControl, IndexWorkStage};
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Maximum retained ancestor depth; deeper sources use the ordinary secure walk.
+const DIRECTORY_CURSOR_MAX_DEPTH: usize = 8;
+/// Maximum extra retained directory handles across concurrent discoveries.
+const DIRECTORY_HANDLE_CEILING: usize = 64;
+/// Live handle occupancy only; no source path or capability is process-global.
+static DIRECTORY_HANDLES: AtomicUsize = AtomicUsize::new(0);
 
 /// Root capability retained only while the current source discovery runs.
 #[derive(Debug)]
@@ -15,6 +25,8 @@ pub(crate) struct SourceRootReader {
     root: PathBuf,
     /// Open selected root; source descendants never resolve from ambient paths.
     directory: Dir,
+    /// Conservative process-wide occupancy bound captured for this discovery.
+    directory_handle_limit: usize,
 }
 
 impl SourceRootReader {
@@ -25,7 +37,28 @@ impl SourceRootReader {
         Ok(Self {
             root: root.to_path_buf(),
             directory,
+            directory_handle_limit: directory_handle_limit(),
         })
+    }
+
+    /// Borrow a sibling-source cursor for one existing parallel walk visitor.
+    pub(crate) fn reader(&self) -> SourceFileReader<'_> {
+        SourceFileReader {
+            root: self,
+            cursor: None,
+            occupied: &DIRECTORY_HANDLES,
+            limit: self.directory_handle_limit,
+            #[cfg(test)]
+            hits: 0,
+        }
+    }
+
+    /// Borrow the unchanged component walk for a single-target operation.
+    pub(crate) fn uncached(&self) -> SourceFileReader<'_> {
+        SourceFileReader {
+            limit: 0,
+            ..self.reader()
+        }
     }
 
     /// Open a regular source without following any descendant symlink.
@@ -63,53 +96,7 @@ impl SourceRootReader {
                         .map_err(|source| source_error(path, source))?,
                 );
             } else {
-                let mut options = OpenOptions::new();
-                options.read(true).follow(FollowSymlinks::No);
-                #[cfg(unix)]
-                {
-                    use cap_fs_ext::OpenOptionsExt;
-                    options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
-                }
-                let file = parent
-                    .open_with(Path::new(name), &options)
-                    .map_err(|source| source_error(path, source))?
-                    .into_std();
-                let opened_metadata = file
-                    .metadata()
-                    .map_err(|source| source_error(path, source))?;
-                if !opened_metadata.is_file() {
-                    return Err(source_error(
-                        path,
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "selected source is not a regular file",
-                        ),
-                    ));
-                }
-                // The walker uses ambient paths while this reader retains the
-                // selected root. Unix allows that root to move during discovery;
-                // bind the opened source to the walker's admitted file object so
-                // replacement-tree metadata cannot label bytes from the old root.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    if admitted_metadata.dev() != opened_metadata.dev()
-                        || admitted_metadata.ino() != opened_metadata.ino()
-                    {
-                        return Err(source_error(
-                            path,
-                            io::Error::other(
-                                "source file identity changed after metadata admission",
-                            ),
-                        ));
-                    }
-                }
-                // Windows directory capabilities exclude delete sharing while
-                // resolving the root/parents. File replacement remains allowed;
-                // the enclosing exact source revalidation still owns publication.
-                #[cfg(not(unix))]
-                let _ = admitted_metadata;
-                return Ok((file, opened_metadata));
+                return open_source_leaf(parent, Path::new(name), path, admitted_metadata);
             }
         }
         Err(source_error(
@@ -120,6 +107,320 @@ impl SourceRootReader {
             ),
         ))
     }
+}
+
+/// One worker's optional last-parent capability chain; never shared or persisted.
+#[derive(Debug)]
+pub(crate) struct SourceFileReader<'root> {
+    /// Selected root capability borrowed for this discovery only.
+    root: &'root SourceRootReader,
+    /// Sibling-only reuse; a parent change or error discards every ancestor.
+    cursor: Option<SourceDirectoryCursor>,
+    /// Process occupancy (or an isolated test counter), not a path registry.
+    occupied: &'static AtomicUsize,
+    /// Extra handle limit; zero selects the unchanged secure walk.
+    limit: usize,
+    /// Causal coverage distinguishes actual reuse from the uncached fallback.
+    #[cfg(test)]
+    hits: usize,
+}
+
+impl SourceFileReader<'_> {
+    /// Open exact source bytes, releasing all retained ancestors on any error.
+    pub(crate) fn open_file(
+        &mut self,
+        path: &Path,
+        admitted_metadata: &std::fs::Metadata,
+        control: &IndexWorkControl,
+    ) -> FsResult<(File, std::fs::Metadata)> {
+        let result = self.open_source(path, admitted_metadata, control);
+        if result.is_err() {
+            self.cursor = None;
+        }
+        result
+    }
+
+    /// Reuse a verified sibling parent, or use the ordinary secure component walk.
+    fn open_source(
+        &mut self,
+        path: &Path,
+        admitted_metadata: &std::fs::Metadata,
+        control: &IndexWorkControl,
+    ) -> FsResult<(File, std::fs::Metadata)> {
+        control.check(IndexWorkStage::SourceHash)?;
+        let relative = path.strip_prefix(&self.root.root).map_err(|source| {
+            source_error(path, io::Error::new(io::ErrorKind::InvalidInput, source))
+        })?;
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let hit = self
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.parent == parent);
+        if !hit {
+            self.cursor = None;
+            let depth = parent.components().count();
+            if (1..=DIRECTORY_CURSOR_MAX_DEPTH).contains(&depth)
+                && let Some(permit) =
+                    DirectoryHandlePermit::acquire(self.occupied, depth, self.limit)
+            {
+                self.cursor = Some(SourceDirectoryCursor::open(
+                    &self.root.directory,
+                    parent,
+                    path,
+                    permit,
+                    control,
+                )?);
+            }
+        }
+        let Some(cursor) = &self.cursor else {
+            return self.root.open_file(path, admitted_metadata, control);
+        };
+        let directory = cursor.validate(&self.root.directory, path, control)?;
+        // Do not let `file_name` silently normalize a non-direct leaf selector.
+        let Some(Component::Normal(name)) = relative.components().next_back() else {
+            return Err(source_error(
+                path,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "source path has no direct file component",
+                ),
+            ));
+        };
+        #[cfg(test)]
+        {
+            self.hits += usize::from(hit);
+        }
+        open_source_leaf(directory, Path::new(name), path, admitted_metadata)
+    }
+}
+
+/// Complete retained chain: close frames BEFORE returning their occupancy permit.
+#[derive(Debug)]
+struct SourceDirectoryCursor {
+    /// Every ancestor remains live, including on Windows where names are pinned.
+    frames: Vec<SourceDirectoryFrame>,
+    /// Relative lexical parent used only to select candidate sibling reuse.
+    parent: PathBuf,
+    /// Declared last so Rust drops directory handles before refunding occupancy.
+    _permit: DirectoryHandlePermit,
+}
+
+impl SourceDirectoryCursor {
+    /// Acquire ancestors through the same canonical no-follow component opener.
+    fn open(
+        root: &Dir,
+        parent: &Path,
+        path: &Path,
+        permit: DirectoryHandlePermit,
+        control: &IndexWorkControl,
+    ) -> FsResult<Self> {
+        let mut cursor = Self {
+            frames: Vec::with_capacity(permit.count),
+            parent: parent.to_path_buf(),
+            _permit: permit,
+        };
+        for component in parent.components() {
+            control.check(IndexWorkStage::SourceHash)?;
+            let Component::Normal(name) = component else {
+                return Err(source_error(
+                    path,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "source path must contain only direct descendant components",
+                    ),
+                ));
+            };
+            let directory = cursor
+                .frames
+                .last()
+                .map_or(root, |frame| &frame.directory)
+                .open_dir_nofollow(Path::new(name))
+                .map_err(|source| source_error(path, source))?;
+            #[cfg(unix)]
+            let identity = {
+                use cap_fs_ext::MetadataExt;
+                let metadata = directory
+                    .dir_metadata()
+                    .map_err(|source| source_error(path, source))?;
+                (metadata.dev(), metadata.ino())
+            };
+            cursor.frames.push(SourceDirectoryFrame {
+                directory,
+                #[cfg(unix)]
+                name: name.to_os_string(),
+                #[cfg(unix)]
+                identity,
+            });
+        }
+        Ok(cursor)
+    }
+
+    /// Revalidate every retained ancestor before granting a sibling source open.
+    fn validate<'cursor>(
+        &'cursor self,
+        root: &'cursor Dir,
+        path: &Path,
+        control: &IndexWorkControl,
+    ) -> FsResult<&'cursor Dir> {
+        let mut parent = root;
+        for frame in &self.frames {
+            control.check(IndexWorkStage::SourceHash)?;
+            #[cfg(unix)]
+            {
+                use cap_fs_ext::MetadataExt;
+                let metadata = parent
+                    .symlink_metadata(Path::new(&frame.name))
+                    .map_err(|source| source_error(path, source))?;
+                if !metadata.is_dir()
+                    || metadata.is_symlink()
+                    || (metadata.dev(), metadata.ino()) != frame.identity
+                {
+                    return Err(source_error(
+                        path,
+                        io::Error::other(
+                            "source parent identity changed after directory admission",
+                        ),
+                    ));
+                }
+            }
+            #[cfg(windows)]
+            {
+                // Every name is pinned by no-delete sharing, but write sharing
+                // still permits setting a junction in place on an empty directory.
+                // Query the held object freshly, without following a new pathname
+                // or treating ordinary Cloud Files tags as source indirection.
+                let metadata = frame
+                    .directory
+                    .dir_metadata()
+                    .map_err(|source| source_error(path, source))?;
+                if !metadata.is_dir() || metadata.is_symlink() {
+                    return Err(source_error(
+                        path,
+                        io::Error::other("source parent became indirect after directory admission"),
+                    ));
+                }
+            }
+            parent = &frame.directory;
+        }
+        Ok(parent)
+    }
+}
+
+/// One directly opened ancestor, plus Unix identity for fresh name revalidation.
+#[derive(Debug)]
+struct SourceDirectoryFrame {
+    /// Canonical no-follow directory capability.
+    directory: Dir,
+    /// Single native name beneath the previous retained parent.
+    #[cfg(unix)]
+    name: OsString,
+    /// Device/inode captured from the opened directory, never ambient metadata.
+    #[cfg(unix)]
+    identity: (u64, u64),
+}
+
+/// Nonblocking reservation for extra handles across concurrent source walkers.
+#[derive(Debug)]
+struct DirectoryHandlePermit {
+    /// Atomic live occupancy; dropping never requires a lock or filesystem I/O.
+    occupied: &'static AtomicUsize,
+    /// Full chain reservation, including partially constructed cursors.
+    count: usize,
+}
+
+impl DirectoryHandlePermit {
+    /// Reserve only when the complete chain fits, otherwise leave occupancy alone.
+    fn acquire(occupied: &'static AtomicUsize, count: usize, limit: usize) -> Option<Self> {
+        occupied
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(count).filter(|next| *next <= limit)
+            })
+            .ok()
+            .map(|_| Self { occupied, count })
+    }
+}
+
+impl Drop for DirectoryHandlePermit {
+    fn drop(&mut self) {
+        self.occupied.fetch_sub(self.count, Ordering::Relaxed);
+    }
+}
+
+/// Reserve a small fraction of Unix descriptors; unknown capacity disables reuse.
+fn directory_handle_limit() -> usize {
+    #[cfg(unix)]
+    {
+        use nix::sys::resource::{Resource, getrlimit};
+        getrlimit(Resource::RLIMIT_NOFILE)
+            .ok()
+            .map_or(0, |(soft, _)| {
+                usize::try_from(soft / 8)
+                    .unwrap_or(usize::MAX)
+                    .min(DIRECTORY_HANDLE_CEILING)
+            })
+    }
+    #[cfg(windows)]
+    {
+        DIRECTORY_HANDLE_CEILING
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        0
+    }
+}
+
+/// Open and admit the regular leaf identically for cached and uncached parents.
+fn open_source_leaf(
+    parent: &Dir,
+    name: &Path,
+    path: &Path,
+    admitted_metadata: &std::fs::Metadata,
+) -> FsResult<(File, std::fs::Metadata)> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_fs_ext::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
+    }
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|source| source_error(path, source))?
+        .into_std();
+    let opened_metadata = file
+        .metadata()
+        .map_err(|source| source_error(path, source))?;
+    if !opened_metadata.is_file() {
+        return Err(source_error(
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "selected source is not a regular file",
+            ),
+        ));
+    }
+    // The walker uses ambient paths while this reader retains the
+    // selected root. Unix allows that root to move during discovery;
+    // bind the opened source to the walker's admitted file object so
+    // replacement-tree metadata cannot label bytes from the old root.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if admitted_metadata.dev() != opened_metadata.dev()
+            || admitted_metadata.ino() != opened_metadata.ino()
+        {
+            return Err(source_error(
+                path,
+                io::Error::other("source file identity changed after metadata admission"),
+            ));
+        }
+    }
+    // Windows directory capabilities exclude delete sharing while
+    // resolving the root/parents. File replacement remains allowed;
+    // the enclosing exact source revalidation still owns publication.
+    #[cfg(not(unix))]
+    let _ = admitted_metadata;
+    Ok((file, opened_metadata))
 }
 
 /// Preserve the caller's source path together with the native error.
@@ -315,6 +616,10 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "source_cursor_tests.rs"]
+mod cursor_tests;
 
 // Only the isolated native fixture calls Windows Cloud Files APIs directly.
 #[cfg(all(test, windows))]

@@ -348,10 +348,34 @@ Use canonical `cap-std` and `cap-fs-ext` 4.0.3 rather than local Windows NT trav
 or a pre/post-canonicalization race check. The filesystem crate alone owns this
 dependency and domain wrapper. Resource work is O(path components + source bytes),
 with one root handle per discovery and bounded transient directory/file handles
-per existing worker. Component traversal is bounded by the supplied native path,
-checks the shared cooperative control before each open, and retains no path cache. There is no directory cache, additional worker, schema or
-persistent state. Component-open cost remains part of the unchanged performance
-targets. The upstream `fs-set-times` dependency retains `io-lifetimes` 2 while
+per existing worker. A ten-request unchanged MCP syscall profile found repeated
+parent opens raised filesystem work substantially compared with stable 0.5.0;
+native Windows, Linux and Intel Mac measurements also failed unchanged navigation
+or refresh targets. Reuse only the complete parent capability chain for sibling
+files within each existing parallel walk visitor. On Unix, freshly compare every
+direct parent's no-follow device/inode with its retained capability before a hit;
+refuse replaced, indirect or uncertain ancestors. On Windows, retain every ancestor
+capability with the canonical backend's no-delete sharing, preserving each name
+until the cursor changes or ends. Fresh handle metadata must still reject an
+in-place transition to a name-surrogate reparse point; write sharing allows an
+empty directory to become a junction without a rename. Preserve ordinary Cloud
+Files tags. Ordinary atomic file saves remain allowed.
+
+Bound each cursor to eight descendant directories, all cursors to 64 retained
+directory handles per process, and Unix occupancy to at most one eighth of the
+captured soft descriptor limit. Acquire permits without waiting; deeper paths,
+unavailable permits or unsupported platforms use the existing secure walk.
+Close all directory handles before returning permits, including error, cancellation
+and unwinding. A different parent discards the old chain; no chain survives its
+discovery. Single-target scans remain uncached. Component checks, exact source
+hashing, work counters and publication fences are unchanged; this adds no worker,
+schema, persistent cache or cross-request source witness. Windows native proof
+must cover in-discovery parent rename exclusion, ordinary file saves and rename
+after cursor release. Actual optimized latency, syscall and resource measurements
+must establish the benefit under real parallel-walker ordering; reuse alone does
+not satisfy the unchanged targets.
+
+The upstream `fs-set-times` dependency retains `io-lifetimes` 2 while
 `cap-*` uses 3. On Windows, the canonical `winx` backend retains the 0.52
 Windows binding/import-library line while the existing application and watcher
 use 0.61/0.60. Duplicate allowances name only those exact upstream splits and

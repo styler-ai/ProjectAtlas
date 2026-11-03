@@ -22,7 +22,7 @@ nix.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { workspace = true, features = ["Win32_Storage_CloudFilters", "Win32_System_CorrelationVector"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_CloudFilters", "Win32_System_CorrelationVector", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [lints]
 workspace = true
