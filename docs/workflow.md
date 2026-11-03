@@ -224,7 +224,8 @@ RELEASE_VERSION=v0.5.0
 
 ## CI behavior
 
-- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. Tests retain debug assertions and unoptimized code; release profiles, source/test selectors and time budgets remain unchanged.
+- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. This debug-metadata setting retains debug assertions and unoptimized code; it does not change release profiles, source/test selectors or time budgets.
+- Native release packaging has a 60-minute job budget for the independent optimized shipping-runtime and contract-runner builds. Intel Mac exhausted the former 30-minute combined budget during contract compilation after the shipping build succeeded. The separate contract target and shipping-binary digest guard remain required; this build budget does not change runtime deadlines or performance acceptance limits.
 
 - The accepted-base planner owns logical platform and contract selection; the
   current workflow owns supported runner provisioning. CI provisions the

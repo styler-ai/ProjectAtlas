@@ -468,3 +468,9 @@ freeze; artifact/source identities distinguish them from published 0.5.0. The
 preregistered input catalog, targets and compact Linux draft evidence are linked
 from the indexing reference. Pure arithmetic/completeness tests run normally;
 full measurements remain manual and do not establish RC publication acceptance.
+
+Native packaging retains independent optimized shipping and contract target trees
+and the shipping-runtime digest guard. Its 60-minute job budget accounts for both
+builds: the Intel Mac shipping build consumed 16 minutes before contract compilation
+exhausted the previous 30-minute combined budget. This construction budget changes
+neither indexing deadlines nor any installed performance acceptance threshold.

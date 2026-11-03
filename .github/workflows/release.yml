@@ -250,7 +250,8 @@ jobs:
     name: package ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Allow both independent optimized trees: shipping runtime and test contracts.
+    timeout-minutes: 60
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
       RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
@@ -399,7 +400,8 @@ jobs:
     name: package windows-x64
     needs: verify
     runs-on: windows-latest
-    timeout-minutes: 30
+    # Allow both independent optimized trees: shipping runtime and test contracts.
+    timeout-minutes: 60
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
       RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}

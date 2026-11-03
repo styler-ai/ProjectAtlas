@@ -1210,9 +1210,9 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     }
     for job in ["package-unix", "package-windows"] {
         let package_job = workflow_job_block(&release_workflow, job)?;
-        if !package_job.contains("timeout-minutes: 30") {
+        if !package_job.contains("timeout-minutes: 60") {
             return Err(io::Error::other(format!(
-                "release package job {job} must have a bounded timeout"
+                "release package job {job} must budget 60 minutes for shipping and contract builds"
             ))
             .into());
         }
