@@ -22,18 +22,18 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 /// Exact fixed provider payload; page size makes the transfer range unambiguous.
 const SOURCE_BYTES: [u8; 4096] = [b'x'; 4096];
-/// Child routing stays private to this single native test.
-const WORKER_ROOT_ENV: &str = "PROJECTATLAS_CLOUD_SOURCE_TEST_ROOT";
-/// Written only after the child completed both actual scans and native cleanup.
-const COMPLETION_FILE: &str = "cloud-source-proof-complete";
-/// Exact completion payload prevents a zero-test harness exit from proving work.
-const COMPLETION_BYTES: &[u8] = b"online-source,nested-population,hydrated-source,cleanup\n";
+/// Ordinary-client routing stays private to this single native test.
+const CLIENT_ROOT_ENV: &str = "PROJECTATLAS_CLOUD_SOURCE_CLIENT_ROOT";
+/// Written only after the ordinary client completed both actual source scans.
+const CLIENT_COMPLETION_FILE: &str = "cloud-source-client-proof-complete";
+/// Exact client completion payload prevents a zero-test harness exit proving work.
+const CLIENT_COMPLETION_BYTES: &[u8] = b"online-source,nested-population,hydrated-source\n";
 /// Exact self-test selector, avoiding a second provider or recursive test run.
 const TEST_SELECTOR: &str =
     "source_reader::cloud_files::source_scan_hydrates_online_cloud_placeholders";
-/// Fetch callbacks observed in the isolated child process.
+/// Fetch callbacks served by the parent provider process.
 static FETCH_COUNT: AtomicU32 = AtomicU32::new(0);
-/// Directory populations requested by the isolated native scanner.
+/// Directory populations requested by the separate ordinary client.
 static POPULATION_COUNT: AtomicU32 = AtomicU32::new(0);
 /// First native transfer failure, retained without unwinding across the callback.
 static TRANSFER_FAILURE: AtomicI32 = AtomicI32::new(0);
@@ -172,11 +172,13 @@ impl Provider {
             })?;
             self.connection = None;
         }
-        // SAFETY: This fixture owns the registration at this live terminated path.
-        check("CfUnregisterSyncRoot", unsafe {
-            CfUnregisterSyncRoot(self.root.as_ptr())
-        })?;
-        self.registered = false;
+        if self.registered {
+            // SAFETY: This fixture owns the registration at this live terminated path.
+            check("CfUnregisterSyncRoot", unsafe {
+                CfUnregisterSyncRoot(self.root.as_ptr())
+            })?;
+            self.registered = false;
+        }
         Ok(())
     }
 }
@@ -237,18 +239,129 @@ fn captured_reopen_hash(root: &Path, path: &Path) -> io::Result<String> {
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// Exercise baseline followed reads, then actual scanner hydration and warm reads.
-fn run_provider(root: &Path) -> io::Result<()> {
+/// Perform real reads as an ordinary consumer, outside the provider process.
+fn run_client(root: &Path) -> io::Result<()> {
+    let source = root.join("source.rs");
+    if on_disk_bytes(&source)? != 0 || on_disk_bytes(&root.join("baseline.rs"))? != 0 {
+        return Err(io::Error::other(
+            "fixture did not start with online-only placeholders",
+        ));
+    }
+    if fs::read(root.join("baseline.rs"))? != SOURCE_BYTES {
+        return Err(io::Error::other(
+            "ordinary followed-open hydration failed its baseline",
+        ));
+    }
+    if on_disk_bytes(&source)? != 0 {
+        return Err(io::Error::other("baseline unexpectedly hydrated source"));
+    }
+    let expected = blake3::hash(&SOURCE_BYTES).to_hex().to_string();
+    for _ in 0..2 {
+        let nodes = scan_repo(root, &ScanOptions::default()).map_err(io::Error::other)?;
+        if !["source.rs", "nested/nested-source.rs"].iter().all(|path| {
+            nodes
+                .iter()
+                .any(|node| node.path == *path && node.content_hash.as_ref() == Some(&expected))
+        }) {
+            // Capture native state before diagnostic followed reads can hydrate
+            // anything; a missing row and wrong bytes need different repairs.
+            let source_disk = on_disk_bytes(&source);
+            let nested_disk = on_disk_bytes(&root.join("nested/nested-source.rs"));
+            let source_attributes =
+                fs::symlink_metadata(&source).map(|metadata| metadata.file_attributes());
+            let reopened_source = captured_reopen_hash(root, &source);
+            let reopened_nested = captured_reopen_hash(root, &root.join("nested/nested-source.rs"));
+            let ordinary_source =
+                fs::read(&source).map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+            let ordinary_nested = fs::read(root.join("nested/nested-source.rs"))
+                .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+            let observed: Vec<_> = nodes
+                .iter()
+                .take(8)
+                .map(|node| (&node.path, &node.kind, node.size_bytes, &node.content_hash))
+                .collect();
+            return Err(io::Error::other(format!(
+                "scanner changed online or hydrated source bytes: expected={expected}; rows={observed:?}; total_rows={}; source_disk={source_disk:?}; source_attributes={source_attributes:?}; nested_disk={nested_disk:?}; reopened_source={reopened_source:?}; reopened_nested={reopened_nested:?}; ordinary_source={ordinary_source:?}; ordinary_nested={ordinary_nested:?}",
+                nodes.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run exactly one ordinary client with a bounded callback-wait lifetime.
+fn run_client_process(root: &Path) -> io::Result<()> {
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["--exact", TEST_SELECTOR, "--nocapture"])
+        .env(CLIENT_ROOT_ENV, root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    let stop_reason = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break None,
+            Ok(None) => {}
+            Err(error) => break Some(format!("waiting for client failed: {error}")),
+        }
+        if started.elapsed() > Duration::from_secs(30) {
+            break Some("client exceeded its 30-second read budget".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let mut kill_error = None;
+    if let Some(reason) = &stop_reason {
+        // Dropping Child does not terminate it. Wait errors and timeouts both
+        // require termination before provider disconnection or root cleanup.
+        kill_error = child.kill().err();
+        let termination_started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if termination_started.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                state => {
+                    return Err(io::Error::other(format!(
+                        "{reason}; client {} termination/reaping not confirmed: kill_error={kill_error:?}; state={state:?}",
+                        child.id()
+                    )));
+                }
+            }
+        }
+    }
+    // Exit was observed above, so output collection cannot wait for a live
+    // scanner. This direct child creates no subprocesses holding its pipes.
+    let output = child.wait_with_output().map_err(|error| {
+        io::Error::other(format!(
+            "client output collection failed: {error}; stop_reason={stop_reason:?}; kill_error={kill_error:?}"
+        ))
+    })?;
+    if stop_reason.is_some() || !output.status.success() {
+        return Err(io::Error::other(format!(
+            "native Cloud Files client failed (stop_reason={stop_reason:?}, kill_error={kill_error:?}, fetches={}, populations={}, transfer={:#010x}): {}{}",
+            FETCH_COUNT.load(Ordering::Acquire),
+            POPULATION_COUNT.load(Ordering::Acquire),
+            TRANSFER_FAILURE.load(Ordering::Acquire),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    if fs::read(root.join(CLIENT_COMPLETION_FILE))? != CLIENT_COMPLETION_BYTES {
+        return Err(io::Error::other(
+            "Cloud Files client did not complete actual source proof",
+        ));
+    }
+    Ok(())
+}
+
+/// Register and serve placeholders while the distinct ordinary client reads them.
+fn serve_client(root: &Path, provider: &mut Provider) -> io::Result<()> {
     let provider_name: Vec<u16> = "ProjectAtlas source-read test"
         .encode_utf16()
         .chain(Some(0))
         .collect();
     let provider_version: Vec<u16> = "1".encode_utf16().chain(Some(0)).collect();
-    let mut provider = Provider {
-        root: wide(root),
-        connection: None,
-        registered: false,
-    };
     let registration = CF_SYNC_REGISTRATION {
         StructSize: size_of::<CF_SYNC_REGISTRATION>() as u32,
         ProviderName: provider_name.as_ptr(),
@@ -269,8 +382,8 @@ fn run_provider(root: &Path) -> io::Result<()> {
         ..CF_SYNC_POLICIES::default()
     };
     // SAFETY: All strings, root path and official input structures are live and
-    // correctly sized. The worker root is a trusted test-harness input; the
-    // normal parent invocation supplies its own empty TempDir.
+    // correctly sized. The parent test owns this empty TempDir and retains
+    // provider ownership while the separate ordinary client performs reads.
     check("CfRegisterSyncRoot", unsafe {
         CfRegisterSyncRoot(
             provider.root.as_ptr(),
@@ -357,121 +470,61 @@ fn run_provider(root: &Path) -> io::Result<()> {
             return Err(io::Error::other("placeholder was not created"));
         }
     }
-    let source = root.join("source.rs");
-    if on_disk_bytes(&source)? != 0 || on_disk_bytes(&root.join("baseline.rs"))? != 0 {
+    if on_disk_bytes(&root.join("source.rs"))? != 0
+        || on_disk_bytes(&root.join("baseline.rs"))? != 0
+    {
         return Err(io::Error::other(
             "fixture did not start with online-only placeholders",
         ));
     }
-    if fs::read(root.join("baseline.rs"))? != SOURCE_BYTES {
-        return Err(io::Error::other(
-            "ordinary followed-open hydration failed its baseline",
-        ));
-    }
-    if on_disk_bytes(&source)? != 0 {
-        return Err(io::Error::other("baseline unexpectedly hydrated source"));
-    }
-    let before = FETCH_COUNT.load(Ordering::Acquire);
-    let expected = blake3::hash(&SOURCE_BYTES).to_hex().to_string();
-    for _ in 0..2 {
-        let nodes = scan_repo(root, &ScanOptions::default()).map_err(io::Error::other)?;
-        if !["source.rs", "nested/nested-source.rs"].iter().all(|path| {
-            nodes
-                .iter()
-                .any(|node| node.path == *path && node.content_hash.as_ref() == Some(&expected))
-        }) {
-            // Capture native state before diagnostic followed reads can hydrate
-            // anything; a missing row and wrong bytes need different repairs.
-            let source_disk = on_disk_bytes(&source);
-            let nested_disk = on_disk_bytes(&root.join("nested/nested-source.rs"));
-            let fetches = FETCH_COUNT.load(Ordering::Acquire);
-            let populations = POPULATION_COUNT.load(Ordering::Acquire);
-            let transfer = TRANSFER_FAILURE.load(Ordering::Acquire);
-            let source_attributes =
-                fs::symlink_metadata(&source).map(|metadata| metadata.file_attributes());
-            let reopened_source = captured_reopen_hash(root, &source);
-            let reopened_nested = captured_reopen_hash(root, &root.join("nested/nested-source.rs"));
-            let ordinary_source =
-                fs::read(&source).map(|bytes| blake3::hash(&bytes).to_hex().to_string());
-            let ordinary_nested = fs::read(root.join("nested/nested-source.rs"))
-                .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
-            let observed: Vec<_> = nodes
-                .iter()
-                .take(8)
-                .map(|node| (&node.path, &node.kind, node.size_bytes, &node.content_hash))
-                .collect();
-            return Err(io::Error::other(format!(
-                "scanner changed online or hydrated source bytes: expected={expected}; rows={observed:?}; total_rows={}; fetches={fetches}; populations={populations}; transfer={transfer:#010x}; source_disk={source_disk:?}; source_attributes={source_attributes:?}; nested_disk={nested_disk:?}; reopened_source={reopened_source:?}; reopened_nested={reopened_nested:?}; ordinary_source={ordinary_source:?}; ordinary_nested={ordinary_nested:?}",
-                nodes.len()
-            )));
-        }
-    }
+    run_client_process(root)?;
     if POPULATION_COUNT.load(Ordering::Acquire) == 0
         || on_disk_bytes(&root.join("nested/nested-source.rs"))? < SOURCE_BYTES.len() as i64
     {
         return Err(io::Error::other(
-            "scanner did not populate and hydrate the nested source",
+            "ordinary client did not populate and hydrate the nested source",
         ));
     }
-    if FETCH_COUNT.load(Ordering::Acquire) <= before
-        || on_disk_bytes(&source)? < SOURCE_BYTES.len() as i64
+    if FETCH_COUNT.load(Ordering::Acquire) < 3
+        || on_disk_bytes(&root.join("source.rs"))? < SOURCE_BYTES.len() as i64
     {
         return Err(io::Error::other(
-            "scanner read did not hydrate the online source",
+            "ordinary client did not hydrate all online sources",
         ));
     }
-    provider.finish()?;
-    check(
-        "CfExecute transfer",
-        TRANSFER_FAILURE.load(Ordering::Acquire),
-    )
+    Ok(())
+}
+
+/// Surface cleanup failures after every completed, failed or timed-out client.
+fn run_provider(root: &Path) -> io::Result<()> {
+    let mut provider = Provider {
+        root: wide(root),
+        connection: None,
+        registered: false,
+    };
+    let proof = serve_client(root, &mut provider);
+    let cleanup = provider.finish();
+    match (proof, cleanup) {
+        (Err(proof), Err(cleanup)) => Err(io::Error::other(format!(
+            "{proof}; provider cleanup also failed: {cleanup}"
+        ))),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => check(
+            "CfExecute transfer",
+            TRANSFER_FAILURE.load(Ordering::Acquire),
+        ),
+    }
 }
 
 #[test]
 fn source_scan_hydrates_online_cloud_placeholders() -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(root) = std::env::var_os(WORKER_ROOT_ENV) {
+    if let Some(root) = std::env::var_os(CLIENT_ROOT_ENV) {
         let root = Path::new(&root);
-        run_provider(root)?;
-        fs::write(root.join(COMPLETION_FILE), COMPLETION_BYTES)?;
+        run_client(root)?;
+        fs::write(root.join(CLIENT_COMPLETION_FILE), CLIENT_COMPLETION_BYTES)?;
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
-    let mut child = Command::new(std::env::current_exe()?)
-        .args(["--exact", TEST_SELECTOR, "--nocapture"])
-        .env(WORKER_ROOT_ENV, temp.path())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let started = Instant::now();
-    let timed_out = loop {
-        if child.try_wait()?.is_some() {
-            break false;
-        }
-        if started.elapsed() > Duration::from_secs(30) {
-            // Exiting between try_wait and kill is harmless; always reap below.
-            let _kill_result = child.kill();
-            break true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-    let output = child.wait_with_output()?;
-    if timed_out || !output.status.success() {
-        // SAFETY: The child has terminated and the parent owns this exact TempDir.
-        // Recover a fixture registration if termination interrupted child cleanup.
-        let _cleanup = unsafe { CfUnregisterSyncRoot(wide(temp.path()).as_ptr()) };
-    }
-    if timed_out || !output.status.success() {
-        return Err(io::Error::other(format!(
-            "native Cloud Files fixture failed (timeout={timed_out}): {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ))
-        .into());
-    }
-    if fs::read(temp.path().join(COMPLETION_FILE))? != COMPLETION_BYTES {
-        return Err(
-            io::Error::other("Cloud Files worker did not complete actual source proof").into(),
-        );
-    }
+    run_provider(temp.path())?;
     Ok(())
 }

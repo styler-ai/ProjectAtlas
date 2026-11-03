@@ -372,8 +372,13 @@ Microsoft's official `windows-sys` bindings, creates two online-only placeholder
 proves ordinary followed-open hydration on one and real scanner hydration plus a
 second hydrated read on the other. A partial directory callback supplies a nested
 online source so the same real scan also proves directory population and
-no-follow parent reads. The fixture explicitly disconnects/unregisters. A
-bounded child process contains a missing callback or driver stall. Native failure
+no-follow parent reads. The parent owns and serves the provider; a separate
+ordinary client process performs both scans and writes an exact completion marker.
+Parent-owned callback counters and hydrated-byte checks prove that the client
+caused actual hydration and population. The marker proves client completion only;
+the parent explicitly disconnects/unregisters after success, failure or timeout
+and reports cleanup errors. A bounded client process contains missing-callback
+read waits. Native failure
 or missing prerequisites fail this proof rather than silently skipping it. No
 account, network, external sync root or production FFI is involved. The native
 optimized filesystem suite runs in each existing package lane. API contracts:
