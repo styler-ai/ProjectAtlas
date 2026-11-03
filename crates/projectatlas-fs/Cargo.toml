@@ -9,6 +9,8 @@ homepage.workspace = true
 [dependencies]
 projectatlas-core.workspace = true
 blake3.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
 gix-config.workspace = true
 ignore.workspace = true
 thiserror.workspace = true
@@ -18,6 +20,9 @@ nix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_CloudFilters", "Win32_System_CorrelationVector"] }
 
 [lints]
 workspace = true

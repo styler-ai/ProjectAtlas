@@ -289,8 +289,7 @@ jobs:
             --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit \
             -- --exact --include-ignored --nocapture
           CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-fs \
-            worktree::tests::control_reader_keeps_direct_leaf_after_inspection \
-            -- --exact --include-ignored --nocapture
+            --lib -- --include-ignored --nocapture
           if command -v shasum >/dev/null 2>&1; then
             digest_command=(shasum -a 256)
           else
@@ -429,7 +428,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --release --all-features -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit -- --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --release --all-features -p projectatlas-fs worktree::tests::control_reader_keeps_direct_leaf_after_inspection -- --exact --include-ignored --nocapture
+          cargo test --locked --release --all-features -p projectatlas-fs --lib -- --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $shippingTarget = Join-Path $env:GITHUB_WORKSPACE "target"
           $shippingRuntime = Join-Path $shippingTarget "release\projectatlas.exe"

@@ -291,8 +291,8 @@ and unchanged four-platform performance targets remain acceptance requirements.
 The native database investigation exposed the same check/open assumption in source
 hashing, source-policy hashing and Git pointer reads: earlier regular-file metadata
 does not prove the object subsequently opened is still regular. Repair the owning
-readers before consuming bytes. Scanner hashing, policy witnesses and database
-identity reuse the filesystem crate's regular-file opener; each retains its own
+readers before consuming bytes. Policy witnesses and database
+identity reuse the filesystem crate's followed-alias regular-file opener; each retains its own
 error mapping, cancellation/read bounds and root/selection contract. Followed
 policy and database aliases remain supported. Initial absent, directory and other
 policy witness states retain their existing classification; a nonregular object
@@ -307,17 +307,92 @@ object before the existing bounded read. Keep the prior structural preflight,
 byte limits, pointer parsing and typed errors. The shared followed-alias opener
 must not relax this control-file rule. Deterministic fixtures substitute a FIFO or
 symlink after retaining the original regular metadata; normal pointer restoration
-and regular/aliased source reads remain positive controls. Native Windows
+and regular/aliased control reads remain positive controls. Native Windows
 compilation and reparse-point execution remain separate platform proof; each
 optimized native package lane runs the direct-pointer substitution/restoration
 unit contract before accepting the packaged runner.
 
 This scope covers the confirmed scanner, policy, database and structural-control
 read boundaries. It adds no schema, watcher thread, cache, filesystem restriction
-or new dependency version. It does not promise preemptible ordinary filesystem
+or cross-operation source handle cache. It does not promise preemptible ordinary filesystem
 I/O or assert a complete audit of unrelated repository readers. Descriptor checks
 add metadata work, which must be included in the unchanged installed performance
 targets rather than waived as hardening overhead.
+
+## Direct source discovery under namespace changes
+
+Source symlinks are excluded by the existing scanner contract, including aliases
+whose targets remain inside the selected root. Earlier metadata does not authorize
+following a replacement leaf or parent. A private concrete `SourceRootReader`
+anchors one directory capability to the already selected root for each discovery.
+Borrow it across the existing walker workers. Traverse each native parent component
+with `cap-fs-ext::DirExt::open_dir_nofollow`, open the leaf with
+`FollowSymlinks::No`, and verify the opened object is regular before reading.
+Use Unix nonblocking/no-controlling-terminal flags and the unchanged cooperative
+controls before component opens and source chunks. Because Unix directory handles
+allow the root pathname to move, compare the opened regular descriptor's device and
+inode with the walker's admitted metadata before hashing. This refuses pairing
+metadata from a replacement root with bytes from the retained selected root. The
+node uses the opened descriptor's modification time and streamed byte count; final
+source and publication revalidation remain necessary for concurrent writes. Drop all capabilities when
+this discovery ends; `RootScanPolicy` retains no native handle between requests.
+
+Use canonical `cap-std` and `cap-fs-ext` 4.0.3 rather than local Windows NT traversal
+or a pre/post-canonicalization race check. The filesystem crate alone owns this
+dependency and domain wrapper. Resource work is O(path components + source bytes),
+with one root handle per discovery and bounded transient directory/file handles
+per existing worker. Component traversal is bounded by the supplied native path,
+checks the shared cooperative control before each open, and retains no path cache. There is no directory cache, additional worker, schema or
+persistent state. Component-open cost remains part of the unchanged performance
+targets. The upstream `fs-set-times` dependency retains `io-lifetimes` 2 while
+`cap-*` uses 3. On Windows, the canonical `winx` backend retains the 0.52
+Windows binding/import-library line while the existing application and watcher
+use 0.61/0.60. Duplicate allowances name only those exact upstream splits and
+are removed when the canonical dependency ranges converge; advisory, license
+and registry-source gates remain unchanged.
+
+Targeted scans first rebase the explicitly selected root spelling through the
+existing policy helper, then preserve native component semantics: Unix inspects unresolved source
+components before lexical normalization; Windows uses its standard native absolute
+normalization on non-verbatim absolute input before rebasing. Canonicalizing a parent first hides an inside-root symlink. Do not
+resolve child aliases into admitted direct paths. Ordinary relative paths, the
+selected root alias, in-root parent traversal and direct atomic-save replacement
+remain supported. Symlink leaves/parents, including inside-root targets, are
+excluded; a substitution after admission refuses before hashing redirected bytes.
+
+Windows directory capabilities prevent rename/delete while held by discovery;
+none may survive into idle MCP operation. Ordinary source file handles retain
+normal sharing so editor replacement remains supported. The canonical backend
+checks native symlink types rather than blanket-rejecting every reparse tag;
+Cloud Files placeholders must retain their normal read/hydration behavior.
+Native root-move, file replacement and reparse compatibility need platform proof;
+static backend inspection alone is not a claim that hydration was executed.
+The Windows-only Cloud Files fixture registers one owned temporary root through
+Microsoft's official `windows-sys` bindings, creates two online-only placeholders,
+proves ordinary followed-open hydration on one and real scanner hydration plus a
+second hydrated read on the other. A partial directory callback supplies a nested
+online source so the same real scan also proves directory population and
+no-follow parent reads. The fixture explicitly disconnects/unregisters. A
+bounded child process contains a missing callback or driver stall. Native failure
+or missing prerequisites fail this proof rather than silently skipping it. No
+account, network, external sync root or production FFI is involved. The native
+optimized filesystem suite runs in each existing package lane. API contracts:
+[Cloud Files](https://learn.microsoft.com/en-us/windows/win32/cfapi/build-a-cloud-file-sync-engine),
+[registration](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfregistersyncroot)
+and [transfer](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfexecute).
+This fixture is not evidence until the actual Windows run passes.
+
+Causal proof includes leaf/parent replacement after retained metadata crossed with
+inside/outside targets and a targeted same-root ancestor alias. Positive controls
+cover selected-root aliases, hardlinks, native path spelling, non-UTF-8 refusal,
+replacement after an open descriptor, fresh-discovery replacement, absence and
+resource/cancellation bounds. On Unix, regular atomic replacement between metadata
+and open is an intentional transient refusal; a fresh-metadata retry succeeds.
+The runtime propagates this inspection failure before affected-work publication
+instead of mutating the prior valid index. These handles
+prevent redirected reads through the tested source components; they do not claim
+an atomic global filesystem snapshot. Existing source comparison, policy, native
+root identity and transactional publication checks remain required.
 
 ## Concrete automatic-budget policy
 

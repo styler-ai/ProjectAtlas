@@ -78,6 +78,15 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 - **WHEN** source changes after the initial evidence is captured
 - **THEN** refresh revalidates or retries the affected work, or refuses publication without exposing stale or partial new state
 
+#### Scenario: Source indirection substituted after admission
+- **WHEN** a direct source leaf or parent becomes a symlink after metadata inspection, whether its target is inside or outside the selected root
+- **THEN** discovery refuses before hashing redirected source bytes and preserves the prior valid publication
+- **AND** direct source reads, hardlinks, selected-root aliases, ordinary file replacement and supported native reparse compatibility remain functional
+
+#### Scenario: Targeted source alias within the selected root
+- **WHEN** a targeted refresh receives a symlink leaf or ancestor whose target is otherwise an admitted source inside the selected root
+- **THEN** it excludes the source alias without canonicalizing it into an admitted direct path
+
 #### Scenario: Cancellation or failed write
 - **WHEN** refresh is cancelled, reaches its deadline or fails while staging or publishing
 - **THEN** the prior valid index, native identity and approved purposes remain intact and an adequate retry can succeed

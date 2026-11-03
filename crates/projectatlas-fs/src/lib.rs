@@ -5,6 +5,7 @@ pub mod worktree;
 mod git_config;
 mod policy_match;
 mod regular_file;
+mod source_reader;
 
 pub use policy_match::{PolicyMatchError, PolicyMatchLimits, PolicyMatchResource, RootScanMatcher};
 pub use regular_file::open_regular_file;
@@ -20,6 +21,7 @@ use projectatlas_core::{
     IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
     normalized_extension, normalized_parent,
 };
+use source_reader::SourceRootReader;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -185,6 +187,13 @@ impl RootScanPolicy {
                 })?
             })
         };
+        #[cfg(windows)]
+        let selected_root: Cow<'_, Path> = Cow::Owned(
+            std::path::absolute(selected_root.as_ref()).map_err(|source| FsError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?,
+        );
         if !selected_root.is_dir() {
             return Err(FsError::RootNotDirectory(root.to_path_buf()));
         }
@@ -474,6 +483,7 @@ pub fn scan_repo_controlled_with_work(
 ) -> FsResult<ScanOutcome> {
     let policy = RootScanPolicy::discover(root, options, control)?;
     let root = policy.root;
+    let source_reader = SourceRootReader::open(&root)?;
     let options = policy.options;
     let mut builder = policy.walker;
     let effective_workers = effective_scan_workers(limits, control);
@@ -524,6 +534,7 @@ pub fn scan_repo_controlled_with_work(
         true
     });
     builder.build_parallel().run(|| {
+        let source_reader = &source_reader;
         let root = root.clone();
         let options = options.clone();
         let nodes = Arc::clone(&nodes);
@@ -555,7 +566,7 @@ pub fn scan_repo_controlled_with_work(
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path, &options, &budget) {
+            match scanned_node(&root, path, &options, &budget, source_reader) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -646,68 +657,69 @@ pub fn scan_path_with_policy_controlled(
     budget.claim_entry()?;
     let root = &policy.root;
     let options = &policy.options;
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
+    #[cfg(windows)]
+    let native_path = if path.is_absolute() {
+        Cow::Owned(std::path::absolute(path).map_err(|source| FsError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?)
     } else {
-        root.join(path)
+        Cow::Borrowed(path)
     };
+    #[cfg(windows)]
+    let path = native_path.as_ref();
+    let absolute = policy.absolute_target(path);
     if !absolute.exists() {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
-    if path_has_symlink_component(root, &symlink_checked_absolute)? {
+    if path_has_symlink_component(root, &absolute, control)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let absolute = symlink_checked_absolute
-        .canonicalize()
-        .map_err(|source| FsError::Io {
-            path: symlink_checked_absolute.clone(),
-            source,
-        })?;
-    if !absolute.starts_with(root) {
+    let Some(absolute) = direct_source_path(root, &absolute) else {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
-    }
+    };
     if policy.excludes_path(&absolute)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let node = scanned_node(root, &absolute, options, &budget)?;
+    let source_reader = SourceRootReader::open(root)?;
+    let node = scanned_node(root, &absolute, options, &budget, &source_reader)?;
     control.check(IndexWorkStage::ScanFinalization)?;
     Ok(node)
 }
 
-/// Return a path with a canonical parent but the leaf component preserved.
-fn path_for_symlink_component_check(absolute: &Path) -> FsResult<PathBuf> {
-    if absolute.is_dir() {
-        return absolute.canonicalize().map_err(|source| FsError::Io {
-            path: absolute.to_path_buf(),
-            source,
-        });
+/// Normalize direct in-root components after unresolved symlink inspection.
+fn direct_source_path(root: &Path, absolute: &Path) -> Option<PathBuf> {
+    let relative = absolute.strip_prefix(root).ok()?;
+    let mut direct = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => direct.push(name),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if direct != root => {
+                direct.pop();
+            }
+            _ => return None,
+        }
     }
-    let Some(parent) = absolute.parent() else {
-        return Ok(absolute.to_path_buf());
-    };
-    let parent = parent.canonicalize().map_err(|source| FsError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    if let Some(file_name) = absolute.file_name() {
-        Ok(parent.join(file_name))
-    } else {
-        Ok(parent)
-    }
+    Some(direct)
 }
 
 /// Return whether any path component below root is a symlink.
-fn path_has_symlink_component(root: &Path, absolute: &Path) -> FsResult<bool> {
+fn path_has_symlink_component(
+    root: &Path,
+    absolute: &Path,
+    control: &IndexWorkControl,
+) -> FsResult<bool> {
     let Ok(relative) = absolute.strip_prefix(root) else {
         return Ok(true);
     };
     let mut current = root.to_path_buf();
     for component in relative.components() {
+        control.check(IndexWorkStage::SourceMetadata)?;
         current.push(component.as_os_str());
         if fs::symlink_metadata(&current)
             .map_err(|source| FsError::Io {
@@ -1294,6 +1306,7 @@ fn scanned_node(
     path: &Path,
     options: &ScanOptions,
     budget: &ScanBudget,
+    source_reader: &SourceRootReader,
 ) -> FsResult<Option<Node>> {
     budget.control.check(IndexWorkStage::SourceMetadata)?;
     let metadata = fs::symlink_metadata(path).map_err(|source| FsError::Io {
@@ -1307,7 +1320,7 @@ fn scanned_node(
         return folder_node(root, path).map(Some);
     }
     if metadata.is_file() {
-        return file_node(root, path, &metadata, options, budget).map(Some);
+        return file_node(root, path, &metadata, options, budget, source_reader).map(Some);
     }
     Ok(None)
 }
@@ -1407,6 +1420,7 @@ fn file_node(
     metadata: &fs::Metadata,
     options: &ScanOptions,
     budget: &ScanBudget,
+    source_reader: &SourceRootReader,
 ) -> FsResult<Node> {
     let normalized = normalize_repo_path(root, path)?;
     let extension = normalized_extension(path);
@@ -1429,7 +1443,13 @@ fn file_node(
         })?,
         options.admit_optional_languages,
     );
-    let hashed = hash_file(path, budget, preliminary_language.is_none())?;
+    let (hashed, metadata) = hash_file(
+        path,
+        metadata,
+        budget,
+        preliminary_language.is_none(),
+        source_reader,
+    )?;
     let language = if let Some(detected) = preliminary_language {
         Some(detected.language.to_string())
     } else {
@@ -1518,15 +1538,15 @@ struct HashedFile {
 /// Hash a file with BLAKE3 for stale-purpose detection.
 fn hash_file(
     path: &Path,
+    admitted_metadata: &fs::Metadata,
     budget: &ScanBudget,
     retain_content_prefix: bool,
-) -> FsResult<HashedFile> {
+    source_reader: &SourceRootReader,
+) -> FsResult<(HashedFile, fs::Metadata)> {
     budget.control.check(IndexWorkStage::SourceHash)?;
-    let file = open_regular_file(path).map_err(|source| FsError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    hash_reader(path, file, budget, retain_content_prefix)
+    let (file, metadata) = source_reader.open_file(path, admitted_metadata, &budget.control)?;
+    let hashed = hash_reader(path, file, budget, retain_content_prefix)?;
+    Ok((hashed, metadata))
 }
 
 /// Hash every byte from a reader while observing cancellation and deadline state.
@@ -1582,6 +1602,357 @@ mod tests {
     use std::process::Command;
     use std::time::Instant;
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn source_hash_refuses_indirection_substituted_after_metadata() -> Result<(), Box<dyn Error>> {
+        let mut admitted = Vec::new();
+        for ancestor in [false, true] {
+            for target_in_root in [false, true] {
+                for same_file_object in [false, true] {
+                    let temp = tempfile::tempdir()?;
+                    let root = temp.path().join("repo");
+                    let directory = root.join("src");
+                    fs::create_dir_all(&directory)?;
+                    let source = directory.join("source.rs");
+                    let original = b"fn inside_source() {}\n";
+                    fs::write(&source, original)?;
+                    let metadata = fs::symlink_metadata(&source)?;
+                    let source_reader = SourceRootReader::open(&root)?;
+                    let target = if target_in_root {
+                        if ancestor {
+                            root.join("other")
+                        } else {
+                            directory.join("other")
+                        }
+                    } else {
+                        temp.path().join("outside")
+                    };
+                    fs::create_dir(&target)?;
+                    let redirected = b"fn redirected_source() {}\n";
+                    if same_file_object {
+                        fs::hard_link(&source, target.join("source.rs"))?;
+                    } else {
+                        fs::write(target.join("source.rs"), redirected)?;
+                    }
+                    let budget = ScanBudget::new(
+                        ScanLimits::default(),
+                        IndexWorkControl::new(IndexCancellation::new(), None),
+                    );
+                    require(
+                        file_node(
+                            &root,
+                            &source,
+                            &metadata,
+                            &ScanOptions::default(),
+                            &budget,
+                            &source_reader,
+                        )?
+                        .content_hash
+                            == Some(blake3::hash(original).to_hex().to_string()),
+                        "regular source fixture was not admitted before substitution",
+                    )?;
+                    if ancestor {
+                        fs::rename(&directory, temp.path().join("saved-directory"))?;
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(
+                            if target_in_root {
+                                Path::new("other")
+                            } else {
+                                &target
+                            },
+                            &directory,
+                        )?;
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_dir(
+                            if target_in_root {
+                                Path::new("other")
+                            } else {
+                                &target
+                            },
+                            &directory,
+                        )?;
+                    } else {
+                        fs::rename(&source, temp.path().join("saved.rs"))?;
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(
+                            if target_in_root {
+                                PathBuf::from("other/source.rs")
+                            } else {
+                                target.join("source.rs")
+                            },
+                            &source,
+                        )?;
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_file(
+                            if target_in_root {
+                                PathBuf::from("other/source.rs")
+                            } else {
+                                target.join("source.rs")
+                            },
+                            &source,
+                        )?;
+                    }
+                    if let Ok(node) = file_node(
+                        &root,
+                        &source,
+                        &metadata,
+                        &ScanOptions::default(),
+                        &budget,
+                        &source_reader,
+                    ) {
+                        admitted.push(format!(
+                        "ancestor={ancestor}, target_in_root={target_in_root}, same_file_object={same_file_object}, redirected_digest={}",
+                        node.content_hash == Some(blake3::hash(redirected).to_hex().to_string())
+                    ));
+                    }
+                }
+            }
+        }
+        if !admitted.is_empty() {
+            return Err(io::Error::other(format!(
+                "source indirection crossed its metadata admission: {admitted:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn targeted_scan_skips_inside_root_symlink_ancestors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let direct = root.join("direct");
+        fs::create_dir_all(&direct)?;
+        fs::write(direct.join("source.rs"), "fn direct_source() {}\n")?;
+        let alias = root.join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&direct, &alias)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&direct, &alias)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        for path in [&alias, &alias.join("source.rs")] {
+            require(
+                scan_path_with_policy_controlled(&policy, path, ScanLimits::default(), &control)?
+                    .is_none(),
+                "targeted scan canonicalized a source alias into an admitted direct path",
+            )?;
+        }
+        require(
+            scan_path_with_policy_controlled(
+                &policy,
+                &direct.join("source.rs"),
+                ScanLimits::default(),
+                &control,
+            )?
+            .is_some(),
+            "targeted scan lost the direct source alongside its excluded alias",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn targeted_scan_keeps_selected_alias_and_direct_parent_components()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("nested"))?;
+        fs::write(root.join("source.rs"), "fn admitted_source() {}\n")?;
+        let alias = temp.path().join("selected");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &alias)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&root, &alias)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&alias, &ScanOptions::default(), &control)?;
+        for path in [
+            alias.join("source.rs"),
+            alias.join("nested/../source.rs"),
+            PathBuf::from("nested/../source.rs"),
+            root.canonicalize()?.join("source.rs"),
+        ] {
+            let node =
+                scan_path_with_policy_controlled(&policy, &path, ScanLimits::default(), &control)?;
+            require(
+                node.is_some_and(|node| node.path == "source.rs"),
+                "selected root alias or ordinary parent traversal changed the direct source",
+            )?;
+        }
+        // A symlink followed by .. is still indirection, even if lexical cleanup
+        // would erase the component and land on a permitted source.
+        let indirect = root.join("indirect");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("nested"), &indirect)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(root.join("nested"), &indirect)?;
+        let indirect_parent = scan_path_with_policy_controlled(
+            &policy,
+            &alias.join("indirect/../source.rs"),
+            ScanLimits::default(),
+            &control,
+        )?;
+        #[cfg(unix)]
+        require(
+            indirect_parent.is_none(),
+            "parent cleanup erased source indirection",
+        )?;
+        #[cfg(windows)]
+        {
+            require(
+                indirect_parent.is_some_and(|node| node.path == "source.rs"),
+                "native Windows parent normalization changed the selected direct source",
+            )?;
+            let missing_parent = scan_path_with_policy_controlled(
+                &policy,
+                &alias.join("missing/../source.rs"),
+                ScanLimits::default(),
+                &control,
+            )?;
+            require(
+                missing_parent.is_some_and(|node| node.path == "source.rs"),
+                "native Windows missing-parent normalization changed the direct source",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_node_uses_opened_file_metadata_for_modified_content() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = root.join("source.rs");
+        fs::write(&path, b"fn before_edit() {}\n")?;
+        fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000))?;
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let edited = b"fn after_edit() {}\n";
+        fs::write(&path, edited)?;
+        let opened_metadata = fs::metadata(&path)?;
+        require(
+            original_metadata.modified()? != opened_metadata.modified()?,
+            "source timestamp fixture did not change",
+        )?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let reader = SourceRootReader::open(root)?;
+        let node = file_node(
+            root,
+            &path,
+            &original_metadata,
+            &ScanOptions::default(),
+            &budget,
+            &reader,
+        )?;
+        let expected_mtime = system_time_to_ns(opened_metadata.modified()?)
+            .map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+        require(
+            node.content_hash == Some(blake3::hash(edited).to_hex().to_string())
+                && node.mtime_ns == expected_mtime,
+            "source node paired edited bytes with pre-open metadata",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_atomic_replacement_after_metadata_and_accepts_retry()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = root.join("source.rs");
+        fs::write(&path, b"fn before_save() {}\n")?;
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let reader = SourceRootReader::open(root)?;
+        let saved = b"fn after_save() {}\n";
+        let pending = root.join("pending.rs");
+        fs::write(&pending, saved)?;
+        fs::rename(&pending, &path)?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        require(
+            matches!(
+                file_node(
+                    root,
+                    &path,
+                    &original_metadata,
+                    &ScanOptions::default(),
+                    &budget,
+                    &reader
+                ),
+                Err(FsError::Io { .. })
+            ),
+            "source replacement between metadata and open was not refused",
+        )?;
+        require(
+            file_node(
+                root,
+                &path,
+                &fs::symlink_metadata(&path)?,
+                &ScanOptions::default(),
+                &budget,
+                &reader,
+            )?
+            .content_hash
+                == Some(blake3::hash(saved).to_hex().to_string()),
+            "fresh metadata retry lost the ordinary editor save",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_walker_metadata_from_a_replaced_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let path = root.join("source.rs");
+        let original = b"fn selected_root_source() {}\n";
+        fs::write(&path, original)?;
+        let reader = SourceRootReader::open(&root)?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let options = ScanOptions::default();
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let selected = temp.path().join("selected-root");
+        fs::rename(&root, &selected)?;
+        fs::create_dir(&root)?;
+        fs::write(&path, b"fn replacement_root_source() {}\n")?;
+        let replacement_metadata = fs::symlink_metadata(&path)?;
+        // Model the actual path walker seeing replacement B after the source
+        // reader retained selected root A. Refuse before pairing B's metadata
+        // with A's bytes, even if the original pathname is restored afterward.
+        let refused = file_node(
+            &root,
+            &path,
+            &replacement_metadata,
+            &options,
+            &budget,
+            &reader,
+        );
+        fs::rename(&root, temp.path().join("replacement-root"))?;
+        fs::rename(&selected, &root)?;
+        require(
+            refused.is_err(),
+            "walker metadata from a replacement root labeled selected-root bytes",
+        )?;
+        require(
+            file_node(&root, &path, &original_metadata, &options, &budget, &reader)?.content_hash
+                == Some(blake3::hash(original).to_hex().to_string()),
+            "restored selected root lost direct source admission",
+        )?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn source_hash_refuses_fifo_substituted_after_metadata() -> Result<(), Box<dyn Error>> {
@@ -1597,13 +1968,14 @@ mod tests {
             nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
         )?;
         let checked = source.clone();
+        let source_reader = SourceRootReader::open(&root)?;
         crate::regular_file::verify_fifo_refusal(&source, move || {
             let budget = ScanBudget::new(
                 ScanLimits::default(),
                 IndexWorkControl::new(IndexCancellation::new(), None),
             );
             matches!(
-                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget),
+                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget, &source_reader),
                 Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
             )
         })
