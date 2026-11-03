@@ -43,6 +43,7 @@ pub use repository_graph::{
     RepositoryGraphReadPages, RepositoryGraphReadWork, RepositoryGraphRelationQuery,
     RepositoryGraphRelationRow, RepositoryGraphStagingGuard, RepositoryNavigationConnections,
     RepositoryNavigationNode, RepositoryResolutionCandidate, RepositoryResolutionReadPage,
+    RepositoryUnresolvedDocumentRow,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{

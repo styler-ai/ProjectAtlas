@@ -81,7 +81,8 @@ cssparser = "0.37"
 ed25519-dalek = { version = "3.0", default-features = false, features = ["fast", "signature", "zeroize"] }
 globset = "0.4"
 getrandom = "0.4.3"
-ignore = "0.4"
+gix-config = { version = "=0.62.2", default-features = false, features = ["sha1"] }
+ignore = "=0.4.34"
 jsonc-parser = { version = "0.34", features = ["serde"] }
 landlock = "=0.4.7"
 libloading = "=0.9.0"

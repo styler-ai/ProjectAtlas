@@ -87,6 +87,15 @@ use zip::ZipWriter;
 use zip::write::SimpleFileOptions as FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
+const EXTERNAL_POLICY_RULES_FILE: &str = "rules";
+const EXTERNAL_PROJECT_CONFIGURATION_FILE: &str = "external.toml";
+const UNICODE_SOURCE_ROOT_DIRECTORY: &str = "π-source-root";
+const XDG_CONFIGURATION_DIRECTORY: &str = "xdg";
+
+const OBSERVED_SOURCE_PATH: &str = "source.rs";
+const OBSERVED_DOCUMENT_TARGET_PATH: &str = "target.rs";
+const EXTERNAL_DATABASE_FILE_NAME: &str = "external.db";
+const PROJECT_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
 
 const SRC_DIR_NAME: &str = "src";
 
@@ -9021,11 +9030,23 @@ impl McpContractSession {
         database: &Path,
         environment: &[(&str, Option<&str>)],
     ) -> Result<(Self, Value), Box<dyn Error>> {
+        Self::spawn_configured(executable, repo, database, None, environment)
+    }
+
+    /// Keep the process cwd independent from an explicitly configured source root.
+    fn spawn_configured(
+        executable: &Path,
+        directory: &Path,
+        database: &Path,
+        config: Option<&Path>,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
         let mut command = StdCommand::new(executable);
+        command.current_dir(directory).arg("--db").arg(database);
+        if let Some(config) = config {
+            command.arg("--config").arg(config);
+        }
         command
-            .current_dir(repo)
-            .arg("--db")
-            .arg(database)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -13094,8 +13115,1742 @@ fn relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries()
     Ok(())
 }
 
+#[test]
+fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    const POLICY_HOME_DIRECTORY: &str = "isolated-home";
+    const POLICY_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let home = temp.path().join(POLICY_HOME_DIRECTORY);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&home)?;
+    git_success(&repo, &["init", "--quiet"])?;
+    let configuration = temp.path().join(EXTERNAL_GIT_CONFIGURATION_FILE);
+    let rules = temp.path().join("global rules.ignore");
+    let configuration_text = configuration
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture configuration is not UTF-8"))?;
+    let rules_text = rules
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture exclusions are not UTF-8"))?;
+    git_success(
+        &repo,
+        &[
+            "config",
+            "--file",
+            configuration_text,
+            "core.excludesFile",
+            rules_text,
+        ],
+    )?;
+    fs::write(&rules, "global.rs\nmissing-policy.rs\n")?;
+    fs::write(repo.join(".git/info/exclude"), "shared.rs\n")?;
+    fs::write(
+        repo.join("README.md"),
+        "# Policy\n\n[global](global.rs)\n[shared](shared.rs)\n[missing](missing-policy.rs)\n[kept](kept.rs)\n",
+    )?;
+    for name in ["global.rs", "shared.rs", "kept.rs"] {
+        fs::write(repo.join(name), "pub fn selected() {}\n")?;
+    }
+    let home_text = home
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture home is not UTF-8"))?;
+    let xdg = home.join(XDG_CONFIGURATION_DIRECTORY);
+    let xdg_text = xdg
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture XDG path is not UTF-8"))?;
+    let environment = [
+        ("HOME", Some(home_text)),
+        ("XDG_CONFIG_HOME", Some(xdg_text)),
+        ("GIT_CONFIG_GLOBAL", Some(configuration_text)),
+        ("GIT_CONFIG_SYSTEM", Some("")),
+        ("GIT_CONFIG_NOSYSTEM", Some("true")),
+        ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+    ];
+    let executable = mcp_contract_executable();
+    let database = repo.join(POLICY_DATABASE_PATH);
+    let cli = |root: &Path, db: &Path, arguments: &[&str]| -> Result<Value, Box<dyn Error>> {
+        let mut command = StdCommand::new(&executable);
+        command
+            .current_dir(root)
+            .args(["--format", "json", "--db"])
+            .arg(db)
+            .args(arguments);
+        for (key, value) in environment {
+            if let Some(value) = value {
+                command.env(key, value);
+            }
+        }
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "policy CLI {arguments:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let relations = [
+        "symbols",
+        "relations",
+        "--view",
+        "detailed",
+        "--file",
+        "README.md",
+        "--direction",
+        "outbound",
+        "--relation",
+        "documents",
+        "--content-selection",
+        "documentation",
+        "--limit",
+        "10",
+    ];
+    let verify = |value: &Value, ignored: usize, missing: usize| -> Result<(), Box<dyn Error>> {
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("policy relation rows are absent"))?;
+        if rows.len() != 4
+            || rows
+                .iter()
+                .filter(|row| {
+                    row.get("document_unresolved_reason")
+                        .and_then(Value::as_str)
+                        == Some("ignored")
+                })
+                .count()
+                != ignored
+            || rows
+                .iter()
+                .filter(|row| {
+                    row.get("document_unresolved_reason")
+                        .and_then(Value::as_str)
+                        == Some("missing")
+                })
+                .count()
+                != missing
+        {
+            return Err(
+                io::Error::other(format!("policy document outcomes differ: {value}")).into(),
+            );
+        }
+        Ok(())
+    };
+    cli(&repo, &database, &["scan", "."])?;
+    verify(&cli(&repo, &database, &relations)?, 3, 0)?;
+    let (identity, reviewed, initial) = {
+        let store = AtlasStore::open_for_project(&database, &repo)?;
+        store.set_purpose(
+            "kept.rs",
+            "Expose the retained public policy fixture",
+            PurposeSource::Agent,
+        )?;
+        (
+            store.project_instance_id()?,
+            store.load_node_by_path("kept.rs")?.map(|row| row.purpose),
+            store.index_publication()?,
+        )
+    };
+    let (mut session, _) =
+        McpContractSession::spawn_initialized(&executable, &repo, &database, &environment)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        let arguments = json!({"project_path": repo, "file": "README.md", "view": "detailed", "direction": "outbound", "relation": "documents", "content_selection": "documentation", "limit": 10});
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        verify(&value, 3, 0)?;
+        fs::write(&rules, "global.rs\n")?;
+        let refusal: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        require_json_string(&refusal, &["error", "kind"], "refresh_required")?;
+        if AtlasStore::open_read_only(&database)?.index_publication()? != initial {
+            return Err(io::Error::other("stale document read mutated publication").into());
+        }
+        let refreshed: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo, "path": repo}),
+        )?)?;
+        if refreshed
+            .pointer("/watch/last_symbols/parsed")
+            .and_then(Value::as_u64)
+            != Some(0)
+        {
+            return Err(io::Error::other(format!(
+                "policy-only MCP refresh reparsed unchanged source: {refreshed}"
+            ))
+            .into());
+        }
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        verify(&value, 2, 1)?;
+        verify(&cli(&repo, &database, &relations)?, 2, 1)?;
+        let after = AtlasStore::open_read_only(&database)?.index_publication()?;
+        cli(&repo, &database, &["watch", "--once"])?;
+        let store = AtlasStore::open_read_only(&database)?;
+        if store.index_publication()? != after
+            || store.project_instance_id()? != identity
+            || store.load_node_by_path("kept.rs")?.map(|row| row.purpose) != reviewed
+        {
+            return Err(io::Error::other(
+                "policy repair lost identity, approved purpose or no-op stability",
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+
+    git_success(&repo, &["add", "README.md", "kept.rs"])?;
+    git_success(
+        &repo,
+        &[
+            "-c",
+            "user.name=Policy Fixture",
+            "-c",
+            "user.email=policy@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Seed policy fixture",
+        ],
+    )?;
+    let linked = temp.path().join("linked");
+    let linked_text = linked
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture linked root is not UTF-8"))?;
+    git_success(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked_text,
+            "HEAD",
+        ],
+    )?;
+    for name in ["global.rs", "shared.rs"] {
+        fs::write(linked.join(name), "pub fn excluded() {}\n")?;
+    }
+    let mut oracle = git_command_for_root(&linked);
+    oracle.args(["check-ignore", "--no-index", "global.rs", "shared.rs"]);
+    for (key, value) in environment {
+        if let Some(value) = value {
+            oracle.env(key, value);
+        }
+    }
+    let oracle = oracle.output()?;
+    if !oracle.status.success()
+        || !String::from_utf8(oracle.stdout)?
+            .lines()
+            .eq(["global.rs", "shared.rs"])
+    {
+        return Err(
+            io::Error::other("native Git exclusion oracle disagrees with linked fixture").into(),
+        );
+    }
+    let linked_database = linked.join(POLICY_DATABASE_PATH);
+    cli(&linked, &linked_database, &["scan", "."])?;
+    verify(&cli(&linked, &linked_database, &relations)?, 2, 1)?;
+    fs::write(linked.join(".gitignore"), "!global.rs\n!shared.rs\n")?;
+    cli(&linked, &linked_database, &["watch", "--once"])?;
+    verify(&cli(&linked, &linked_database, &relations)?, 0, 1)?;
+    #[cfg(unix)]
+    {
+        const NESTED_POLICY_DIRECTORY: &str = "nested-inputs";
+        for (nested, name) in [
+            (false, ".ignore"),
+            (false, ".gitignore"),
+            (false, ".git/info/exclude"),
+            (true, ".ignore"),
+            (true, ".gitignore"),
+            (true, ".git/info/exclude"),
+        ] {
+            let directory = if nested {
+                repo.join(NESTED_POLICY_DIRECTORY)
+            } else {
+                repo.clone()
+            };
+            let input = directory.join(name);
+            if let Some(parent) = input.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let previous = if input.is_file() {
+                Some(fs::read(&input)?)
+            } else {
+                None
+            };
+            if input.exists() {
+                fs::remove_file(&input)?;
+            }
+            let made = StdCommand::new("mkfifo").arg(&input).output()?;
+            if !made.status.success() {
+                return Err(io::Error::other("could not create policy FIFO fixture").into());
+            }
+            let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+            let mut command = Command::new(&executable);
+            command
+                .current_dir(&repo)
+                .timeout(Duration::from_secs(5))
+                .args(["--format", "json", "--db"])
+                .arg(&database)
+                .args(["scan", "."]);
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let rejected = command.output()?;
+            if rejected.status.success()
+                || !String::from_utf8_lossy(&rejected.stderr).contains("not a regular file")
+            {
+                return Err(io::Error::other(format!(
+                    "nonregular policy was not refused promptly: {input:?}: {rejected:?}"
+                ))
+                .into());
+            }
+            if AtlasStore::open_read_only(&database)?.index_publication()? != before {
+                return Err(io::Error::other(
+                    "nonregular policy failure changed the last valid publication",
+                )
+                .into());
+            }
+            fs::remove_file(&input)?;
+            if let Some(previous) = previous {
+                fs::write(&input, previous)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Capture active approved purposes, including their source and review status.
+fn approved_purposes(
+    store: &AtlasStore,
+) -> Result<Vec<projectatlas_core::Purpose>, Box<dyn Error>> {
+    Ok(store
+        .load_nodes()?
+        .into_iter()
+        .filter(|row| row.purpose.status == projectatlas_core::PurposeStatus::Approved)
+        .map(|row| row.purpose)
+        .collect())
+}
+
+/// Query one persistent observer's fixture document relation without refreshing it.
+fn observed_document_relations(session: &mut McpContractSession) -> Result<Value, Box<dyn Error>> {
+    Ok(toon_format::decode_default(&session.call_tool(
+        "atlas_symbol_relations",
+        &json!({"view":"detailed", "file":"README.md", "direction":"outbound", "relation":"documents", "content_selection":"documentation", "limit":10}),
+    )?)?)
+}
+
+/// Keep a distinct source name observable even when its target is the selected database.
+fn check_database_object_document_alias(executable: &Path) -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&root)?;
+    fs::write(root.join(OBSERVED_SOURCE_PATH), "pub fn retained() {}\n")?;
+    fs::write(root.join("README.md"), "# Links\n[target](target.rs)\n")?;
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    let database = temp.path().join(EXTERNAL_DATABASE_FILE_NAME);
+    let environment = [
+        ("GIT_CONFIG_GLOBAL", Some("")),
+        ("GIT_CONFIG_SYSTEM", Some("")),
+        ("GIT_CONFIG_NOSYSTEM", Some("1")),
+        ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+    ];
+    let mut init = StdCommand::new(executable);
+    init.current_dir(&root)
+        .arg("--db")
+        .arg(&database)
+        .arg("init");
+    for (key, value) in environment {
+        if let Some(value) = value {
+            init.env(key, value);
+        }
+    }
+    let output = init.output()?;
+    rust_binding_require(
+        output.status.success(),
+        "external database fixture init failed",
+    )?;
+    let (identity, purposes, revision, publication) = {
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        store.set_purpose(
+            "README.md",
+            "Document database aliases",
+            PurposeSource::Agent,
+        )?;
+        (
+            store.project_instance_id()?,
+            approved_purposes(&store)?,
+            store.authored_purpose_revision()?,
+            store.index_publication()?,
+        )
+    };
+    let (mut session, _) =
+        McpContractSession::spawn_configured(executable, &root, &database, None, &environment)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        for _ in 0..2 {
+            let value = observed_document_relations(&mut session)?;
+            rust_binding_equal(
+                &value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str),
+                &Some("missing"),
+            )?;
+        }
+        let target = root.join(OBSERVED_DOCUMENT_TARGET_PATH);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&database, &target)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&database, &target)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let value = observed_document_relations(&mut session)?;
+            if value.pointer("/error/kind").and_then(Value::as_str) == Some("refresh_required") {
+                break;
+            }
+            rust_binding_require(
+                Instant::now() < deadline,
+                "database-object source alias was swallowed as runtime state",
+            )?;
+            thread::sleep(Duration::from_millis(10));
+        }
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &publication,
+        )?;
+        let refresh: Value = toon_format::decode_default(
+            &session.call_tool("atlas_watch_once", &json!({"path":root}))?,
+        )?;
+        rust_binding_equal(
+            &refresh
+                .pointer("/watch/last_symbols/parsed")
+                .and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        for _ in 0..2 {
+            let value = observed_document_relations(&mut session)?;
+            rust_binding_equal(
+                &value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str),
+                &Some("outside_root"),
+            )?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+    let store = AtlasStore::open_read_only(&database)?;
+    rust_binding_equal(&store.project_instance_id()?, &identity)?;
+    rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
+    rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+    rust_binding_require(
+        !root.join(PROJECT_DATABASE_PATH).exists(),
+        "external binding created an implicit database",
+    )
+}
+
+#[test]
+fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn Error>> {
+    for policy in [".ignore", ".gitignore", "global"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(TEST_REPO_DIR);
+        fs::create_dir(&root)?;
+        let target = root.join(OBSERVED_DOCUMENT_TARGET_PATH);
+        fs::write(&target, "pub fn ignored() {}\n")?;
+        fs::write(root.join(OBSERVED_SOURCE_PATH), "pub fn retained() {}\n")?;
+        fs::write(root.join("README.md"), "# Links\n[target](target.rs)\n")?;
+        let rules = if policy == "global" {
+            temp.path().join("external.ignore")
+        } else {
+            root.join(policy)
+        };
+        fs::write(&rules, "target.rs\n")?;
+        let git_config = temp.path().join("global.gitconfig");
+        let rules_text = rules
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture rules path is not UTF-8"))?;
+        fs::write(
+            &git_config,
+            if policy == "global" {
+                format!("[core]\nexcludesFile = {rules_text:?}\n")
+            } else {
+                "[core]\nexcludesFile = \"\"\n".to_owned()
+            },
+        )?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture config path is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let mut init = StdCommand::new(&executable);
+        init.current_dir(&root).arg("init");
+        for (key, value) in environment {
+            if let Some(value) = value {
+                init.env(key, value);
+            }
+        }
+        let output = init.output()?;
+        rust_binding_require(output.status.success(), "document fixture init failed")?;
+        let database = root.join(PROJECT_DATABASE_PATH);
+        let (identity, purposes, revision) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Document target transitions",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                approved_purposes(&store)?,
+                store.authored_purpose_revision()?,
+            )
+        };
+        let (mut session, _) = McpContractSession::spawn_configured(
+            &executable,
+            &root,
+            &database,
+            None,
+            &environment,
+        )?;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            let query = observed_document_relations;
+            let reason = |value: &Value| {
+                value
+                    .pointer("/symbol_relations/rows/0/document_unresolved_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            for _ in 0..2 {
+                rust_binding_equal(&reason(&query(&mut session)?), &Some("ignored".to_owned()))?;
+            }
+            let outside = temp.path().join("outside.rs");
+            fs::write(&outside, "pub fn outside() {}\n")?;
+            for expected in ["outside_root", "ignored"] {
+                let publication = AtlasStore::open_read_only(&database)?.index_publication()?;
+                fs::remove_file(&target)?;
+                if expected == "outside_root" {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&outside, &target)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(&outside, &target)?;
+                } else {
+                    fs::write(&target, "pub fn ignored_again() {}\n")?;
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let value = query(&mut session)?;
+                    if value.pointer("/error/kind").and_then(Value::as_str)
+                        == Some("refresh_required")
+                    {
+                        rust_binding_equal(
+                            &value
+                                .pointer("/error/refresh_required/reason")
+                                .and_then(Value::as_str),
+                            &Some("policy_drift"),
+                        )?;
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::other(format!(
+                            "observed MCP retained a stale document-only target reason: policy={policy}, expected={expected}, actual={:?}",
+                            reason(&value),
+                        )).into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // A read refuses stale evidence without mutating the last valid
+                // publication; only the explicit refresh owns reconciliation.
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.index_publication()?,
+                    &publication,
+                )?;
+                let refreshed: Value = toon_format::decode_default(
+                    &session.call_tool("atlas_watch_once", &json!({"path": root}))?,
+                )?;
+                rust_binding_equal(
+                    &refreshed
+                        .pointer("/watch/last_symbols/parsed")
+                        .and_then(Value::as_u64),
+                    &Some(0),
+                )?;
+                for _ in 0..2 {
+                    rust_binding_equal(&reason(&query(&mut session)?), &Some(expected.to_owned()))?;
+                }
+            }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+        rust_binding_require(
+            store.load_node_by_path("target.rs")?.is_none(),
+            "ignored or outside target became indexed source",
+        )?;
+    }
+    check_database_object_document_alias(&mcp_contract_executable())
+}
+
+// Inotify delivers the high-frequency individual callbacks used by this native
+// flood reproduction. Shared fence/control units run on every native platform.
+#[cfg(target_os = "linux")]
+#[test]
+fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    /// Signal only through the owned child boundary; tests can use a harmless witness.
+    fn signal(child: &mut Child, signal: &str, executable: &Path) -> Result<(), Box<dyn Error>> {
+        // A cached exit must not release a PID and then signal a possible
+        // successor. None keeps this child unreaped during the synchronous command.
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::other("owned watch exited before signal").into());
+        }
+        let status = StdCommand::new(executable)
+            .args([signal, "--"])
+            .arg(child.id().to_string())
+            .status()?;
+        rust_binding_require(status.success(), "owned watch signal failed")
+    }
+
+    /// Pause only this owned child at a verified native receive or polling sleep.
+    /// Comparing the stopped syscall closes the observation-to-stop race: an
+    /// intervening capture must finish before an edit can be admitted here.
+    fn during_watch_wait(
+        child: &mut Child,
+        polling: bool,
+        edit: impl FnOnce() -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        fn has_inotify(descriptors: &Path) -> io::Result<bool> {
+            for entry in fs::read_dir(descriptors)? {
+                match fs::read_link(entry?.path()) {
+                    Ok(target) if target == Path::new("anon_inode:inotify") => return Ok(true),
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(false)
+        }
+
+        let signal_program = Path::new("kill");
+        let process = Path::new("/proc").join(child.id().to_string());
+        let descriptors = process.join("fd");
+        let wait_channel = process.join("wchan");
+        let syscall = process.join("syscall");
+        let status = process.join("status");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                return Err(io::Error::other("watch did not reach its required idle phase").into());
+            }
+            let is_wait = |channel: &str| {
+                if polling {
+                    channel.trim() == "hrtimer_nanosleep"
+                } else {
+                    channel.trim().starts_with("futex")
+                }
+            };
+            if has_inotify(&descriptors)? == polling
+                || !is_wait(&fs::read_to_string(&wait_channel)?)
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            let sampled_syscall = fs::read_to_string(&syscall)?;
+            if !is_wait(&fs::read_to_string(&wait_channel)?) {
+                continue;
+            }
+            signal(child, "-STOP", signal_program)?;
+            // Resume before returning any error; the caller additionally kills
+            // and reaps the owned process on every unsuccessful operation.
+            let stopped = (|| -> Result<bool, Box<dyn Error>> {
+                while !fs::read_to_string(&status)?.lines().any(|line| {
+                    line.starts_with("State:") && line.split_whitespace().nth(1) == Some("T")
+                }) {
+                    if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                        return Err(io::Error::other("owned watch did not stop").into());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(fs::read_to_string(&syscall)? == sampled_syscall
+                    && has_inotify(&descriptors)? != polling)
+            })();
+            match stopped {
+                Ok(true) => {
+                    let result = edit();
+                    let resumed = signal(child, "-CONT", signal_program);
+                    result?;
+                    return resumed;
+                }
+                result => {
+                    let resumed = signal(child, "-CONT", signal_program);
+                    result?;
+                    resumed?;
+                }
+            }
+        }
+    }
+
+    // The witness never signals a PID, even on the unguarded regression path.
+    // A reaped child must be rejected before any signal command is launched.
+    let signal_fixture = tempfile::tempdir()?;
+    let witness = signal_fixture.path().join("signal");
+    fs::write(&witness, "#!/bin/sh\n: > \"$0.called\"\n")?;
+    fs::set_permissions(&witness, fs::Permissions::from_mode(0o700))?;
+    let mut exited = StdCommand::new("/bin/sh").args(["-c", "exit 0"]).spawn()?;
+    rust_binding_require(exited.wait()?.success(), "signal fixture did not exit")?;
+    let rejected = signal(&mut exited, "-CONT", &witness);
+    rust_binding_require(
+        rejected.is_err(),
+        "an exited child must be rejected before launching its signal command",
+    )?;
+    rust_binding_require(
+        !witness.with_extension("called").exists(),
+        "signal command ran after the child was reaped",
+    )?;
+
+    for later_handoff in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().canonicalize()?;
+        let root = directory.join(TEST_REPO_DIR);
+        fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(
+            root.join("README.md"),
+            "# Watch\n[source](src/file0000.rs)\n[later](src/later.rs)\n",
+        )?;
+        // Enough ordinary source work to overlap native ingress without sleeps
+        // or a production hook inside reconciliation.
+        for ordinal in 0..512 {
+            fs::write(
+                root.join(format!("src/file{ordinal:04}.rs")),
+                format!("pub fn item_{ordinal}() {{}}\n"),
+            )?;
+        }
+        let database = directory.join("state/atlas.db");
+        let rules = directory.join(EXTERNAL_POLICY_RULES_FILE);
+        let git_config = directory.join("selected.gitconfig");
+        fs::write(&rules, "")?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        let executable = mcp_contract_executable();
+        let command = || {
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(&root)
+                .args(["--format", "json", "--db"])
+                .arg(&database)
+                .env("GIT_CONFIG_GLOBAL", &git_config)
+                .env("GIT_CONFIG_SYSTEM", "")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "XDG_CONFIG_HOME",
+                    directory.join(XDG_CONFIGURATION_DIRECTORY),
+                )
+                .env("PROJECTATLAS_NO_TELEMETRY", "1");
+            command
+        };
+        Command::from_std(command())
+            .arg("init")
+            .timeout(Duration::from_secs(60))
+            .assert()
+            .success();
+        let (identity, purposes, revision, generation) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Retain watch guide responsibility",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                "src/file0000.rs",
+                "Retain source responsibility",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                mcp_database_snapshot(&database)?.authored_purposes,
+                store.authored_purpose_revision()?,
+                store.index_publication()?,
+            )
+        };
+        if later_handoff {
+            fs::write(root.join("src/ready.rs"), "pub fn ready() {}\n")?;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let start_noise = || {
+            let stop = Arc::clone(&stop);
+            let noise = directory.join("λ-sibling");
+            let (sender, ready) = mpsc::sync_channel(1);
+            let actor = thread::spawn(move || -> io::Result<usize> {
+                let mut writes = 0;
+                while !stop.load(Ordering::Acquire) {
+                    fs::write(&noise, writes.to_string())?;
+                    writes += 1;
+                    if writes == 1 {
+                        sender.send(()).map_err(io::Error::other)?;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(writes)
+            });
+            (actor, ready)
+        };
+        let mut actor = None;
+        let mut watch = None;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            if !later_handoff {
+                // Establish noise before spawning the CLI, so a descheduled
+                // test thread cannot accidentally exercise only a later fence.
+                let (spawned, ready) = start_noise();
+                actor = Some(spawned);
+                ready.recv_timeout(Duration::from_secs(60))?;
+            }
+            watch = Some(
+                command()
+                    .arg("watch")
+                    .arg(&root)
+                    .args(["--poll-seconds", "1", "--max-cycles", "4"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?,
+            );
+            let child = watch
+                .as_mut()
+                .ok_or_else(|| io::Error::other("watch child missing"))?;
+            if later_handoff {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while AtlasStore::open_read_only(&database)?.index_publication()? == generation {
+                    if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                        return Err(io::Error::other(
+                            "native watch did not publish its initial cycle",
+                        )
+                        .into());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // Publication precedes the final ingress fence. Confirm the
+                // main thread has returned to native receive before flooding.
+                during_watch_wait(child, false, || Ok(()))?;
+                let (spawned, ready) = start_noise();
+                actor = Some(spawned);
+                ready.recv_timeout(Duration::from_secs(60))?;
+                fs::write(root.join("src/trigger.rs"), "pub fn trigger() {}\n")?;
+            }
+            // Native observation must be released and the immediate polling
+            // capture complete before operator edits. Keep sibling noise active
+            // throughout, and retain the production refusal for capture drift.
+            during_watch_wait(child, true, || {
+                fs::write(&rules, "src/file0000.rs\n")?;
+                fs::write(root.join("src/later.rs"), "pub fn later() {}\n")?;
+                Ok(())
+            })?;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while child.try_wait()?.is_none() {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other(
+                        "native policy flood prevented bounded watch completion",
+                    )
+                    .into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })();
+        stop.store(true, Ordering::Release);
+        let writes = match actor {
+            Some(actor) => actor
+                .join()
+                .map_err(|_panic| io::Error::other("policy flood actor panicked"))
+                .and_then(|result| result),
+            None => Ok(0),
+        };
+        let output = match watch {
+            Some(mut child) => {
+                if child.try_wait()?.is_none() {
+                    child.kill()?;
+                }
+                Some(child.wait_with_output()?)
+            }
+            None => None,
+        };
+        operation?;
+        let output = output.ok_or_else(|| io::Error::other("watch output missing"))?;
+        rust_binding_require(writes? > 0, "native policy flood produced no callbacks")?;
+        rust_binding_require(
+            output.status.success(),
+            &format!("watch failed: {}", String::from_utf8_lossy(&output.stderr)),
+        )?;
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        require_json_string(&report, &["mode"], "portable-polling")?;
+        require_json_usize(&report, &["cycles"], 4)?;
+        require_json_contains(&report, &["fallback_reason"], "bounded native refresh")?;
+        let relations = Command::from_std(command())
+            .args([
+                "symbols",
+                "relations",
+                "--view",
+                "detailed",
+                "--file",
+                "README.md",
+                "--direction",
+                "outbound",
+                "--relation",
+                "documents",
+                "--limit",
+                "10",
+            ])
+            .timeout(Duration::from_secs(60))
+            .output()?;
+        rust_binding_require(
+            relations.status.success(),
+            "post-flood document query failed",
+        )?;
+        let relations: Value = serde_json::from_slice(&relations.stdout)?;
+        let rows = relations["symbol_relations"]["rows"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("post-flood document rows missing"))?;
+        let mut outcomes = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["relation"]["resolution"]["status"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    row["document_unresolved_reason"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        outcomes.sort_unstable();
+        rust_binding_equal(
+            &outcomes,
+            &vec![("resolved", ""), ("unresolved", "ignored")],
+        )?;
+        let store = AtlasStore::open_read_only(&database)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(
+            &mcp_database_snapshot(&database)?.authored_purposes,
+            &purposes,
+        )?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn source_root_replacement_preserves_cli_mcp_external_bindings() -> Result<(), Box<dyn Error>> {
+    // Native platforms may split replacement notifications into several batches.
+    // Retain the replacement margin, two closure phases and two external policy phases.
+    const WATCH_CYCLE_BUDGET: usize = 12;
+    // The large closure includes complete parser/graph publication in debug CI.
+    // This fixture bound is not an indexing or warm-read performance SLO.
+    const WATCH_PHASE_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Author the same project namespace on a different directory object.
+    fn write_project(root: &Path, target: &str) -> Result<(), Box<dyn Error>> {
+        rust_binding_project(root, "2024")?;
+        write_source(root, target)
+    }
+
+    /// Edit only an existing descendant, leaving policy and directory entries unchanged.
+    fn write_source(root: &Path, target: &str) -> Result<(), Box<dyn Error>> {
+        fs::write(
+            root.join(RUST_LIBRARY_PATH),
+            format!("pub fn {target}() {{}}\npub fn caller() {{ {target}(); }}\n"),
+        )?;
+        Ok(())
+    }
+
+    /// Prepare complete source before the short supported directory replacement gap.
+    fn replace_project(root: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
+        let replacement = directory.join("replacement-root");
+        write_project(&replacement, "replacement_target")?;
+        fs::rename(root, directory.join("retired-root")).map_err(|source| {
+            WatchFixtureIoError::new("source-root retirement failed", root, source)
+        })?;
+        fs::rename(replacement, root).map_err(|source| {
+            WatchFixtureIoError::new("source-root replacement installation failed", root, source)
+        })?;
+        Ok(())
+    }
+
+    /// Observe durable publication without refreshing it from the test process.
+    fn watch_symbol_is_published(database: &Path, name: &str) -> Result<bool, Box<dyn Error>> {
+        Ok(AtlasStore::open_read_only(database)?
+            .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+            .iter()
+            .any(|symbol| symbol.name == name))
+    }
+
+    /// Wait for a required logical phase while the native command remains alive.
+    fn await_watch_symbol(
+        child: &mut Child,
+        database: &Path,
+        name: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + WATCH_PHASE_TIMEOUT;
+        loop {
+            if watch_symbol_is_published(database, name)? {
+                return Ok(());
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(
+                    io::Error::other(format!("watch exited before {name}: {status}")).into(),
+                );
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("watch missed {name}"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Observe a policy-only source addition through durable read-only state.
+    fn await_watch_policy_source(
+        child: &mut Child,
+        database: &Path,
+        path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + WATCH_PHASE_TIMEOUT;
+        while AtlasStore::open_read_only(database)?
+            .load_node_by_path(path)?
+            .is_none()
+        {
+            if let Some(status) = child.try_wait()? {
+                return Err(
+                    io::Error::other(format!("watch exited before {path}: {status}")).into(),
+                );
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("watch missed external policy source {path}"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    /// Replace a natively movable namespace while retaining the selected input spelling.
+    fn replace_policy(
+        directory: &Path,
+        git_config: &Path,
+        rules: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        #[cfg(windows)]
+        let replaced = git_config
+            .parent()
+            .ok_or_else(|| io::Error::other("policy config has no parent"))?
+            .to_path_buf();
+        #[cfg(not(windows))]
+        let replaced = directory.join(EXTERNAL_POLICY_ANCESTOR_DIRECTORY);
+        fs::rename(&replaced, directory.join(RETIRED_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("live policy-directory retirement failed", &replaced, source)
+        })?;
+        fs::create_dir_all(
+            git_config
+                .parent()
+                .ok_or_else(|| io::Error::other("policy config has no parent"))?,
+        )
+        .map_err(|source| {
+            WatchFixtureIoError::new(
+                "live policy-directory recreation failed",
+                git_config,
+                source,
+            )
+        })?;
+        fs::write(git_config, format!("[core]\nexcludesFile = {rules:?}\n")).map_err(|source| {
+            WatchFixtureIoError::new("live policy-config write failed", git_config, source)
+        })?;
+        fs::write(rules, "policy-followup.rs\n").map_err(|source| {
+            WatchFixtureIoError::new("live policy-rule write failed", rules, source)
+        })?;
+        Ok(())
+    }
+
+    for surface in ["cli", "mcp"] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path();
+        let root = directory.join(UNICODE_SOURCE_ROOT_DIRECTORY);
+        let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
+        let config = directory.join(EXTERNAL_PROJECT_CONFIGURATION_FILE);
+        let git_config = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        let rules = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_POLICY_RULES_FILE);
+        write_project(&root, "initial_target")?;
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY))?;
+        fs::write(root.join("policy-target.rs"), "pub fn policy_target() {}\n")?;
+        fs::write(
+            root.join("policy-followup.rs"),
+            "pub fn policy_followup() {}\n",
+        )?;
+        fs::write(&rules, "policy-target.rs\npolicy-followup.rs\n")?;
+        if surface == "cli" {
+            let mut expanded = String::from("pub fn initial_target() {}\n");
+            for ordinal in 0..=projectatlas_core::graph::GraphLimits::MAX_ROWS {
+                writeln!(&mut expanded, "pub fn closure_item_{ordinal}() {{}}")?;
+            }
+            fs::write(root.join(RUST_LIBRARY_PATH), expanded)?;
+        }
+        let root_text = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture root is not UTF-8"))?;
+        fs::write(&config, format!("[project]\nroot = {root_text:?}\n"))?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture config is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let mut initialize = StdCommand::new(&executable);
+        initialize
+            .current_dir(&root)
+            .arg("--config")
+            .arg(&config)
+            .arg("--db")
+            .arg(&database)
+            .arg("init");
+        for (key, value) in environment {
+            if let Some(value) = value {
+                initialize.env(key, value);
+            }
+        }
+        let initialized = initialize.output()?;
+        if !initialized.status.success() {
+            return Err(io::Error::other(format!(
+                "external root init failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&initialized.stdout),
+                String::from_utf8_lossy(&initialized.stderr)
+            ))
+            .into());
+        }
+        let (identity, purposes, revision) = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                SRC_DIR_NAME,
+                "Own the replacement source namespace",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                RUST_LIBRARY_PATH,
+                "Retain authored responsibility through root replacement",
+                PurposeSource::Agent,
+            )?;
+            (
+                store.project_instance_id()?,
+                approved_purposes(&store)?,
+                store.authored_purpose_revision()?,
+            )
+        };
+        rust_binding_equal(&purposes.len(), &2)?;
+
+        if surface == "cli" {
+            // A newly published sentinel proves that native coverage was installed,
+            // rather than mistaking the earlier initializer's publication for readiness.
+            let source = root.join(RUST_LIBRARY_PATH);
+            let text = format!(
+                "pub fn watcher_ready() {{}}\n{}",
+                fs::read_to_string(&source)?
+            );
+            fs::write(source, text)?;
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(directory)
+                .args(["--format", "json"])
+                .arg("--config")
+                .arg(&config)
+                .arg("--db")
+                .arg(&database)
+                .arg("watch")
+                .arg(&root)
+                .args(["--poll-seconds", "1", "--max-cycles"])
+                .arg(WATCH_CYCLE_BUDGET.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let mut child = command.spawn()?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                await_watch_symbol(&mut child, &database, "watcher_ready")?;
+                replace_policy(directory, &git_config, &rules)?;
+                await_watch_policy_source(&mut child, &database, "policy-target.rs")?;
+                fs::write(&rules, "")?;
+                await_watch_policy_source(&mut child, &database, "policy-followup.rs")?;
+                // One ordinary file event can exceed incremental graph limits even
+                // though native queue overflow never occurred. Recover through the
+                // same controlled production owner, then shrink the persisted closure.
+                let mut expanded = String::from("pub fn closure_target() {}\n");
+                for ordinal in 0..=projectatlas_core::graph::GraphLimits::MAX_ROWS {
+                    writeln!(&mut expanded, "pub fn closure_item_{ordinal}() {{}}")?;
+                }
+                fs::write(root.join(RUST_LIBRARY_PATH), expanded)?;
+                await_watch_symbol(&mut child, &database, "closure_target")?;
+                write_source(&root, "compact_target")?;
+                await_watch_symbol(&mut child, &database, "compact_target")?;
+                replace_project(&root, directory)?;
+                await_watch_symbol(&mut child, &database, "replacement_target")?;
+                write_source(&root, "edited_target")?;
+                await_watch_symbol(&mut child, &database, "edited_target")?;
+                // Logical phases do not correspond one-to-one to native batches.
+                // After proving the child edit, finish the bounded command with
+                // distinct sequential edits. Wait for each publication before
+                // writing another, so native debounce cannot coalesce the drain.
+                for ordinal in 0..WATCH_CYCLE_BUDGET {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    let sentinel = format!("watcher_finished_{ordinal}");
+                    let source = root.join(RUST_LIBRARY_PATH);
+                    let mut text = fs::read_to_string(&source)?;
+                    writeln!(&mut text, "pub fn {sentinel}() {{}}")?;
+                    fs::write(source, text)?;
+                    let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+                    while child.try_wait()?.is_none()
+                        && !watch_symbol_is_published(&database, &sentinel)?
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "watch did not complete its replacement refreshes",
+                            )
+                            .into());
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                rust_binding_require(
+                    child.try_wait()?.is_some(),
+                    "native watch exceeded its bounded completion drain",
+                )?;
+                Ok(())
+            })();
+            // Kill only on failure; successful native completion produces its
+            // public mode report, which excludes a polling-fallback false pass.
+            if operation.is_err() {
+                let _stopped = child.kill();
+            }
+            let output = child.wait_with_output()?;
+            if let Err(error) = operation {
+                return Err(WatchFixtureCommandError {
+                    operation: "CLI replacement failed",
+                    source: error,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                }
+                .into());
+            }
+            rust_binding_require(output.status.success(), "watch refreshes failed")?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            rust_binding_equal(&report.pointer("/mode"), &Some(&json!("notify")))?;
+            rust_binding_equal(
+                &report.pointer("/cycles"),
+                &Some(&json!(WATCH_CYCLE_BUDGET)),
+            )?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                // Use the server's explicit DB/config binding. Per-call
+                // project_path intentionally selects that root's conventional DB.
+                let arguments = json!({"view": "detailed", "file": RUST_LIBRARY_PATH, "symbol": "caller", "relation": "calls", "limit": 10});
+                let refresh = json!({"path": root});
+                let targets = |session: &mut McpContractSession| -> Result<BTreeSet<(String, String)>, Box<dyn Error>> {
+                    let value: Value = toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+                    let rows = value.pointer("/symbol_relations/rows").and_then(Value::as_array).ok_or_else(|| io::Error::other(format!("missing replacement call rows: {value}")))?;
+                    Ok(rust_binding_targets(rows))
+                };
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &targets(&mut session)?,
+                        &BTreeSet::from([(
+                            RUST_LIBRARY_PATH.to_string(),
+                            "initial_target".to_string(),
+                        )]),
+                    )?;
+                }
+                replace_policy(directory, &git_config, &rules)?;
+                for path in ["policy-target.rs", "policy-followup.rs"] {
+                    if path == "policy-followup.rs" {
+                        fs::write(&rules, "")?;
+                    }
+                    let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+                    let summary_arguments = json!({"file": path, "limit": 10});
+                    let mut admitted: Value = toon_format::decode_default(
+                        &session.call_tool("atlas_file_summary", &summary_arguments)?,
+                    )?;
+                    if admitted.pointer("/error/kind").and_then(Value::as_str)
+                        == Some("refresh_required")
+                    {
+                        // Exact fallback may require the explicit refresh owner;
+                        // ordinary observed source refresh can already be current.
+                        rust_binding_equal(
+                            &AtlasStore::open_read_only(&database)?.index_publication()?,
+                            &before,
+                        )?;
+                        session.call_tool("atlas_watch_once", &refresh)?;
+                        admitted = toon_format::decode_default(
+                            &session.call_tool("atlas_file_summary", &summary_arguments)?,
+                        )?;
+                    }
+                    require_json_string(&admitted, &["file_summary", "file_path"], path)?;
+                }
+                replace_project(&root, directory)?;
+                session.call_tool("atlas_watch_once", &refresh)?;
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &targets(&mut session)?,
+                        &BTreeSet::from([(
+                            RUST_LIBRARY_PATH.to_string(),
+                            "replacement_target".to_string(),
+                        )]),
+                    )?;
+                }
+                write_source(&root, "edited_target")?;
+                let expected =
+                    BTreeSet::from([(RUST_LIBRARY_PATH.to_string(), "edited_target".to_string())]);
+                let deadline = Instant::now() + MCP_CONTRACT_RESPONSE_TIMEOUT;
+                loop {
+                    if targets(&mut session)? == expected {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "MCP replacement child edit was not observed",
+                        )
+                        .into());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        rust_binding_equal(&store.project_instance_id()?, &identity)?;
+        rust_binding_equal(&approved_purposes(&store)?, &purposes)?;
+        rust_binding_equal(&store.authored_purpose_revision()?, &revision)?;
+        rust_binding_require(
+            !root.join(ATLAS_DIR_NAME).join("projectatlas.db").exists(),
+            "replacement created an implicit database instead of retaining the explicit binding",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn external_policy_ancestor_restart_preserves_cli_mcp_observation() -> Result<(), Box<dyn Error>> {
+    const CYCLES: usize = 8;
+
+    fn await_watch(
+        child: &mut Child,
+        database: &Path,
+        label: &str,
+        mut observed: impl FnMut(&AtlasStore) -> Result<bool, Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if observed(&AtlasStore::open_read_only(database)?)? {
+                return Ok(());
+            }
+            if child.try_wait()?.is_some() || Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "restarted native watch did not observe {label}"
+                ))
+                .into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn source_target(
+        session: &mut McpContractSession,
+    ) -> Result<BTreeSet<(String, String)>, Box<dyn Error>> {
+        let arguments = json!({"view":"detailed", "file":RUST_LIBRARY_PATH, "symbol":"caller", "relation":"calls", "limit":10});
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                io::Error::other(format!("restarted MCP source rows missing: {value}"))
+            })?;
+        Ok(rust_binding_targets(rows))
+    }
+
+    fn policy_outcome(
+        session: &mut McpContractSession,
+        root: &Path,
+        database: &Path,
+    ) -> Result<String, Box<dyn Error>> {
+        let arguments =
+            json!({"view":"detailed", "file":"README.md", "relation":"documents", "limit":10});
+        let before = AtlasStore::open_read_only(database)?.index_publication()?;
+        let mut value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        if value.pointer("/error/kind").and_then(Value::as_str) == Some("refresh_required") {
+            rust_binding_equal(
+                &AtlasStore::open_read_only(database)?.index_publication()?,
+                &before,
+            )?;
+            session.call_tool("atlas_watch_once", &json!({"path":root}))?;
+            value = toon_format::decode_default(
+                &session.call_tool("atlas_symbol_relations", &arguments)?,
+            )?;
+        }
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                io::Error::other(format!("restarted MCP policy rows missing: {value}"))
+            })?;
+        rust_binding_equal(&rows.len(), &1)?;
+        let row = &rows[0];
+        if row
+            .pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            == Some("resolved")
+        {
+            Ok("resolved".to_string())
+        } else {
+            row.get("document_unresolved_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other(format!("policy outcome missing: {row}")).into())
+        }
+    }
+
+    for surface in ["cli", "mcp"] {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().canonicalize()?;
+        let root = directory.join(UNICODE_SOURCE_ROOT_DIRECTORY);
+        rust_binding_project(&root, "2024")?;
+        fs::write(
+            root.join(RUST_LIBRARY_PATH),
+            "pub fn initial_target() {}\npub fn caller() { initial_target(); }\n",
+        )?;
+        fs::write(
+            root.join(OBSERVED_SOURCE_PATH),
+            "pub fn policy_target() {}\n",
+        )?;
+        fs::write(root.join("README.md"), "# Restart\n[target](source.rs)\n")?;
+        let database = directory.join(EXTERNAL_DATABASE_FILE_NAME);
+        let config = directory.join(EXTERNAL_PROJECT_CONFIGURATION_FILE);
+        let git_config = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_GIT_CONFIGURATION_FILE);
+        let rules = directory
+            .join(EXTERNAL_POLICY_DIRECTORY)
+            .join(EXTERNAL_POLICY_RULES_FILE);
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY))?;
+        fs::write(&config, format!("[project]\nroot = {root:?}\n"))?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+        fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+        let git_config_text = git_config
+            .to_str()
+            .ok_or_else(|| io::Error::other("policy config is not UTF-8"))?;
+        let environment = [
+            ("GIT_CONFIG_GLOBAL", Some(git_config_text)),
+            ("GIT_CONFIG_SYSTEM", Some("")),
+            ("GIT_CONFIG_NOSYSTEM", Some("1")),
+            ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+        ];
+        let executable = mcp_contract_executable();
+        let command = || {
+            let mut command = StdCommand::new(&executable);
+            command
+                .current_dir(&root)
+                .args(["--format", "json", "--config"])
+                .arg(&config)
+                .arg("--db")
+                .arg(&database);
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            command
+        };
+        Command::from_std(command())
+            .arg("init")
+            .timeout(Duration::from_secs(60))
+            .assert()
+            .success();
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.set_purpose(
+                "README.md",
+                "Retain restart guide responsibility",
+                PurposeSource::Agent,
+            )?;
+            store.set_purpose(
+                RUST_LIBRARY_PATH,
+                "Retain restart source responsibility",
+                PurposeSource::Agent,
+            )?;
+            rust_binding_require(
+                store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_none(),
+                "initial external rule did not exclude source",
+            )?;
+        }
+        let before = mcp_database_snapshot(&database)?;
+
+        // Fully stop and reap the observer before moving an ancestor above its
+        // watched directory. Windows need not permit that move while it is live.
+        if surface == "cli" {
+            let output = Command::from_std(command())
+                .args(["watch", "--max-cycles", "1"])
+                .timeout(Duration::from_secs(60))
+                .output()?;
+            rust_binding_require(
+                output.status.success(),
+                "initial native CLI observer did not stop",
+            )?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            require_json_string(&report, &["mode"], "notify")?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &policy_outcome(&mut session, &root, &database)?,
+                        &"ignored".to_string(),
+                    )?;
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let higher = directory.join(EXTERNAL_POLICY_ANCESTOR_DIRECTORY);
+        fs::rename(&higher, directory.join(RETIRED_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-ancestor retirement failed", &higher, source)
+        })?;
+        fs::create_dir_all(directory.join(EXTERNAL_POLICY_DIRECTORY)).map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-ancestor recreation failed", &higher, source)
+        })?;
+        fs::write(&git_config, format!("[core]\nexcludesFile = {rules:?}\n")).map_err(
+            |source| {
+                WatchFixtureIoError::new("stopped policy-config write failed", &git_config, source)
+            },
+        )?;
+        fs::write(&rules, "").map_err(|source| {
+            WatchFixtureIoError::new("stopped policy-rule write failed", &rules, source)
+        })?;
+
+        if surface == "cli" {
+            let mut child = command()
+                .args(["watch", "--poll-seconds", "1", "--max-cycles"])
+                .arg(CYCLES.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                await_watch(&mut child, &database, "fresh policy discovery", |store| {
+                    Ok(store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_some())
+                })?;
+                fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+                await_watch(&mut child, &database, "later policy edit", |store| {
+                    Ok(store.load_node_by_path(OBSERVED_SOURCE_PATH)?.is_none())
+                })?;
+                fs::write(
+                    root.join(RUST_LIBRARY_PATH),
+                    "pub fn edited_target() {}\npub fn caller() { edited_target(); }\n",
+                )?;
+                await_watch(&mut child, &database, "later source edit", |store| {
+                    Ok(store
+                        .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+                        .iter()
+                        .any(|symbol| symbol.name == "edited_target"))
+                })?;
+                for ordinal in 0..CYCLES {
+                    if child.try_wait()?.is_some() {
+                        break;
+                    }
+                    let name = format!("restart_finished_{ordinal}");
+                    fs::write(
+                        root.join(RUST_LIBRARY_PATH),
+                        format!("pub fn {name}() {{}}\n"),
+                    )?;
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while child.try_wait()?.is_none()
+                        && !AtlasStore::open_read_only(&database)?
+                            .load_symbols(Some(RUST_LIBRARY_PATH), None, 10)?
+                            .iter()
+                            .any(|symbol| symbol.name == name)
+                    {
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::other(
+                                "restarted CLI did not finish its bounded cycles",
+                            )
+                            .into());
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                rust_binding_require(
+                    child.try_wait()?.is_some(),
+                    "restarted CLI exceeded its cycle drain",
+                )?;
+                Ok(())
+            })();
+            if operation.is_err() {
+                let _stopped = child.kill();
+            }
+            let output = child.wait_with_output()?;
+            if let Err(error) = operation {
+                return Err(WatchFixtureCommandError {
+                    operation: "CLI restart failed",
+                    source: error,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                }
+                .into());
+            }
+            rust_binding_require(output.status.success(), "restarted native CLI failed")?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            require_json_string(&report, &["mode"], "notify")?;
+            require_json_usize(&report, &["cycles"], CYCLES)?;
+        } else {
+            let (mut session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &directory,
+                &database,
+                Some(&config),
+                &environment,
+            )?;
+            let operation = (|| -> Result<(), Box<dyn Error>> {
+                session.call_tool("atlas_watch_once", &json!({"path":root}))?;
+                for _ in 0..2 {
+                    rust_binding_equal(
+                        &policy_outcome(&mut session, &root, &database)?,
+                        &"resolved".to_string(),
+                    )?;
+                }
+                fs::write(&rules, format!("{OBSERVED_SOURCE_PATH}\n"))?;
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while policy_outcome(&mut session, &root, &database)? != "ignored" {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            io::Error::other("restarted MCP missed later policy edit").into()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                fs::write(
+                    root.join(RUST_LIBRARY_PATH),
+                    "pub fn edited_target() {}\npub fn caller() { edited_target(); }\n",
+                )?;
+                let expected =
+                    BTreeSet::from([(RUST_LIBRARY_PATH.to_string(), "edited_target".to_string())]);
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while source_target(&mut session)? != expected {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            io::Error::other("restarted MCP missed later source edit").into()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        }
+        let after = mcp_database_snapshot(&database)?;
+        rust_binding_equal(&after.project_instance_id, &before.project_instance_id)?;
+        rust_binding_equal(&after.authored_purposes, &before.authored_purposes)?;
+        rust_binding_equal(&after.purpose_revision, &before.purpose_revision)?;
+        rust_binding_require(
+            !root.join(ATLAS_DIR_NAME).join("projectatlas.db").exists(),
+            "restart created an implicit database",
+        )?;
+    }
+    Ok(())
+}
+
+/// Add operation context while retaining the original native fixture I/O error.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation} at {path:?}: {source}")]
+struct WatchFixtureIoError {
+    operation: &'static str,
+    path: PathBuf,
+    #[source]
+    source: io::Error,
+}
+
+impl WatchFixtureIoError {
+    fn new(operation: &'static str, path: &Path, source: io::Error) -> Self {
+        Self {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Retain child diagnostics without replacing the original fixture error chain.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}; stdout={stdout} stderr={stderr}")]
+struct WatchFixtureCommandError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error>,
+    stdout: String,
+    stderr: String,
+}
+
 /// Conventional library path shared by the Rust navigation fixtures.
 const RUST_LIBRARY_PATH: &str = "src/lib.rs";
+/// Explicit Git configuration used by the external-policy fixtures.
+const EXTERNAL_GIT_CONFIGURATION_FILE: &str = "selected.gitconfig";
+/// Selected policy namespace beneath the higher ordinary replacement ancestor.
+const EXTERNAL_POLICY_DIRECTORY: &str = "policy/current/nested";
+/// Higher policy ancestor moved only where native handles permit it or after shutdown.
+const EXTERNAL_POLICY_ANCESTOR_DIRECTORY: &str = "policy/current";
+/// Retired policy namespace kept separate from its replacement.
+const RETIRED_POLICY_DIRECTORY: &str = "retired-policy";
 /// Worker module used by the Rust binding fixtures.
 const RUST_BINDING_WORKER_PATH: &str = "src/worker.rs";
 /// Source declaration behind Rust forwarding aliases.

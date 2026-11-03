@@ -3,8 +3,9 @@
 use super::{
     ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
-    open_exact_saved_source_matches_index_controlled, publication_input_error,
-    source_changed_during_derivation, source_inspection_error,
+    open_exact_saved_source_matches_index_controlled,
+    policy_watch::{PolicyWatchInputs, PolicyWatchSelection},
+    publication_input_error, source_changed_during_derivation, source_inspection_error,
     verify_saved_source_matches_index_controlled,
 };
 use crate::CliError;
@@ -13,7 +14,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(windows)]
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -37,6 +38,8 @@ const SOURCE_OBSERVATION_QUEUE_CAPACITY: usize = 1_024;
 const VERIFIED_READ_ATTEMPTS: usize = 3;
 /// Maximum bytes read from any one external source-selection policy input.
 const MAX_POLICY_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
+/// Fixed SQLite sidecar names belonging to one captured database namespace.
+const DATABASE_RUNTIME_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Whether exact verification may repair a bounded delta before returning a read.
 #[derive(Clone, Copy)]
@@ -331,18 +334,23 @@ enum ObservedAcceptance {
 
 /// Exact root/database/config identity used to isolate one observer.
 #[derive(Clone, Debug, Eq)]
-struct SourceBinding {
+pub(super) struct SourceBinding {
     /// Canonical source root watched by this observer.
     root: PathBuf,
     /// Database excluded from source-change invalidation.
     database: PathBuf,
+    /// Resolved runtime namespace captured without retargeting the selected SQLite path.
+    database_target: Option<PathBuf>,
     /// Optional scanner configuration watched with the source root.
     config: Option<PathBuf>,
 }
 
 impl PartialEq for SourceBinding {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root && self.database == other.database && self.config == other.config
+        self.root == other.root
+            && self.database == other.database
+            && self.database_target == other.database_target
+            && self.config == other.config
     }
 }
 
@@ -350,32 +358,141 @@ impl Hash for SourceBinding {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.root.hash(state);
         self.database.hash(state);
+        self.database_target.hash(state);
         self.config.hash(state);
     }
 }
 
 impl SourceBinding {
-    /// Configuration directory observed separately when it lies outside the source root.
-    fn external_config_parent(&self) -> Option<&Path> {
-        self.config
-            .as_deref()
-            .filter(|config| !config.starts_with(&self.root))
-            .and_then(Path::parent)
-    }
-
     /// Resolve one root, database, and optional configuration into a stable binding.
-    fn new(database: &Path, root: &Path, config: Option<&Path>) -> Result<Self, CliError> {
+    pub(super) fn new(
+        database: &Path,
+        root: &Path,
+        config: Option<&Path>,
+    ) -> Result<Self, CliError> {
         let root = root.canonicalize().map_err(|source| CliError::Io {
             path: root.to_path_buf(),
             source,
         })?;
         let database = absolute_path_from(&root, database);
+        let database_target = fs::canonicalize(&database).ok();
         let config = config.map(|path| absolute_path_from(&root, path));
         Ok(Self {
             root,
             database,
+            database_target,
             config,
         })
+    }
+
+    /// Queue exact runtime spellings for the controlled drain instead of coalescing policy uncertainty.
+    /// This is lexical routing, not authority to suppress the event or reuse a retargeted binding.
+    fn queues_database_event(&self, event: &Event) -> bool {
+        if event.need_rescan() || event.paths.is_empty() || self.database_target.is_none() {
+            return false;
+        }
+        let structural_main = matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(notify::event::ModifyKind::Name(_))
+        );
+        event.paths.iter().all(|path| {
+            let candidate = super::absolute_watch_path(&self.root, path);
+            [
+                Some(self.database.as_path()),
+                self.database_target.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|database| {
+                if candidate == database {
+                    return !structural_main;
+                }
+                DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
+                    let mut sidecar = database.as_os_str().to_os_string();
+                    sidecar.push(suffix);
+                    candidate == Path::new(&sidecar)
+                })
+            })
+        })
+    }
+
+    /// Recognize only captured literal names, without consulting the filesystem in a callback.
+    fn has_database_path(&self, event: &Event) -> bool {
+        event.paths.iter().any(|path| {
+            let candidate = super::absolute_watch_path(&self.root, path);
+            [
+                Some(self.database.as_path()),
+                self.database_target.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|database| {
+                candidate == database
+                    || DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
+                        let mut sidecar = database.as_os_str().to_os_string();
+                        sidecar.push(suffix);
+                        candidate == Path::new(&sidecar)
+                    })
+            })
+        })
+    }
+}
+
+/// One bounded runtime wake, independent of policy uncertainty and source continuity.
+#[derive(Clone)]
+pub(super) struct RuntimeEventIngress {
+    /// Captured paths route events but never authorize suppressing a changed native binding.
+    binding: SourceBinding,
+    /// One representative runtime notification remains queued until the controlled drain.
+    pending: Arc<AtomicBool>,
+}
+
+impl RuntimeEventIngress {
+    /// Capture one runtime namespace and its independent wake state.
+    pub(super) fn new(binding: SourceBinding) -> Self {
+        Self {
+            binding,
+            pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Preserve captured database events even when they are unrelated to policy filenames.
+    fn may_affect(&self, event: &Event) -> bool {
+        self.binding.has_database_path(event)
+    }
+
+    /// Publish ordinary runtime work without arming a policy recheck or overflowing on self-writes.
+    pub(super) fn observe(&self, selection: &PolicyWatchSelection, event: &Event) -> bool {
+        if !super::event_kind_affects_index(event.kind) && !event.need_rescan() {
+            return false;
+        }
+        if self.binding.queues_database_event(event) {
+            return !self.pending.swap(true, Ordering::AcqRel);
+        }
+        let selected = selection.observe(event);
+        let main_replaced = !event.need_rescan()
+            && matches!(
+                event.kind,
+                EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            )
+            && event.paths.iter().any(|path| {
+                let candidate = super::absolute_watch_path(&self.binding.root, path);
+                candidate == self.binding.database
+                    || self.binding.database_target.as_ref() == Some(&candidate)
+            });
+        if main_replaced {
+            selection.require_recursive_rebind();
+        }
+        selected || self.may_affect(event)
+    }
+
+    /// Clear before consuming the representative event; MCP callers hold the receiver fence.
+    pub(super) fn begin_drain(&self) {
+        self.pending.store(false, Ordering::Release);
     }
 }
 
@@ -401,12 +518,24 @@ struct ObservationState {
     verified: Option<VerifiedSourceEpoch>,
 }
 
+/// Native registrations acknowledged by one watcher, including partial failed updates.
+struct SourceWatchCoverage {
+    /// Existing native watcher; callbacks retain their bounded ingress handshake.
+    watcher: RecommendedWatcher,
+    /// External directories whose registration has not been successfully retired.
+    directories: BTreeSet<PathBuf>,
+}
+
 /// Concrete watcher and state for one exact source binding.
 struct SourceObservationEntry {
     /// Exact source, database, and configuration identity.
     binding: SourceBinding,
+    /// Policy namespace shared with the callback without coupling it to epoch locks.
+    policy_selection: PolicyWatchSelection,
+    /// Coalesced runtime wake shared with callback publication.
+    runtime_ingress: RuntimeEventIngress,
     /// Native watcher kept alive for the entry lifetime.
-    watcher: RecommendedWatcher,
+    watcher: Mutex<SourceWatchCoverage>,
     /// Bounded receiver whose lock serializes callback publication with drain acknowledgment.
     receiver: Arc<Mutex<Receiver<Event>>>,
     /// Monotonic count of relevant events accepted by the callback.
@@ -431,14 +560,15 @@ struct SourceObservationEntry {
 #[cfg(windows)]
 impl Drop for SourceObservationEntry {
     fn drop(&mut self) {
-        drop(self.watcher.unwatch(&self.binding.root));
-        if let Some(parent) = self.binding.external_config_parent() {
-            drop(self.watcher.unwatch(parent));
-        }
-        // notify's Windows Unwatch and Drop only enqueue actions. Configure waits
-        // for an acknowledgement after preceding cancellation/completion work,
-        // so directory cleanup cannot race an outstanding native notification.
-        drop(self.watcher.configure(notify::Config::default()));
+        // Cleanup must also cover registrations retained by a partial failed update.
+        let coverage = self
+            .watcher
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(coverage.watcher.unwatch(&self.binding.root));
+        PolicyWatchInputs::unwatch(&mut coverage.watcher, &coverage.directories);
+        // Configure acknowledges preceding native cancellation/completion work.
+        drop(coverage.watcher.configure(notify::Config::default()));
     }
 }
 
@@ -460,24 +590,44 @@ impl fmt::Debug for SourceObservationEntry {
 }
 
 impl SourceObservationEntry {
-    /// Start a bounded native watcher for one source binding.
+    /// Start an isolated observer for owning tests with the normal work budget.
+    #[cfg(test)]
     fn start(binding: SourceBinding) -> Result<Self, CliError> {
+        Self::start_controlled(binding, &super::standalone_index_work_control())
+    }
+
+    /// Start native observation within the caller's original work budget.
+    fn start_controlled(
+        binding: SourceBinding,
+        control: &IndexWorkControl,
+    ) -> Result<Self, CliError> {
         let (sender, receiver) = sync_channel(SOURCE_OBSERVATION_QUEUE_CAPACITY);
         let receiver = Arc::new(Mutex::new(receiver));
         #[cfg(test)]
         let test_sender = sender.clone();
         let ingress_sequence = Arc::new(AtomicU64::new(0));
         let continuity_lost = Arc::new(AtomicBool::new(false));
-        let watcher = notify::recommended_watcher(watcher_callback(
+        let policy_selection = PolicyWatchSelection::new(binding.root.clone());
+        let runtime_ingress = RuntimeEventIngress::new(binding.clone());
+        let watcher = notify::recommended_watcher(selected_watcher_callback(
+            &runtime_ingress,
+            policy_selection.clone(),
             sender,
             Arc::clone(&receiver),
             Arc::clone(&ingress_sequence),
             Arc::clone(&continuity_lost),
+            #[cfg(test)]
+            None,
         ))
         .map_err(|source| observer_error(&binding.root, &source))?;
         let mut entry = Self {
             binding,
-            watcher,
+            policy_selection,
+            runtime_ingress,
+            watcher: Mutex::new(SourceWatchCoverage {
+                watcher,
+                directories: BTreeSet::new(),
+            }),
             receiver,
             ingress_sequence,
             continuity_lost,
@@ -492,15 +642,48 @@ impl SourceObservationEntry {
         };
         entry
             .watcher
+            .get_mut()
+            .map_err(|_poisoned| lock_error(&entry.binding.root, "source observation watcher"))?
+            .watcher
             .watch(&entry.binding.root, RecursiveMode::Recursive)
             .map_err(|source| observer_error(&entry.binding.root, &source))?;
-        if let Some(parent) = entry.binding.external_config_parent() {
-            entry
-                .watcher
-                .watch(parent, RecursiveMode::NonRecursive)
-                .map_err(|source| observer_error(&entry.binding.root, &source))?;
-        }
+        entry.refresh_policy_watches(control)?;
         Ok(entry)
+    }
+
+    /// Update native coverage before sampling source, without holding the receiver lock.
+    fn refresh_policy_watches(&self, control: &IndexWorkControl) -> Result<(), CliError> {
+        // No old epoch can outlive this namespace transition. Publish before a
+        // newly watched input can emit an event; never hold the selector lock
+        // while native watch acknowledgement might need callback progress.
+        self.invalidate();
+        let mut coverage = self
+            .watcher
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation watcher"))?;
+        let SourceWatchCoverage {
+            watcher,
+            directories,
+        } = &mut *coverage;
+        let update = self
+            .policy_selection
+            .rebind_recursive_if_required(watcher, control)
+            .and_then(|()| {
+                PolicyWatchInputs::install_selected(
+                    &self.binding.root,
+                    self.binding.config.as_deref(),
+                    &self.policy_selection,
+                    watcher,
+                    directories,
+                    control,
+                )
+            });
+        if let Err(error) = update {
+            self.continuity_lost.store(true, Ordering::Release);
+            self.invalidate();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Publish one deterministic test event through the production handshake.
@@ -526,13 +709,26 @@ impl SourceObservationEntry {
         }
     }
 
+    /// Capture request authority without cloning policy/contract strings.
+    fn current_stamp(&self) -> Result<Option<VerifiedReadStamp>, CliError> {
+        self.state
+            .lock()
+            .map(|state| state.verified.as_ref().map(|epoch| epoch.stamp.clone()))
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation state"))
+    }
+
     /// Discard only the failed operation's epoch without clearing a successor.
     fn invalidate_epoch(&self, epoch: &VerifiedSourceEpoch) {
+        self.invalidate_stamp(&epoch.stamp);
+    }
+
+    /// Keep a successor installed after the failed request sampled its authority.
+    fn invalidate_stamp(&self, stamp: &VerifiedReadStamp) {
         if let Ok(mut state) = self.state.lock()
             && state
                 .verified
                 .as_ref()
-                .is_some_and(|current| current.stamp == epoch.stamp)
+                .is_some_and(|current| current.stamp == *stamp)
         {
             state.verified = None;
         }
@@ -550,35 +746,53 @@ impl SourceObservationEntry {
     }
 
     /// Reset continuity and drain events before sampling exact source truth.
-    fn clear_before_exact_verification(&self) -> Result<(), CliError> {
-        let receiver = self
-            .receiver
-            .lock()
-            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
-        self.invalidate();
-        self.continuity_lost.store(false, Ordering::Release);
-        loop {
-            match receiver.try_recv() {
-                Ok(_event) => {}
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    self.continuity_lost.store(true, Ordering::Release);
-                    return Ok(());
+    fn clear_before_exact_verification(&self, control: &IndexWorkControl) -> Result<(), CliError> {
+        self.clear_before_exact_verification_with_update(control, || {
+            self.refresh_policy_watches(control)
+        })
+    }
+
+    /// Fence preexisting ingress before a watch update; retain all later uncertainty.
+    fn clear_before_exact_verification_with_update(
+        &self,
+        control: &IndexWorkControl,
+        update: impl FnOnce() -> Result<(), CliError>,
+    ) -> Result<(), CliError> {
+        {
+            let receiver = self.receiver.lock().map_err(|_poisoned| {
+                lock_error(&self.binding.root, "source observation receiver")
+            })?;
+            self.invalidate();
+            self.continuity_lost.store(false, Ordering::Release);
+            self.runtime_ingress.begin_drain();
+            loop {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                match receiver.try_recv() {
+                    Ok(_event) => {}
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.continuity_lost.store(true, Ordering::Release);
+                        break;
+                    }
                 }
             }
         }
+        // Leave events/overflow received during coverage discovery and native
+        // installation pending. The final verification drain must retry them.
+        update()
     }
 
     /// Return whether any potentially relevant event arrived since exact truth was sampled.
     fn changed_since_exact_verification(
         &self,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
         let receiver = self
             .receiver
             .lock()
             .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
-        self.drain_source_events(&receiver, scan_options)
+        self.drain_source_events(&receiver, scan_options, control)
     }
 
     /// Drain and invalidate atomically with callback publication and epoch installation.
@@ -586,7 +800,9 @@ impl SourceObservationEntry {
         &self,
         receiver: &Receiver<Event>,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
+        self.runtime_ingress.begin_drain();
         #[cfg(test)]
         if self
             .drain_continuity_invalidations
@@ -597,24 +813,67 @@ impl SourceObservationEntry {
         {
             self.continuity_lost.store(true, Ordering::Release);
         }
-        if self.continuity_lost.load(Ordering::Acquire) {
+        if self.continuity_lost.load(Ordering::Acquire)
+            || self.policy_selection.recursive_rebind_pending()
+        {
+            #[cfg(all(test, windows))]
+            eprintln!(
+                "source observer drain refused: root={:?}, continuity_lost={}, recursive_rebind={}",
+                self.binding.root,
+                self.continuity_lost.load(Ordering::Acquire),
+                self.policy_selection.recursive_rebind_pending()
+            );
             self.invalidate();
             return Ok(true);
         }
         let mut changes = WatchChangeSet::default();
+        let mut batch_policy = None;
         loop {
             match receiver.try_recv() {
                 Ok(event) => {
-                    let event_changes = observer_event_changes(&self.binding, scan_options, &event);
-                    changes.requires_full_scan |= event_changes.requires_full_scan;
-                    changes.paths.extend(event_changes.paths);
-                    if self
-                        .binding
-                        .config
-                        .as_ref()
-                        .is_some_and(|config| event.paths.iter().any(|path| path == config))
-                    {
-                        changes.requires_full_scan = true;
+                    let runtime_candidate = self.binding.has_database_path(&event);
+                    let Some(filtered) = filtered_observer_event(&self.binding, &event) else {
+                        continue;
+                    };
+                    // Do not reconstruct policy for database/access events or an
+                    // empty queue. Every relevant event in this drain reuses it.
+                    if batch_policy.is_none() {
+                        let discovered = projectatlas_fs::RootScanPolicy::discover(
+                            &self.binding.root,
+                            scan_options,
+                            control,
+                        )
+                        .map_err(CliError::from);
+                        let discovered = self.preserve_consumed_event(discovered)?;
+                        let inputs =
+                            self.preserve_consumed_event(self.policy_selection.snapshot())?;
+                        batch_policy = Some((discovered, inputs));
+                    }
+                    if let Some((policy, inputs)) = &batch_policy {
+                        let classified = super::notify_event_changes_with_policy(
+                            &self.binding.root,
+                            scan_options,
+                            &filtered,
+                            policy,
+                        );
+                        let mut event_changes = self.preserve_consumed_event(classified)?;
+                        event_changes.requires_full_scan |= runtime_candidate
+                            || inputs.affects(&filtered)
+                            || self.preserve_consumed_event(
+                                inputs.ancestor_bindings_changed(&filtered, control),
+                            )?;
+                        #[cfg(all(test, windows))]
+                        if event_changes.has_changes() {
+                            eprintln!(
+                                "source observer event invalidated epoch: root={:?}, database={:?}, event={filtered:?}, full={}, source={:?}, documents={:?}",
+                                self.binding.root,
+                                self.binding.database,
+                                event_changes.requires_full_scan,
+                                event_changes.paths,
+                                event_changes.document_paths
+                            );
+                        }
+                        changes.merge(event_changes);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -625,8 +884,35 @@ impl SourceObservationEntry {
                 }
             }
         }
-        let changed = changes.requires_full_scan || !changes.paths.is_empty();
+        if self.policy_selection.take_policy_recheck() {
+            let structural = self.policy_selection.take_structural_policy_recheck();
+            let inspected = (|| -> Result<bool, CliError> {
+                if structural {
+                    // Canonical names and bytes can stay equal after replacing
+                    // the directory object to which a native watch was bound.
+                    return Ok(true);
+                }
+                let Some(epoch) = self.current_epoch()? else {
+                    // A transient policy edit may have affected an in-flight
+                    // exact candidate even if its bytes have already reverted.
+                    return Ok(true);
+                };
+                let inputs = self.policy_selection.snapshot()?;
+                let current = exact_source_policy(&self.binding, control)?;
+                Ok(inputs.bindings_changed(control)?
+                    || current.0 != epoch.contract_fingerprint
+                    || current.1 != epoch.policy_witness)
+            })();
+            if inspected.is_err() {
+                self.policy_selection.retain_policy_recheck();
+            }
+            changes.requires_full_scan |= self.preserve_consumed_event(inspected)?;
+        }
+        let changed = changes.has_changes();
         if changed {
+            if changes.requires_full_scan {
+                self.policy_selection.require_recursive_rebind();
+            }
             // Preserve consumed changes for an exact verification already in flight.
             self.continuity_lost.store(true, Ordering::Release);
             self.invalidate();
@@ -643,12 +929,22 @@ impl SourceObservationEntry {
         Ok(changed)
     }
 
+    /// Never acknowledge a consumed event after failed policy inspection.
+    fn preserve_consumed_event<T>(&self, result: Result<T, CliError>) -> Result<T, CliError> {
+        if result.is_err() {
+            self.continuity_lost.store(true, Ordering::Release);
+            self.invalidate();
+        }
+        result
+    }
+
     /// Consume events only while the sampled epoch still owns their selection policy.
     fn drain_epoch_events(
         &self,
         receiver: &Receiver<Event>,
         epoch: &VerifiedSourceEpoch,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<ObservedAcceptance, CliError> {
         let Some(current) = self.current_epoch()? else {
             return Ok(ObservedAcceptance::Invalidated);
@@ -656,7 +952,7 @@ impl SourceObservationEntry {
         if current.stamp != epoch.stamp {
             return Ok(ObservedAcceptance::Superseded);
         }
-        if self.drain_source_events(receiver, scan_options)? {
+        if self.drain_source_events(receiver, scan_options, control)? {
             return Ok(ObservedAcceptance::Invalidated);
         }
         Ok(ObservedAcceptance::Accepted)
@@ -701,45 +997,118 @@ impl SourceObservationEntry {
     }
 }
 
-/// Classify source events without letting this binding's own `SQLite` files self-invalidate it.
+/// Remove access and self-database notifications before any policy I/O.
+fn filtered_observer_event(binding: &SourceBinding, event: &Event) -> Option<Event> {
+    if !super::event_kind_affects_index(event.kind) && !event.need_rescan() {
+        return None;
+    }
+    let mut filtered = event.clone();
+    let metadata_directory = binding.root.join(".projectatlas");
+    filtered.paths.retain(|path| {
+        let candidate = super::absolute_watch_path(&binding.root, path);
+        !same_native_namespace_entry(&candidate, &metadata_directory)
+            && !is_database_runtime_path(&candidate, binding, event.kind)
+    });
+    if filtered.paths.is_empty() && !event.need_rescan() {
+        return None;
+    }
+    Some(filtered)
+}
+
+/// Test one standalone notification through the production filtering/classification boundary.
+#[cfg(test)]
 fn observer_event_changes(
     binding: &SourceBinding,
     scan_options: &projectatlas_fs::ScanOptions,
     event: &Event,
 ) -> WatchChangeSet {
-    let mut filtered = event.clone();
-    let metadata_directory = binding.root.join(".projectatlas");
-    filtered.paths.retain(|path| {
-        let candidate = super::absolute_watch_path(&binding.root, path);
-        !same_native_path(&candidate, &metadata_directory)
-            && !is_database_runtime_path(&candidate, &binding.database)
-    });
-    if filtered.paths.is_empty() && !event.need_rescan() {
+    let Some(filtered) = filtered_observer_event(binding, event) else {
         return WatchChangeSet::default();
-    }
+    };
     super::notify_event_changes(&binding.root, scan_options, &filtered)
 }
 
 /// Return whether a path is the database or one of its runtime sidecar files.
-fn is_database_runtime_path(candidate: &Path, database: &Path) -> bool {
-    if same_native_path(candidate, database) {
+fn is_database_runtime_path(candidate: &Path, binding: &SourceBinding, kind: EventKind) -> bool {
+    let namespaces = [
+        Some(binding.database.as_path()),
+        binding
+            .database_target
+            .as_deref()
+            .filter(|target| *target != binding.database.as_path()),
+    ];
+    for database in namespaces.into_iter().flatten() {
+        let main = same_native_namespace_entry(candidate, database);
+        let runtime = main
+            || DATABASE_RUNTIME_SUFFIXES.into_iter().any(|suffix| {
+                let mut sidecar = database.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let sidecar = Path::new(&sidecar);
+                same_native_namespace_entry(candidate, sidecar) || {
+                    #[cfg(windows)]
+                    {
+                        missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        false
+                    }
+                }
+            });
+        if !runtime {
+            continue;
+        }
+        // A namespace captured before an alias retarget must not acknowledge
+        // notifications using the old target's authority.
+        if binding.database_target.is_none()
+            || fs::canonicalize(&binding.database).ok() != binding.database_target
+        {
+            return false;
+        }
+        return !main
+            || !matches!(
+                kind,
+                EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            );
+    }
+    false
+}
+
+/// Compare a native namespace entry without equating a distinct link with its target.
+pub(super) fn same_native_namespace_entry(candidate: &Path, known: &Path) -> bool {
+    let (Some(parent), Some(known_parent), Some(leaf), Some(known_leaf)) = (
+        candidate.parent(),
+        known.parent(),
+        candidate.file_name(),
+        known.file_name(),
+    ) else {
+        return false;
+    };
+    if !same_native_path(parent, known_parent) {
+        return false;
+    }
+    if leaf == known_leaf {
         return true;
     }
-    ["-wal", "-shm", "-journal"].into_iter().any(|suffix| {
-        let mut sidecar = database.as_os_str().to_os_string();
-        sidecar.push(suffix);
-        let sidecar = Path::new(&sidecar);
-        same_native_path(candidate, sidecar) || {
-            #[cfg(windows)]
-            {
-                missing_windows_sidecar_matches(candidate, sidecar, database, suffix)
-            }
-            #[cfg(not(windows))]
-            {
-                false
-            }
+    #[cfg(windows)]
+    {
+        use crate::project_state::windows_filesystem as native_names;
+        match (
+            native_names::entry_name(candidate),
+            native_names::entry_name(known),
+        ) {
+            (Ok(Some(candidate)), Ok(Some(known))) => candidate == known,
+            _ => false,
         }
-    })
+    }
+    #[cfg(not(windows))]
+    {
+        fs::symlink_metadata(candidate).is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && fs::symlink_metadata(known).is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && same_native_path(candidate, known)
+    }
 }
 
 /// Match a removed sidecar through its existing database leaf on ordinary
@@ -785,11 +1154,17 @@ fn missing_windows_sidecar_matches(
     // An unresolved candidate whose base spelling is already exact has no
     // native evidence that the missing suffix belongs to a case-insensitive
     // namespace; leave that event observable instead of guessing.
-    base != database && same_native_path(&base, database)
+    if base == database || !same_native_namespace_entry(&base, database) {
+        return false;
+    }
+    let exact_suffix = leaf_units[leaf_units.len() - suffix_units.len()..] == suffix_units;
+    exact_suffix
+        || crate::project_state::windows_filesystem::case_sensitive(parent)
+            .is_ok_and(|sensitive| !sensitive)
 }
 
 /// Compare native paths without converting identity through display text.
-fn same_native_path(left: &Path, right: &Path) -> bool {
+pub(super) fn same_native_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
@@ -899,16 +1274,21 @@ impl SourceObservationRegistry {
         config: Option<&Path>,
         control: &IndexWorkControl,
         repair: SourceRepairPolicy,
-        query: F,
+        mut query: F,
     ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
         let binding = SourceBinding::new(database, root, config)?;
-        let Some(entry) = self.entry(binding.clone())? else {
+        let Some(entry) = self.entry(binding.clone(), control)? else {
             return self.with_exact_fallback(&binding, control, repair, query);
         };
-        self.with_observed_read(&entry, control, repair, query)
+        match self.with_observed_read(&entry, control, repair, &mut query) {
+            Err(CliError::Watcher(_unavailable)) => {
+                self.with_exact_fallback(&binding, control, repair, query)
+            }
+            result => result,
+        }
     }
 
     /// Admit a purpose mutation and retain its source witness through commit.
@@ -920,26 +1300,28 @@ impl SourceObservationRegistry {
         control: &IndexWorkControl,
     ) -> Result<VerifiedMutationAdmission, CliError> {
         let binding = SourceBinding::new(database, root, config)?;
-        let Some(entry) = self.entry(binding.clone())? else {
+        let Some(entry) = self.entry(binding.clone(), control)? else {
             return self.admit_exact_mutation(binding, control);
         };
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
+            let previous = entry.current_stamp()?;
             if let Err(error) = control.check(IndexWorkStage::Publication) {
-                entry.invalidate();
+                if let Some(stamp) = previous {
+                    entry.invalidate_stamp(&stamp);
+                }
                 return Err(error.into());
             }
             let (store, epoch) =
                 match self.prepare_observed_store(&entry, control, &mut work, attempt == 0) {
                     Ok(Some(prepared)) => prepared,
                     Ok(None) => {
-                        entry.invalidate();
                         return self.admit_exact_mutation(binding, control);
                     }
-                    Err(error) => {
-                        entry.invalidate();
-                        return Err(error);
+                    Err(CliError::Watcher(_unavailable)) => {
+                        return self.admit_exact_mutation(binding, control);
                     }
+                    Err(error) => return Err(error),
                 };
             #[cfg(test)]
             if self
@@ -1050,6 +1432,7 @@ impl SourceObservationRegistry {
     fn entry(
         &self,
         binding: SourceBinding,
+        control: &IndexWorkControl,
     ) -> Result<Option<Arc<SourceObservationEntry>>, CliError> {
         let mut entries = self
             .entries
@@ -1061,7 +1444,8 @@ impl SourceObservationRegistry {
         if entries.len() >= SOURCE_OBSERVATION_CAPACITY {
             return Ok(None);
         }
-        let entry = match SourceObservationEntry::start(binding.clone()) {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        let entry = match SourceObservationEntry::start_controlled(binding.clone(), control) {
             Ok(entry) => Arc::new(entry),
             Err(_observer_unavailable) => return Ok(None),
         };
@@ -1083,8 +1467,11 @@ impl SourceObservationRegistry {
         let started = Instant::now();
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
+            let previous = entry.current_stamp()?;
             if let Err(error) = control.check(IndexWorkStage::Publication) {
-                entry.invalidate();
+                if let Some(stamp) = previous {
+                    entry.invalidate_stamp(&stamp);
+                }
                 return Err(error.into());
             }
             let (store, epoch) = match self
@@ -1092,22 +1479,17 @@ impl SourceObservationRegistry {
             {
                 Ok(SourceReadAdmission::Current(Some(prepared))) => prepared,
                 Ok(SourceReadAdmission::Reconcile(assessment)) => {
-                    entry.invalidate();
                     return Ok(SourceReadAdmission::Reconcile(assessment));
                 }
                 Ok(SourceReadAdmission::Current(None)) => {
-                    entry.invalidate();
                     return Err(source_changed_during_derivation(&entry.binding.root, "."));
                 }
-                Err(error) => {
-                    entry.invalidate();
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
             let value = match query(&store, epoch.stamp.clone()) {
                 Ok(value) => value,
                 Err(error) => {
-                    if matches!(error, CliError::IndexWork(_)) {
+                    if matches!(error, CliError::IndexWork(_) | CliError::Watcher(_)) {
                         entry.invalidate_epoch(&epoch);
                     }
                     drop(store.finish_index_read_snapshot());
@@ -1170,116 +1552,124 @@ impl SourceObservationRegistry {
             .reconcile
             .lock()
             .map_err(|_poisoned| lock_error(&entry.binding.root, "source reconciliation"))?;
-        // One-shot refresh must include writes completed before the request. An empty
-        // callback queue cannot fence events still pending in an asynchronous backend.
-        // Until a causal backend fence is available, require exact refresh admission.
-        // Mutation authority also starts from exact saved source under this lock.
-        if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
-            entry.invalidate();
-        }
-        let plan = ScanRuntimePlan::for_path_controlled(
-            entry.binding.config.as_deref(),
-            &entry.binding.root,
-            None,
-            control,
-        )
-        .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-        entry.changed_since_exact_verification(&plan.scan_options)?;
-        let contract_fingerprint = plan.publication_contract_fingerprint();
-        let policy_witness = source_policy_witness(&plan, control)?;
-        if let Some(epoch) = entry.current_epoch()?
-            && epoch.contract_fingerprint == contract_fingerprint
-            && epoch.policy_witness == policy_witness
-            && !entry.continuity_lost.load(Ordering::Acquire)
-        {
-            let store = open_atlas_store_read_only_for_project(
-                &entry.binding.database,
-                &entry.binding.root,
-            )?;
-            let publication = store.index_publication()?.filter(|publication| {
-                publication.state == IndexPublicationState::Complete
-                    && publication.contract_fingerprint.as_deref()
-                        == Some(contract_fingerprint.as_str())
-            });
-            let captured = store.captured_project_binding()?;
-            work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-            if publication
-                .is_some_and(|publication| publication.generation == epoch.stamp.generation)
-                && captured.project_instance_id == epoch.stamp.project_instance_id
-            {
-                return Ok(SourceReadAdmission::Current(Some((store, epoch))));
+        let prepared = (|| {
+            // One-shot refresh must include writes completed before the request. An empty
+            // callback queue cannot fence events still pending in an asynchronous backend.
+            // Until a causal backend fence is available, require exact refresh admission.
+            // Mutation authority also starts from exact saved source under this lock.
+            if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
+                entry.invalidate();
             }
-            entry.invalidate();
-            drop(store.finish_index_read_snapshot());
-        }
-
-        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
-            entry.clear_before_exact_verification()?;
-            let before_plan = ScanRuntimePlan::for_path_controlled(
+            let plan = ScanRuntimePlan::for_path_controlled(
                 entry.binding.config.as_deref(),
                 &entry.binding.root,
                 None,
                 control,
             )
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-            let before_contract = before_plan.publication_contract_fingerprint();
-            let before_policy = source_policy_witness(&before_plan, control)?;
-            let exact = match repair.open_exact(&entry.binding, control)? {
-                SourceReadAdmission::Current(exact) => exact,
-                SourceReadAdmission::Reconcile(assessment) => {
-                    return Ok(SourceReadAdmission::Reconcile(assessment));
+            entry.changed_since_exact_verification(&plan.scan_options, control)?;
+            let contract_fingerprint = plan.publication_contract_fingerprint();
+            let policy_witness = source_policy_witness(&plan, control)?;
+            if let Some(epoch) = entry.current_epoch()?
+                && epoch.contract_fingerprint == contract_fingerprint
+                && epoch.policy_witness == policy_witness
+                && !entry.continuity_lost.load(Ordering::Acquire)
+            {
+                let store = open_atlas_store_read_only_for_project(
+                    &entry.binding.database,
+                    &entry.binding.root,
+                )?;
+                let publication = store.index_publication()?.filter(|publication| {
+                    publication.state == IndexPublicationState::Complete
+                        && publication.contract_fingerprint.as_deref()
+                            == Some(contract_fingerprint.as_str())
+                });
+                let captured = store.captured_project_binding()?;
+                work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+                if publication
+                    .is_some_and(|publication| publication.generation == epoch.stamp.generation)
+                    && captured.project_instance_id == epoch.stamp.project_instance_id
+                {
+                    return Ok(SourceReadAdmission::Current(Some((store, epoch))));
                 }
-            };
-            work.add_exact(exact.work);
-            let after_plan = ScanRuntimePlan::for_path_controlled(
-                entry.binding.config.as_deref(),
-                &entry.binding.root,
-                None,
-                control,
-            )
-            .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-            let after_contract = after_plan.publication_contract_fingerprint();
-            let after_policy = source_policy_witness(&after_plan, control)?;
-            #[cfg(test)]
-            if self
-                .preparation_invalidations
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                entry.invalidate_after_proven_source_mismatch()?;
+                entry.invalidate();
+                drop(store.finish_index_read_snapshot());
             }
-            if before_contract != after_contract || before_policy != after_policy {
-                drop(exact.store.finish_index_read_snapshot());
-                continue;
+
+            for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+                entry.clear_before_exact_verification(control)?;
+                let before_plan = ScanRuntimePlan::for_path_controlled(
+                    entry.binding.config.as_deref(),
+                    &entry.binding.root,
+                    None,
+                    control,
+                )
+                .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+                let before_contract = before_plan.publication_contract_fingerprint();
+                let before_policy = source_policy_witness(&before_plan, control)?;
+                let exact = match repair.open_exact(&entry.binding, control)? {
+                    SourceReadAdmission::Current(exact) => exact,
+                    SourceReadAdmission::Reconcile(assessment) => {
+                        return Ok(SourceReadAdmission::Reconcile(assessment));
+                    }
+                };
+                work.add_exact(exact.work);
+                let after_plan = ScanRuntimePlan::for_path_controlled(
+                    entry.binding.config.as_deref(),
+                    &entry.binding.root,
+                    None,
+                    control,
+                )
+                .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+                let after_contract = after_plan.publication_contract_fingerprint();
+                let after_policy = source_policy_witness(&after_plan, control)?;
+                #[cfg(test)]
+                if self
+                    .preparation_invalidations
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    entry.invalidate_after_proven_source_mismatch()?;
+                }
+                if before_contract != after_contract || before_policy != after_policy {
+                    drop(exact.store.finish_index_read_snapshot());
+                    continue;
+                }
+                let publication = exact
+                    .store
+                    .index_publication()?
+                    .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
+                let captured = exact.store.captured_project_binding()?;
+                work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+                let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                    lock_error(&entry.binding.root, "source observation receiver")
+                })?;
+                if entry.drain_source_events(&receiver, &after_plan.scan_options, control)? {
+                    drop(receiver);
+                    drop(exact.store.finish_index_read_snapshot());
+                    continue;
+                }
+                let ingress_sequence = entry.ingress_sequence.load(Ordering::Acquire);
+                let epoch = entry.install_epoch(
+                    self.process_nonce,
+                    &captured,
+                    publication.generation,
+                    ingress_sequence,
+                    after_contract,
+                    after_policy,
+                )?;
+                return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
             }
-            let publication = exact
-                .store
-                .index_publication()?
-                .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
-            let captured = exact.store.captured_project_binding()?;
-            work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-            let receiver = entry.receiver.lock().map_err(|_poisoned| {
-                lock_error(&entry.binding.root, "source observation receiver")
-            })?;
-            if entry.drain_source_events(&receiver, &after_plan.scan_options)? {
-                drop(receiver);
-                drop(exact.store.finish_index_read_snapshot());
-                continue;
-            }
-            let ingress_sequence = entry.ingress_sequence.load(Ordering::Acquire);
-            let epoch = entry.install_epoch(
-                self.process_nonce,
-                &captured,
-                publication.generation,
-                ingress_sequence,
-                after_contract,
-                after_policy,
-            )?;
-            return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
+            Ok(SourceReadAdmission::Current(None))
+        })();
+        if !matches!(&prepared, Ok(SourceReadAdmission::Current(Some(_)))) {
+            // No successor can be installed until this cleanup and the owning
+            // reconciliation guard have both completed.
+            entry.invalidate();
         }
-        Ok(SourceReadAdmission::Current(None))
+        prepared
     }
 
     /// Confirm that no source, policy, or observer event invalidated a query result.
@@ -1306,7 +1696,7 @@ impl SourceObservationRegistry {
                 let receiver = entry.receiver.lock().map_err(|_poisoned| {
                     lock_error(&entry.binding.root, "source observation receiver")
                 })?;
-                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options, control)? {
                     ObservedAcceptance::Accepted => {}
                     ObservedAcceptance::Superseded => continue,
                     ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
@@ -1324,7 +1714,7 @@ impl SourceObservationRegistry {
             let receiver = entry.receiver.lock().map_err(|_poisoned| {
                 lock_error(&entry.binding.root, "source observation receiver")
             })?;
-            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options, control)? {
                 ObservedAcceptance::Accepted => {}
                 ObservedAcceptance::Superseded => continue,
                 ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
@@ -1422,16 +1812,64 @@ impl SourceObservationRegistry {
     }
 }
 
+/// Bounded handshake used only by owning tests at the callback ingress fence.
+#[cfg(test)]
+type IngressFenceGate = (SyncSender<()>, Receiver<()>);
+
+/// Exclude proven unrelated parent-directory traffic before it can consume source queue capacity.
+fn selected_watcher_callback(
+    runtime: &RuntimeEventIngress,
+    selection: PolicyWatchSelection,
+    sender: SyncSender<Event>,
+    receiver: Arc<Mutex<Receiver<Event>>>,
+    ingress_sequence: Arc<AtomicU64>,
+    continuity_lost: Arc<AtomicBool>,
+    #[cfg(test)] before_fence: Option<IngressFenceGate>,
+) -> impl FnMut(notify::Result<Event>) + Send + 'static {
+    let mut publish = watcher_callback(
+        sender,
+        receiver,
+        ingress_sequence,
+        continuity_lost,
+        Some(selection.clone()),
+        Some(runtime.clone()),
+        #[cfg(test)]
+        before_fence,
+    );
+    let runtime = runtime.clone();
+    move |result| {
+        if let Ok(event) = &result
+            && !selection.may_affect(event)
+            && !runtime.may_affect(event)
+        {
+            return;
+        }
+        publish(result);
+    }
+}
+
 /// Convert native watcher callbacks into bounded ingress and continuity state.
 fn watcher_callback(
     sender: SyncSender<Event>,
     receiver: Arc<Mutex<Receiver<Event>>>,
     ingress_sequence: Arc<AtomicU64>,
     continuity_lost: Arc<AtomicBool>,
+    selection: Option<PolicyWatchSelection>,
+    runtime: Option<RuntimeEventIngress>,
+    #[cfg(test)] before_fence: Option<IngressFenceGate>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |result| match result {
-        Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
+        Ok(event) if matches!(event.kind, EventKind::Access(_)) && !event.need_rescan() => {}
         result => {
+            #[cfg(test)]
+            if let Some((arrived, release)) = &before_fence
+                && (arrived.send(()).is_err()
+                    || release.recv_timeout(Duration::from_secs(5)).is_err())
+            {
+                continuity_lost.store(true, Ordering::Release);
+                ingress_sequence.fetch_add(1, Ordering::AcqRel);
+                return;
+            }
             let _receiver = match receiver.lock() {
                 Ok(receiver) => receiver,
                 Err(_poisoned) => {
@@ -1440,6 +1878,20 @@ fn watcher_callback(
                     return;
                 }
             };
+            if let Some(selection) = &selection {
+                match &result {
+                    Ok(event)
+                        if !runtime.as_ref().map_or_else(
+                            || selection.observe(event),
+                            |runtime| runtime.observe(selection, event),
+                        ) =>
+                    {
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => selection.require_recursive_rebind(),
+                }
+            }
             match result {
                 Ok(event) => {
                     let needs_rescan = event.need_rescan();
@@ -1450,9 +1902,7 @@ fn watcher_callback(
                         }
                     }
                 }
-                Err(_source) => {
-                    continuity_lost.store(true, Ordering::Release);
-                }
+                Err(_source) => continuity_lost.store(true, Ordering::Release),
             }
             ingress_sequence.fetch_add(1, Ordering::AcqRel);
         }
@@ -1476,32 +1926,45 @@ fn source_policy_witness(
         .encode()
         .map_err(|error| CliError::InvalidInput(error.to_string()))?;
     hash_field(&mut hasher, "root", &root_identity_bytes);
-    for path in source_policy_paths(plan, control)? {
+    hash_policy_paths(&mut hasher, &source_policy_paths(plan, control)?, control)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Hash selected native inputs with the same bounded file and cancellation policy.
+pub(super) fn hash_policy_paths<'a>(
+    hasher: &mut Hasher,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    for path in paths {
         control.check(IndexWorkStage::Publication)?;
-        hash_field(&mut hasher, "path", path.as_os_str().as_encoded_bytes());
+        hash_field(hasher, "path", path.as_os_str().as_encoded_bytes());
         match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
-                let file = File::open(&path).map_err(|source| CliError::Io {
+                let file = File::open(path).map_err(|source| CliError::Io {
                     path: path.clone(),
                     source,
                 })?;
-                hash_policy_file(&mut hasher, path.as_path(), file, control)?;
+                hash_policy_file(hasher, path.as_path(), file, control)?;
             }
             Ok(metadata) if metadata.is_dir() => {
-                hash_field(&mut hasher, "state", b"directory");
+                hash_field(hasher, "state", b"directory");
             }
             Ok(_metadata) => {
-                hash_field(&mut hasher, "state", b"other");
+                hash_field(hasher, "state", b"other");
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                hash_field(&mut hasher, "state", b"absent");
+                hash_field(hasher, "state", b"absent");
             }
             Err(source) => {
-                return Err(CliError::Io { path, source });
+                return Err(CliError::Io {
+                    path: path.clone(),
+                    source,
+                });
             }
         }
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(())
 }
 
 /// Capture the scanner contract and dynamic policy for one exact source binding.
@@ -1658,12 +2121,408 @@ mod tests {
             ),
         )?;
         drop(store);
-        Ok((database, source))
+        // Inject native events beneath the root used for registration, while
+        // retaining the caller's explicit database spelling for alias controls.
+        Ok((database, plan.root.join("source.rs")))
     }
 
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
+    }
+
+    #[test]
+    fn native_observer_filters_target_cohort_through_operator_database_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        #[cfg(unix)]
+        let selected = temp.path().join("operator-alias.db");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&database, &selected)?;
+        #[cfg(windows)]
+        let selected = {
+            let output = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
+                .env("PROJECTATLAS_TEST_DB_PATH", &database)
+                .output()?;
+            require(output.status.success(), "native short-name lookup failed")?;
+            let selected = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+            if selected.file_name() == database.file_name() {
+                if std::env::var_os("GITHUB_ACTIONS").is_some() {
+                    return Err(std::io::Error::other(
+                        "hosted observer proof requires a real database short name",
+                    )
+                    .into());
+                }
+                eprintln!("native short-name observer proof unavailable on this filesystem");
+                return Ok(());
+            }
+            selected
+        };
+        let entry = SourceObservationEntry::start(SourceBinding::new(&selected, &root, None)?)?;
+        let store = super::super::open_atlas_store_for_project(&selected, &root)?;
+        store.set_purpose("source.rs", "Alias writer", PurposeSource::Agent)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        let mut captured = Vec::new();
+        while Instant::now() < deadline {
+            let events: Vec<_> = entry
+                .receiver
+                .lock()
+                .map_err(|_poisoned| std::io::Error::other("observer receiver lock poisoned"))?
+                .try_iter()
+                .collect();
+            for event in events {
+                if captured.len() < 16 {
+                    captured.push(format!("{event:?}"));
+                }
+                let runtime_event = event.paths.iter().any(|path| {
+                    #[cfg(windows)]
+                    let native_name = crate::project_state::windows_filesystem::entry_name(path)
+                        .ok()
+                        .flatten();
+                    #[cfg(windows)]
+                    let name = native_name.as_deref().or_else(|| path.file_name());
+                    #[cfg(not(windows))]
+                    let name = path.file_name();
+                    name.is_some_and(|name| {
+                        name == "projectatlas.db-wal" || name == "projectatlas.db-shm"
+                    })
+                });
+                if !runtime_event {
+                    continue;
+                }
+                observed = true;
+                let changes = observer_event_changes(
+                    &entry.binding,
+                    &projectatlas_fs::ScanOptions::default(),
+                    &event,
+                );
+                if changes.has_changes() {
+                    return Err(std::io::Error::other(format!(
+                        "native target-cohort event escaped filtering: event={event:?}, full={}, sources={:?}, documents={:?}",
+                        changes.requires_full_scan, changes.paths, changes.document_paths,
+                    )).into());
+                }
+            }
+            if observed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !observed {
+            return Err(std::io::Error::other(format!(
+                "native SQLite target-cohort event was not observed: {captured:?}"
+            ))
+            .into());
+        }
+        drop(store);
+        for database in [
+            selected.as_path(),
+            entry.binding.database_target.as_deref().ok_or_else(|| {
+                std::io::Error::other("database target namespace was not captured")
+            })?,
+        ] {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let mut path = database.as_os_str().to_os_string();
+                path.push(suffix);
+                let event = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                    .add_path(PathBuf::from(path));
+                require(
+                    filtered_observer_event(&entry.binding, &event).is_none(),
+                    "removed selected/target SQLite sidecar was not recognized as runtime state",
+                )?;
+            }
+        }
+        fs::write(entry.binding.root.join(".projectatlas/config.toml"), "")?;
+        await_native_policy_change(&entry)?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_only_events_invalidate_verified_epochs() -> Result<(), Box<dyn Error>> {
+        for (policy, leaf) in [
+            (".ignore", "target.rs"),
+            (".gitignore", "target.rs"),
+            (".ignore", "target.asset"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            fs::write(temp.path().join(policy), format!("{leaf}\n"))?;
+            fs::write(temp.path().join(leaf), "ignored target\n")?;
+            fs::write(
+                temp.path().join("README.md"),
+                format!("# Links\n[target]({leaf})\n"),
+            )?;
+            let (database, _source) = indexed_project(temp.path())?;
+            let registry = SourceObservationRegistry::default();
+            let control = test_control();
+            let entry = registry
+                .entry(SourceBinding::new(&database, temp.path(), None)?, &control)?
+                .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
+            let (store, epoch) = registry
+                .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
+                .ok_or_else(|| std::io::Error::other("read epoch unavailable"))?;
+            store.finish_index_read_snapshot()?;
+            let target = entry.binding.root.join(leaf);
+            let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(target.clone());
+            let changes = observer_event_changes(
+                &entry.binding,
+                &projectatlas_fs::ScanOptions::default(),
+                &event,
+            );
+            require(
+                changes.document_paths.contains(&target)
+                    && changes.paths.is_empty()
+                    && !changes.requires_full_scan,
+                "ignored target event was not document-only",
+            )?;
+            entry.publish_test_event(event)?;
+            require(
+                SourceObservationRegistry::accepts_observed_result(&entry, &epoch, &control)?
+                    == ObservedAcceptance::Invalidated,
+                "document-only event left a warm verified epoch accepted",
+            )?;
+            require(
+                entry.current_epoch()?.is_none()
+                    && !entry.policy_selection.recursive_rebind_pending(),
+                "document-only invalidation retained an epoch or requested recursive rebind",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_preserves_distinct_source_aliases_to_database_objects() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        for (case, database) in [temp.path().join("external.db"), root.join("inside.db")]
+            .into_iter()
+            .enumerate()
+        {
+            let _store = super::super::open_atlas_store_for_project(&database, &root)?;
+            let binding = SourceBinding::new(&database, &root, None)?;
+            for (leaf, symlink) in [("database-link.rs", true), ("database-hardlink.rs", false)] {
+                let source = binding.root.join(format!("{case}-{leaf}"));
+                if symlink {
+                    std::os::unix::fs::symlink(&database, &source)?;
+                } else {
+                    fs::hard_link(&database, &source)?;
+                }
+                let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source.clone());
+                let changes = observer_event_changes(
+                    &binding,
+                    &projectatlas_fs::ScanOptions::default(),
+                    &event,
+                );
+                require(
+                    changes.document_paths.contains(&source),
+                    "a distinct source alias to a database object was treated as runtime state",
+                )?;
+            }
+        }
+        let binding = SourceBinding::new(&root.join("inside.db"), &root, None)?;
+        let directory_alias = binding.root.join("metadata-link");
+        fs::create_dir_all(binding.root.join(".projectatlas"))?;
+        std::os::unix::fs::symlink(binding.root.join(".projectatlas"), &directory_alias)?;
+        let event =
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(directory_alias.clone());
+        require(
+            observer_event_changes(&binding, &projectatlas_fs::ScanOptions::default(), &event)
+                .document_paths
+                .contains(&directory_alias),
+            "a source alias to the metadata directory was treated as the directory itself",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_alias_retarget_and_policy_events_remain_observable() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let actual_root = temp.path().join("repo");
+        fs::create_dir(&actual_root)?;
+        let root = temp.path().join("selected-root");
+        std::os::unix::fs::symlink(&actual_root, &root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let selected = root.join("selected.db");
+        std::os::unix::fs::symlink(&database, &selected)?;
+        let binding = SourceBinding::new(&selected, &root, None)?;
+        // Match native registration paths while retaining the raw operator selector.
+        let native_selected = binding.root.join("selected.db");
+        let options = projectatlas_fs::ScanOptions::default();
+        for kind in [
+            EventKind::Create(notify::event::CreateKind::File),
+            EventKind::Remove(notify::event::RemoveKind::File),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+        ] {
+            require(
+                observer_event_changes(
+                    &binding,
+                    &options,
+                    &Event::new(kind).add_path(native_selected.clone()),
+                )
+                .has_changes(),
+                "database namespace replacement was acknowledged as an ordinary self-write",
+            )?;
+        }
+        let replacement = temp.path().join("replacement.db");
+        fs::copy(&database, &replacement)?;
+        fs::remove_file(&selected)?;
+        std::os::unix::fs::symlink(&replacement, &selected)?;
+        require(
+            binding != SourceBinding::new(&selected, &root, None)?,
+            "retargeted database alias reused its previous observer binding",
+        )?;
+        require(
+            observer_event_changes(
+                &binding,
+                &options,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(native_selected),
+            )
+            .has_changes(),
+            "retargeted database alias was filtered by stale target authority",
+        )?;
+        let config = binding.root.join(".projectatlas/config.toml");
+        require(
+            filtered_observer_event(
+                &binding,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(config),
+            )
+            .is_some(),
+            "selected project configuration was filtered with runtime database state",
+        )?;
+        let policy = binding.root.join(".ignore");
+        fs::write(&policy, "ignored.rs\n")?;
+        require(
+            observer_event_changes(
+                &binding,
+                &options,
+                &Event::new(EventKind::Modify(ModifyKind::Any)).add_path(policy),
+            )
+            .has_changes(),
+            "local ignore policy was filtered with runtime database state",
+        )?;
+        let entry = SourceObservationEntry::start(binding.clone())?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let mut previous_sidecar = binding
+            .database_target
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("fixture has no captured database target"))?
+            .as_os_str()
+            .to_os_string();
+        previous_sidecar.push("-wal");
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(PathBuf::from(previous_sidecar))));
+        require(
+            entry.changed_since_exact_verification(&options, &test_control())?
+                && entry.policy_selection.recursive_rebind_pending(),
+            "coalesced previous-target sidecar acknowledged a retargeted database binding",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_event_fixture_preserves_invalidation_below_operator_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("actual-root");
+        let selected = temp.path().join("selected-root");
+        fs::create_dir(&root)?;
+        std::os::unix::fs::symlink(&root, &selected)?;
+        let (database, source) = indexed_project(&selected)?;
+        let registry = SourceObservationRegistry::default();
+        let admission = registry.admit_mutation(&database, &selected, None, &test_control())?;
+        let MutationSourceWitness::Observed { entry, .. } = &admission.witness else {
+            return Err(std::io::Error::other("native fixture witness unavailable").into());
+        };
+        *entry
+            .acceptance_event
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("acceptance event lock poisoned"))? =
+            Some(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source));
+        require(
+            matches!(admission.verify(), Err(CliError::RefreshRequired(_))),
+            "selected-root fixture spelling bypassed delayed source invalidation",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_observer_classifies_source_edits_through_selected_root_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("actual-root");
+        let selected = temp.path().join("selected-root");
+        fs::create_dir(&root)?;
+        std::os::unix::fs::symlink(&root, &selected)?;
+        let (database, _source) = indexed_project(&selected)?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(&database, &selected, None)?)?;
+        for (spelling, leaf, content) in [
+            (&selected, "selected.rs", "fn selected_alias_edit() {}\n"),
+            (
+                &entry.binding.root,
+                "canonical.rs",
+                "fn canonical_root_edit() {}\n",
+            ),
+        ] {
+            let canonical_source = entry.binding.root.join(leaf);
+            entry.clear_before_exact_verification(&test_control())?;
+            fs::write(spelling.join(leaf), content)?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                // The callback takes this same fence before sending. Release it
+                // before waiting so native ingress can make progress.
+                let event = {
+                    entry
+                        .receiver
+                        .lock()
+                        .map_err(|_poisoned| {
+                            std::io::Error::other("observer receiver lock poisoned")
+                        })?
+                        .try_recv()
+                };
+                if matches!(event, Err(TryRecvError::Disconnected)) {
+                    return Err(std::io::Error::other("native observer disconnected").into());
+                }
+                if let Ok(event) = &event
+                    && event.paths.iter().any(|path| path == &canonical_source)
+                {
+                    let changes = observer_event_changes(
+                        &entry.binding,
+                        &projectatlas_fs::ScanOptions::default(),
+                        event,
+                    );
+                    require(
+                        changes.paths.contains(&canonical_source),
+                        "actual native source event was not admitted for verification",
+                    )?;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::other(
+                        "selected-root source edit did not reach its canonical native registration",
+                    )
+                    .into());
+                }
+                if matches!(event, Err(TryRecvError::Empty)) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Return a fallible test failure without panicking inside result-returning tests.
@@ -1699,15 +2558,21 @@ mod tests {
     }
 
     #[test]
-    fn native_observer_failed_registration_releases_admitted_root() -> Result<(), Box<dyn Error>> {
+    fn native_observer_failed_policy_selection_releases_admitted_root() -> Result<(), Box<dyn Error>>
+    {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
         let database = root.join("atlas.db");
-        let config = temp.path().join("missing-parent").join("config.toml");
+        let blocked = temp.path().join("blocked-parent");
+        fs::write(&blocked, "not a directory")?;
+        let config = blocked.join("config.toml");
         let binding = SourceBinding::new(&database, &root, Some(&config))?;
         let result = SourceObservationEntry::start(binding.clone());
-        require(result.is_err(), "missing configuration parent was accepted")?;
+        require(
+            result.is_err(),
+            "non-directory configuration parent was accepted",
+        )?;
         require(
             !database.exists(),
             "failed observer startup created an index",
@@ -1718,6 +2583,710 @@ mod tests {
             SourceObservationEntry::start(binding).is_err(),
             "missing root was accepted",
         )
+    }
+
+    /// Wait for a real native policy event through production draining, never synthetic ingress.
+    fn await_native_policy_change(entry: &SourceObservationEntry) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let control = test_control();
+        while Instant::now() < deadline {
+            if entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(
+            std::io::Error::other("selected external input did not reach native observer draining")
+                .into(),
+        )
+    }
+
+    #[test]
+    fn native_observer_advances_coverage_as_external_policy_parents_are_created()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let database = root.join("atlas.db");
+        let parent = temp.path().join("settings");
+        let nested = parent.join("git");
+        let config = nested.join("config.toml");
+        let entry =
+            SourceObservationEntry::start(SourceBinding::new(&database, &root, Some(&config))?)?;
+        fs::create_dir(&parent)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::create_dir(&nested)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(&config, "")?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(root.join("source.rs"), "fn observed_after_retirement() {}")?;
+        await_native_policy_change(&entry)?;
+        require(
+            !database.exists(),
+            "external watch registration implicitly initialized an index",
+        )
+    }
+
+    #[test]
+    fn native_observer_rebinds_a_replaced_source_root_with_external_database()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("external-atlas.db");
+        let entry = SourceObservationEntry::start(SourceBinding::new(&database, &root, None)?)?;
+        fs::rename(&root, temp.path().join("retired-root"))?;
+        fs::create_dir(&root)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        let source = root.join("source.rs");
+        fs::write(&source, "pub fn replacement_source() {}\n")?;
+        // Require this exact new-root child, not a late rename/create event
+        // from the old root or its external parent registration.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            {
+                let receiver = entry.receiver.lock().map_err(|poisoned| {
+                    std::io::Error::other(format!("native event receiver unavailable: {poisoned}"))
+                })?;
+                observed = receiver.try_iter().any(|event| {
+                    !matches!(event.kind, EventKind::Access(_))
+                        && event
+                            .paths
+                            .iter()
+                            .any(|path| same_native_path(path, &source))
+                });
+            }
+            if !observed {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        require(
+            observed,
+            "replacement source-root child did not reach native ingress",
+        )?;
+        require(
+            !database.exists(),
+            "root observation initialized an external database",
+        )
+    }
+
+    #[test]
+    fn native_observer_rebinds_a_replaced_external_policy_directory() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let parent = temp.path().join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&parent)?;
+        let config = parent.join("config.toml");
+        fs::write(&config, "")?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(
+            &root.join("atlas.db"),
+            &root,
+            Some(&config),
+        )?)?;
+        fs::rename(&parent, temp.path().join("retired-settings"))?;
+        fs::create_dir(&parent)?;
+        fs::write(&config, "")?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(&config, "# replacement-only edit\n")?;
+        await_native_policy_change(&entry)
+    }
+
+    #[test]
+    fn policy_watch_update_events_and_overflow_survive_the_exact_verification_fence()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let config = temp.path().join("config.toml");
+        fs::write(&config, "")?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(
+            &root.join("atlas.db"),
+            &root,
+            Some(&config),
+        )?)?;
+        let control = test_control();
+        entry.clear_before_exact_verification_with_update(&control, || {
+            entry.refresh_policy_watches(&control)?;
+            entry.publish_test_event(
+                Event::new(EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))
+                .add_path(config.clone()),
+            )
+        })?;
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )?,
+            "policy event received during registration was discarded",
+        )?;
+        entry.clear_before_exact_verification_with_update(&control, || {
+            entry.refresh_policy_watches(&control)?;
+            entry.continuity_lost.store(true, Ordering::Release);
+            Ok(())
+        })?;
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )?,
+            "registration-time overflow was cleared before exact acceptance",
+        )
+    }
+
+    #[test]
+    fn failed_classification_of_consumed_event_discards_the_verified_epoch()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        registry
+            .with_verified_current_read(
+                &database,
+                temp.path(),
+                None,
+                &control,
+                |_store, _stamp| Ok(()),
+            )?
+            .require_current()?;
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let entry = registry
+            .entry(binding, &control)?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        require(
+            entry.current_epoch()?.is_some(),
+            "fixture did not establish a verified epoch",
+        )?;
+        entry.publish_test_event(
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(source),
+        )?;
+        let cancelled = test_control();
+        cancelled.cancel();
+        require(
+            entry
+                .changed_since_exact_verification(
+                    &projectatlas_fs::ScanOptions::default(),
+                    &cancelled,
+                )
+                .is_err(),
+            "cancelled event classification was accepted",
+        )?;
+        require(
+            entry.current_epoch()?.is_none() && entry.continuity_lost.load(Ordering::Acquire),
+            "consumed event failure retained trusted source evidence",
+        )
+    }
+
+    #[test]
+    fn database_notifications_do_not_arm_unicode_policy_rechecks() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("π-root");
+        fs::create_dir(&root)?;
+        let database = base.join("atlas.db");
+        fs::write(&database, "runtime fixture")?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let inputs = PolicyWatchInputs::discover(&root, Some(&config), &test_control())?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        let (sender, receiver) = sync_channel(8);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let runtime_ingress =
+            RuntimeEventIngress::new(SourceBinding::new(&database, &root, Some(&config))?);
+        let mut callback = selected_watcher_callback(
+            &runtime_ingress,
+            selection.clone(),
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+        );
+        let binding = SourceBinding::new(&database, &root, Some(&config))?;
+        for (index, event) in [
+            Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(base.join("atlas.db-wal")),
+            Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(base.join("atlas.db-shm")),
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(database.clone()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            require(
+                binding.queues_database_event(&event),
+                "exact runtime spelling was not routed",
+            )?;
+            callback(Ok(event));
+            require(
+                sequence.load(Ordering::Acquire) == index as u64 + 1
+                    && !selection.take_policy_recheck()
+                    && !selection.recursive_rebind_pending()
+                    && !lost.load(Ordering::Acquire),
+                "SQLite notification armed Unicode policy uncertainty before runtime filtering",
+            )?;
+            require(
+                receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .try_recv()
+                    .is_ok(),
+                "runtime notification was discarded instead of reaching controlled native filtering",
+            )?;
+            runtime_ingress.begin_drain();
+        }
+        for event in [
+            Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(database.clone()),
+            Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(database.clone()),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(database.clone()),
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(config),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(binding.root.join("source-alias.rs")),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(database.clone())
+                .add_path(base.join("π-rules")),
+            Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(database)
+                .set_flag(notify::event::Flag::Rescan),
+        ] {
+            require(
+                !binding.queues_database_event(&event),
+                "runtime routing hid structural, policy, alias or rescan uncertainty",
+            )?;
+        }
+        for _ in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join("atlas.db-wal"))));
+        }
+        require(
+            !lost.load(Ordering::Acquire),
+            "SQLite write burst exhausted source continuity instead of sharing a runtime wake",
+        )?;
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(binding.database)));
+        require(
+            selection.take_policy_recheck() && selection.take_structural_policy_recheck(),
+            "main-file replacement lost structural policy uncertainty",
+        )
+    }
+
+    #[test]
+    fn runtime_wake_rearms_after_verified_epoch_drains() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        registry.with_verified_read(&database, &root, None, &test_control(), |_store, stamp| {
+            Ok(stamp)
+        })?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let epoch = entry
+            .current_epoch()?
+            .ok_or_else(|| std::io::Error::other("fixture has no epoch"))?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        for _ in 0..2 {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(database.with_file_name("projectatlas.db-wal"))));
+            let receiver = entry
+                .receiver
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            require(
+                entry.runtime_ingress.pending.load(Ordering::Acquire),
+                "runtime event did not arm its wake",
+            )?;
+            require(
+                matches!(
+                    entry.drain_epoch_events(
+                        &receiver,
+                        &epoch,
+                        &projectatlas_fs::ScanOptions::default(),
+                        &test_control()
+                    )?,
+                    ObservedAcceptance::Accepted
+                ),
+                "runtime drain invalidated a verified source epoch",
+            )?;
+            require(
+                !entry.runtime_ingress.pending.load(Ordering::Acquire),
+                "verified epoch drain consumed its representative without rearming runtime ingress",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_external_parent_flood_preserves_bounded_source_queue() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let root = root.canonicalize()?;
+        let inputs = PolicyWatchInputs::discover(&root, Some(&config), &test_control())?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut callback = selected_watcher_callback(
+            &RuntimeEventIngress::new(SourceBinding::new(&root.join("unused.db"), &root, None)?),
+            selection,
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+        );
+        for i in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join(format!("unrelated-{i}")))));
+        }
+        require(
+            sequence.load(Ordering::Acquire) == 0 && !lost.load(Ordering::Acquire),
+            "unrelated external traffic consumed observation continuity",
+        )?;
+        for i in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join(format!("π-unrelated-{i}")))));
+        }
+        require(
+            sequence.load(Ordering::Acquire) == 1 && !lost.load(Ordering::Acquire),
+            "uncertain Unicode sibling traffic overflowed instead of coalescing one policy recheck",
+        )?;
+        {
+            let receiver = receiver
+                .lock()
+                .map_err(|source| std::io::Error::other(source.to_string()))?;
+            require(
+                receiver.try_iter().count() == 1,
+                "Unicode sibling wake was not bounded",
+            )?;
+        }
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(config)));
+        require(
+            sequence.load(Ordering::Acquire) == 2 && !lost.load(Ordering::Acquire),
+            "selected external input was not admitted",
+        )?;
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(root.join("source.rs"))));
+        require(
+            lost.load(Ordering::Acquire),
+            "real selected-event overflow stopped failing closed",
+        )
+    }
+
+    #[test]
+    fn unicode_sibling_rechecks_preserve_only_a_verified_policy_epoch() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let first = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let sibling = || {
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join("π-unrelated"))
+        };
+        for _ in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(sibling()));
+        }
+        require(
+            !entry.continuity_lost.load(Ordering::Acquire),
+            "Unicode sibling storm lost source continuity",
+        )?;
+        require(
+            !entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "unchanged sibling storm invalidated a verified policy",
+        )?;
+        let warm = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        require(
+            warm.value == first.value && warm.work.exact_verifications == 0,
+            "Unicode sibling storm repeated exact source work",
+        )?;
+        callback(Ok(sibling()));
+        let cancellation = IndexCancellation::new();
+        let cancelled = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(5)));
+        cancellation.cancel();
+        require(
+            matches!(
+                entry.changed_since_exact_verification(
+                    &projectatlas_fs::ScanOptions::default(),
+                    &cancelled
+                ),
+                Err(CliError::IndexWork(_) | CliError::Fs(projectatlas_fs::FsError::IndexWork(_)))
+            ),
+            "policy recheck ignored cancellation",
+        )?;
+        require(
+            entry.current_epoch()?.is_none() && entry.policy_selection.take_policy_recheck(),
+            "cancelled recheck acknowledged pending uncertainty",
+        )?;
+        entry.policy_selection.retain_policy_recheck();
+        registry.with_verified_read(&database, &root, None, &test_control(), |_store, stamp| {
+            Ok(stamp)
+        })?;
+        entry.invalidate();
+        callback(Ok(sibling()));
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "uncertain event certified an in-flight candidate without an epoch",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_rescan_flag_survives_access_filtering() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut callback = selected_watcher_callback(
+            &RuntimeEventIngress::new(SourceBinding::new(&root.join("unused.db"), &root, None)?),
+            selection,
+            sender,
+            receiver,
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+        );
+        let event =
+            Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan);
+        callback(Ok(event.clone()));
+        require(
+            lost.load(Ordering::Acquire) && sequence.load(Ordering::Acquire) == 1,
+            "access kind discarded native loss-of-continuity flag",
+        )?;
+        require(
+            super::super::notify_event_changes(
+                &root,
+                &projectatlas_fs::ScanOptions::default(),
+                &event,
+            )
+            .requires_full_scan,
+            "CLI event classification discarded native rescan flag",
+        )
+    }
+
+    #[test]
+    fn rebind_marker_and_event_share_the_callback_ingress_fence() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let database = base.join("atlas.db");
+        fs::write(&database, "runtime fixture")?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let inputs = Arc::new(PolicyWatchInputs::discover(
+            &root,
+            Some(&config),
+            &test_control(),
+        )?);
+        for (result, rebind, recheck, runtime_pending) in [
+            (
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                        .add_path(root.clone()),
+                ),
+                true,
+                false,
+                false,
+            ),
+            (
+                Err(notify::Error::generic("fixture native observation failure")),
+                true,
+                false,
+                false,
+            ),
+            (
+                Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))
+                .add_path(base.join("π-unrelated"))),
+                false,
+                true,
+                false,
+            ),
+            (
+                Ok(
+                    Event::new(EventKind::Create(notify::event::CreateKind::File))
+                        .add_path(base.join("atlas.db-wal")),
+                ),
+                false,
+                false,
+                true,
+            ),
+            (
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                        .add_path(database.clone()),
+                ),
+                true,
+                false,
+                false,
+            ),
+        ] {
+            let is_error = result.is_err();
+            let selection = PolicyWatchSelection::new(root.clone());
+            selection.publish(Arc::clone(&inputs))?;
+            let runtime =
+                RuntimeEventIngress::new(SourceBinding::new(&database, &root, Some(&config))?);
+            let (sender, receiver) = sync_channel(1);
+            let receiver = Arc::new(Mutex::new(receiver));
+            let sequence = Arc::new(AtomicU64::new(0));
+            let lost = Arc::new(AtomicBool::new(false));
+            let (arrived, arrival) = sync_channel(1);
+            let (release, released) = sync_channel(1);
+            let mut callback = selected_watcher_callback(
+                &runtime,
+                selection.clone(),
+                sender,
+                Arc::clone(&receiver),
+                Arc::clone(&sequence),
+                Arc::clone(&lost),
+                Some((arrived, released)),
+            );
+            std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+                // Hold the same fence used by final drain/acceptance. The callback
+                // acknowledges its exact pre-lock boundary, without timing sleeps.
+                let held = receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let worker = scope.spawn(move || callback(result));
+                let reached = arrival.recv_timeout(Duration::from_secs(5));
+                let premature_marker = selection.recursive_rebind_pending();
+                let premature_recheck = selection.take_policy_recheck();
+                let premature_runtime = runtime.pending.load(Ordering::Acquire);
+                let premature_sequence = sequence.load(Ordering::Acquire);
+                let premature_loss = lost.load(Ordering::Acquire);
+                let queue_empty = matches!(held.try_recv(), Err(TryRecvError::Empty));
+                let continued = release.try_send(());
+                drop(held);
+                let completed = worker.join();
+                reached?;
+                continued?;
+                completed.map_err(|payload| {
+                    std::io::Error::other(format!("native callback panicked: {payload:?}"))
+                })?;
+                require(
+                    !premature_marker
+                        && !premature_recheck
+                        && !premature_runtime
+                        && premature_sequence == 0
+                        && !premature_loss
+                        && queue_empty,
+                    "acceptance fence observed a marker without its event/sequence",
+                )?;
+                require(
+                    selection.recursive_rebind_pending() == rebind
+                        && selection.take_policy_recheck() == recheck
+                        && runtime.pending.load(Ordering::Acquire) == runtime_pending
+                        && sequence.load(Ordering::Acquire) == 1
+                        && lost.load(Ordering::Acquire) == is_error,
+                    "callback did not publish structural uncertainty with ingress",
+                )?;
+                let queued = receiver
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .try_recv();
+                require(
+                    queued.is_ok() != is_error,
+                    "callback publication lost its event/error semantics",
+                )
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -1731,6 +3300,9 @@ mod tests {
             Arc::clone(&receiver),
             Arc::clone(&sequence),
             Arc::clone(&lost),
+            None,
+            None,
+            None,
         );
         callback(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
             RenameMode::Any,
@@ -1752,8 +3324,15 @@ mod tests {
         let receiver = Arc::new(Mutex::new(receiver));
         let sequence = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicBool::new(false));
-        let mut callback =
-            watcher_callback(sender, receiver, Arc::clone(&sequence), Arc::clone(&lost));
+        let mut callback = watcher_callback(
+            sender,
+            receiver,
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+            None,
+            None,
+        );
         callback(Ok(Event::new(EventKind::Access(AccessKind::Any))));
 
         assert_eq!(sequence.load(Ordering::Acquire), 0);
@@ -1832,7 +3411,11 @@ mod tests {
                 .get_mut(&binding)
                 .and_then(Arc::get_mut)
                 .ok_or_else(|| std::io::Error::other("test observer is not exclusively owned"))?;
-            entry.watcher = notify::recommended_watcher(|_event| {})?;
+            entry
+                .watcher
+                .get_mut()
+                .map_err(|_poisoned| lock_error(&binding.root, "test watcher"))?
+                .watcher = notify::recommended_watcher(|_event| {})?;
         }
         fs::write(&source, "fn changed_before_observation() {}\n")?;
         let admission = registry.with_verified_current_read(
@@ -1903,6 +3486,75 @@ mod tests {
             "stale handoff changed the winner",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn ordinary_parent_notifications_preserve_the_verified_source_epoch()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let first = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        let entry = registry
+            .entry(SourceBinding::new(&database, &root, None)?, &test_control())?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        let mut callback = selected_watcher_callback(
+            &entry.runtime_ingress,
+            entry.policy_selection.clone(),
+            entry.test_sender.clone(),
+            Arc::clone(&entry.receiver),
+            Arc::clone(&entry.ingress_sequence),
+            Arc::clone(&entry.continuity_lost),
+            None,
+        );
+        let parent = entry
+            .binding
+            .root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("fixture root has no parent"))?;
+        callback(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(parent.to_path_buf())
+        ));
+        require(
+            !entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )?,
+            "ordinary ancestor modification invalidated the source epoch",
+        )?;
+        let warm = registry.with_verified_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, stamp| Ok(stamp),
+        )?;
+        require(
+            warm.work.exact_verifications == 0,
+            "parent metadata repeated exact verification",
+        )?;
+        require(
+            warm.stamp == first.stamp,
+            "parent metadata replaced the verified epoch",
+        )?;
+        callback(Ok(
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(entry.binding.root.clone())
+        ));
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &test_control(),
+            )? && entry.policy_selection.recursive_rebind_pending(),
+            "a notification on the selected root lost full-verification handling",
+        )
     }
 
     #[test]
@@ -2174,7 +3826,10 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let control = test_control();
         let entry = registry
-            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .entry(
+                SourceBinding::new(&database, temp.path(), None)?,
+                &test_control(),
+            )?
             .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
         let (store, epoch) = registry
             .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
@@ -2245,6 +3900,58 @@ mod tests {
     }
 
     #[test]
+    fn rejected_preparation_cleans_its_epoch_before_a_successor_can_be_installed()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let prior = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { entry, .. } = &prior.witness else {
+            return Err(std::io::Error::other("observed fixture missing").into());
+        };
+        let stamp = entry
+            .current_stamp()?
+            .ok_or_else(|| std::io::Error::other("initial epoch missing"))?;
+        let config = temp.path().join(".projectatlas/config.toml");
+        fs::write(&config, "[invalid")?;
+        let prepared = registry.prepare_observed_store_with_policy(
+            entry,
+            &control,
+            &mut VerifiedReadWork::default(),
+            false,
+            SourceRepairPolicy::Incremental,
+        );
+        require(
+            prepared.is_err(),
+            "malformed preparation unexpectedly succeeded",
+        )?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "failed preparation released authority before cleaning its epoch",
+        )?;
+        fs::remove_file(&config)?;
+        let successor = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        // A delayed request error may clean only the stamp it sampled before failure.
+        entry.invalidate_stamp(&stamp);
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Accepted successor purpose",
+            PurposeSource::Agent,
+        )?;
+        successor.verify()?;
+        transaction.commit()?;
+        require(
+            store.load_node_by_path("source.rs")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Accepted successor purpose")
+            }),
+            "rejected preparation invalidated its accepted successor",
+        )
+    }
+
+    #[test]
     fn superseded_mutation_cleanup_preserves_successor_witness() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, _source) = indexed_project(temp.path())?;
@@ -2268,8 +3975,14 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let binding = SourceBinding::new(&database, temp.path(), None)?;
         let mut observer = SourceObservationEntry::start(binding.clone())?;
-        observer.watcher.unwatch(&binding.root)?;
-        observer.watcher.configure(notify::Config::default())?;
+        {
+            let coverage = observer
+                .watcher
+                .get_mut()
+                .map_err(|_poisoned| lock_error(&binding.root, "test watcher"))?;
+            coverage.watcher.unwatch(&binding.root)?;
+            coverage.watcher.configure(notify::Config::default())?;
+        }
         let entry = Arc::new(observer);
         registry
             .entries
@@ -2354,7 +4067,10 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let control = test_control();
         let entry = registry
-            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .entry(
+                SourceBinding::new(&database, temp.path(), None)?,
+                &test_control(),
+            )?
             .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
         let (read_store, old_epoch) = registry
             .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
@@ -2388,8 +4104,12 @@ mod tests {
                 std::io::Error::other("source observation receiver lock poisoned")
             })?;
             require(
-                entry.drain_epoch_events(&receiver, &old_epoch, &previous_options)?
-                    == ObservedAcceptance::Superseded,
+                entry.drain_epoch_events(
+                    &receiver,
+                    &old_epoch,
+                    &previous_options,
+                    &test_control(),
+                )? == ObservedAcceptance::Superseded,
                 "older policy consumed an event belonging to a successor epoch",
             )?;
         }
@@ -2404,7 +4124,7 @@ mod tests {
         )?;
         let plan = ScanRuntimePlan::for_path_controlled(None, temp.path(), None, &control)?;
         require(
-            entry.changed_since_exact_verification(&plan.scan_options)?,
+            entry.changed_since_exact_verification(&plan.scan_options, &control)?,
             "consumed source event was lost to concurrent exact verification",
         )?;
         read_store.finish_index_read_snapshot()?;
@@ -2637,7 +4357,7 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let binding = SourceBinding::new(&database, temp.path(), None)?;
         let filler = registry
-            .entry(binding.clone())?
+            .entry(binding.clone(), &test_control())?
             .ok_or_else(|| std::io::Error::other("source observer was unavailable"))?;
         {
             let mut entries = registry
@@ -2896,6 +4616,14 @@ mod tests {
         let root = temp.path().join("MiXeDAtlasRoot");
         let metadata = root.join(".projectatlas");
         fs::create_dir_all(&metadata)?;
+        // Native notify paths retain the exact registered canonical root;
+        // the temporary directory may instead use a DOS short-name ancestor.
+        let root = root.canonicalize()?;
+        let metadata = root.join(".projectatlas");
+        require(
+            !crate::project_state::windows_filesystem::case_sensitive(&metadata)?,
+            "case-insensitive observer fixture has a case-sensitive metadata directory",
+        )?;
         let database = metadata.join("ProjectAtlas.db");
         fs::write(&database, b"SQLite format 3\0")?;
         let sidecars = ["-wal", "-shm", "-journal"].map(|suffix| {
@@ -2966,6 +4694,12 @@ mod tests {
         let root = parent.join("Root");
         let metadata = root.join(".projectatlas");
         fs::create_dir_all(&metadata)?;
+        let root = root.canonicalize()?;
+        let metadata = root.join(".projectatlas");
+        require(
+            crate::project_state::windows_filesystem::case_sensitive(&metadata)?,
+            "case-sensitive fixture directory did not inherit native case sensitivity",
+        )?;
         let database = metadata.join("ProjectAtlas.db");
         fs::write(&database, b"SQLite format 3\0")?;
         let binding = SourceBinding::new(&database, &root, None)?;

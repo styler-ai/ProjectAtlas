@@ -15,6 +15,7 @@
             722,
             731,
             732,
+            739,
             741
           ]
         },
@@ -34,6 +35,9 @@
           "blocked_by": []
         },
         "741": {
+          "blocked_by": []
+        },
+        "739": {
           "blocked_by": []
         }
       }
@@ -936,6 +940,17 @@
       "owners": [
         {
           "issue": 741,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
+    },
+    "reconcile-external-git-excludes": {
+      "contract": "checklist-v1",
+      "primary_issue": 739,
+      "owners": [
+        {
+          "issue": 739,
           "first_task": "1.1",
           "last_task": "3.1"
         }

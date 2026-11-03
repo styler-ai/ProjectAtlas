@@ -4981,6 +4981,9 @@ fn init_reports_host_config_failure_before_nonzero_exit() -> Result<(), Box<dyn 
 
 #[test]
 fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    const COHORT_SOURCE_FILE: &str = "file.rs";
+    const COHORT_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+    const COHORT_CONFIG_PATH: &str = ".projectatlas/config.toml";
     fn command(executable: &Path, root: &Path) -> StdCommand {
         let mut command = StdCommand::new(executable);
         command
@@ -5032,21 +5035,100 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             .into());
         }
     }
+    #[cfg(unix)]
+    {
+        writeln!(
+            io::stderr().lock(),
+            "automatic state admission: operator database alias"
+        )?;
+        let cohort_root = temp.path().join("cohort-operator-alias");
+        fs::create_dir(&cohort_root)?;
+        fs::write(cohort_root.join(COHORT_SOURCE_FILE), "pub fn cohort() {}\n")?;
+        let initialized = command(&executable, &cohort_root).arg("init").output()?;
+        if !initialized.status.success() {
+            return Err(
+                io::Error::other(format!("alias fixture init failed: {initialized:?}")).into(),
+            );
+        }
+        let database = cohort_root.join(COHORT_DATABASE_PATH);
+        let config = cohort_root.join(COHORT_CONFIG_PATH);
+        let selected = temp.path().join("operator-database.db");
+        std::os::unix::fs::symlink(&database, &selected)?;
+        let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+        let (mut session, _) = McpContractSession::spawn_configured(
+            &executable,
+            &cohort_root,
+            &selected,
+            Some(&config),
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        let operation = (|| -> Result<(), Box<dyn Error>> {
+            let set = command(&executable, &cohort_root)
+                .arg("--config")
+                .arg(&config)
+                .arg("--db")
+                .arg(&selected)
+                .args(["purpose", "set", "file.rs", "alias CLI purpose"])
+                .output()?;
+            if !set.status.success() {
+                return Err(io::Error::other(format!("alias CLI write failed: {set:?}")).into());
+            }
+            for _ in 0..3 {
+                let summary =
+                    session.call_tool("atlas_file_summary", &json!({"file":"file.rs"}))?;
+                if !summary.contains("alias CLI purpose") {
+                    return Err(io::Error::other(format!(
+                        "alias MCP read refused its own SQLite cohort: {summary}"
+                    ))
+                    .into());
+                }
+            }
+            session.call_tool(
+                "atlas_purpose_set",
+                &json!({"path":"file.rs", "purpose":"alias MCP purpose"}),
+            )?;
+            let summary = command(&executable, &cohort_root)
+                .args(["summary", "file.rs"])
+                .output()?;
+            if !summary.status.success()
+                || !String::from_utf8_lossy(&summary.stdout).contains("alias MCP purpose")
+            {
+                return Err(io::Error::other(format!(
+                    "canonical CLI missed operator-alias MCP write: {summary:?}"
+                ))
+                .into());
+            }
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+        let store = AtlasStore::open_read_only(&database)?;
+        if store.project_instance_id()? != identity {
+            return Err(io::Error::other("operator alias changed project identity").into());
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            if sqlite_sidecar_path(&selected, suffix).exists() {
+                return Err(io::Error::other(
+                    "operator symlink created an alternate SQLite cohort",
+                )
+                .into());
+            }
+        }
+    }
     #[cfg(windows)]
     {
         // Exercise real configured CLI/MCP opens, refusals and explicit recovery reset.
         for reset_surface in ["cli", "mcp"] {
             let cohort_root = temp.path().join(format!("cohort-{reset_surface}"));
             fs::create_dir(&cohort_root)?;
-            fs::write(cohort_root.join("file.rs"), "pub fn cohort() {}\n")?;
+            fs::write(cohort_root.join(COHORT_SOURCE_FILE), "pub fn cohort() {}\n")?;
             let initialized = command(&executable, &cohort_root).arg("init").output()?;
             if !initialized.status.success() {
                 return Err(
                     io::Error::other(format!("cohort init failed: {initialized:?}")).into(),
                 );
             }
-            let database = cohort_root.join(".projectatlas/projectatlas.db");
-            let config = cohort_root.join(".projectatlas/config.toml");
+            let database = cohort_root.join(COHORT_DATABASE_PATH);
+            let config = cohort_root.join(COHORT_CONFIG_PATH);
             let alias = StdCommand::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
                 .env("PROJECTATLAS_TEST_DB_PATH", &database).output()?;
@@ -5245,9 +5327,17 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
         return Err(io::Error::other("ownership fixture has no approved purpose").into());
     }
     let control_db = control.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    writeln!(
+        io::stderr().lock(),
+        "automatic state admission: managed database and sidecars"
+    )?;
     let mut session = McpContractSession::spawn(&executable, &control, &control_db)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         for suffix in ["", "-wal", "-shm"] {
+            writeln!(
+                io::stderr().lock(),
+                "automatic state admission: SQLite suffix {suffix:?}"
+            )?;
             // Read-only snapshots may leave empty WAL/SHM entries after closing.
             // Finish the owning writable lifecycle before installing a fixture
             // alias; never unlink a sidecar belonging to an active connection.
@@ -9054,7 +9144,11 @@ impl McpContractSession {
     /// Send one request and wait for its matching response under a fixed deadline.
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, Box<dyn Error>> {
         let request_id = self.start_request(method, params)?;
-        self.wait_for_response(request_id, method)
+        let label = params
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or_else(|| method.to_owned(), |tool| format!("{method} {tool}"));
+        self.wait_for_response(request_id, &label)
     }
 
     /// Send one request and return its id before waiting for the response.
@@ -9094,7 +9188,45 @@ impl McpContractSession {
             let line = self
                 .responses
                 .recv_timeout(remaining)
-                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+                .map_err(|error| {
+                    #[cfg(target_os = "macos")]
+                    if matches!(error, mpsc::RecvTimeoutError::Timeout) {
+                        // Capture the still-owned child after failure; this neither
+                        // extends the request deadline nor retries the operation.
+                        if let Some(child) = &self.child {
+                            let sampled = (|| -> io::Result<_> {
+                                let mut report = tempfile::NamedTempFile::new()?;
+                                // Bound the report file before sample writes it;
+                                // capture only a bounded prefix and clean up on drop.
+                                let output = Command::new("/bin/sh")
+                                    .args(["-c", "exec >/dev/null 2>&1; ulimit -c 0 && ulimit -f 256 && exec /usr/bin/sample \"$1\" 1 1 -file \"$2\"", "projectatlas-mcp-timeout"])
+                                    .arg(child.id().to_string())
+                                    .arg(report.path())
+                                    .timeout(Duration::from_secs(5))
+                                    .output()?;
+                                let mut bytes = Vec::new();
+                                report.as_file_mut().take(32_768).read_to_end(&mut bytes)?;
+                                Ok((output.status, bytes))
+                            })();
+                            match sampled {
+                                Ok((status, bytes)) => {
+                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample: request={request_id}, method={method}, pid={}, status={status}\n{}\nreport prefix capped at 32768 bytes; owned report removed after capture",
+                                        child.id(), String::from_utf8_lossy(&bytes)));
+                                }
+                                Err(source) => {
+                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample unavailable: {source}"));
+                                }
+                            }
+                        }
+                    }
+                    let kind = match error {
+                        mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                        mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::UnexpectedEof,
+                    };
+                    io::Error::new(kind, format!(
+                        "MCP contract request {request_id} for {method} failed waiting for response: {error}"
+                    ))
+                })??;
             let response: Value = serde_json::from_str(line.trim())?;
             if response.get("id").and_then(Value::as_u64) == Some(request_id) {
                 return Ok(response);

@@ -807,6 +807,33 @@ mod tests {
     }
 
     #[test]
+    fn nested_image_wikilinks_preserve_deepest_embed_and_ordinary_references() {
+        let source = "# ![[cat.png|![[dog.png]]]]\n\n[ordinary](src/lib.rs) [[guide.md|guide]]\n";
+        let facts = extract_markdown_facts(source);
+        assert_eq!(facts.headings[0].text, "![[cat.png|dog.png]]");
+        assert_eq!(
+            facts
+                .link_candidates
+                .iter()
+                .map(|candidate| candidate.selector.as_str())
+                .collect::<Vec<_>>(),
+            ["src/lib.rs", "guide.md"],
+        );
+        assert_eq!(
+            facts.coverage.unsupported,
+            [MarkdownUnsupportedStructure::Image]
+        );
+        let deep = format!(
+            "{}dog.png{}\n\n[retained](src/lib.rs)\n",
+            "![[".repeat(10_000),
+            "]]".repeat(10_000)
+        );
+        let facts = extract_markdown_facts(&deep);
+        assert_eq!(facts.link_candidates.len(), 1);
+        assert_eq!(facts.link_candidates[0].selector, "src/lib.rs");
+    }
+
+    #[test]
     fn markdown_parser_preserves_linear_wikilink_occurrences() {
         let source = "[[a|]] ".repeat(16);
         let facts = extract_markdown_facts(&source);

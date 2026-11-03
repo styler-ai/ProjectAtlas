@@ -393,6 +393,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.platform == 'true'
     runs-on: ${{ matrix.label == 'macos-arm64' && 'macos-15' || matrix.os }}
+    # Match rust's bounded debug metadata while release artifacts and independent
+    # installed-runtime copies coexist on hosted disks; retain unoptimized tests.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 1
+      CARGO_PROFILE_TEST_DEBUG: 1
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}
@@ -478,6 +483,20 @@ jobs:
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
+      - name: Native source-policy unit regressions
+        if: contains(matrix.contracts, 'compile')
+        # Reuse shared cold dependencies built by the preceding PHP regression.
+        # All-feature-specific compilation and execution retain this separate cap.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-fs --lib --all-features
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::polling_handoff_preserves_active_control_and_authored_state -- --exact
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::graph_projection::tests::document_verification_charges_rows_before_all_shortcuts_across_pages -- --exact
 
       - name: Managed project-state ownership platform regressions
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
@@ -1201,6 +1220,17 @@ jobs:
         if: contains(matrix.contracts, 'mcp') || matrix.label == 'macos-x64'
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli --test e2e_navigation map_response_preserves_legacy_file_and_separates_format_from_json_sidecar -- --exact
+
+      - name: External source policy and root replacement
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation observed_mcp_reconciles_document_only_target_changes -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation external_policy_ancestor_restart_preserves_cli_mcp_observation -- --exact --nocapture
 
       - name: Native source-observer teardown and MCP identity
         if: contains(matrix.contracts, 'mcp')

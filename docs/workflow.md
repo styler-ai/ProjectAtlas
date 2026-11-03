@@ -224,6 +224,8 @@ RELEASE_VERSION=v0.5.0
 
 ## CI behavior
 
+- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. Tests retain debug assertions and unoptimized code; release profiles, source/test selectors and time budgets remain unchanged.
+
 - The accepted-base planner owns logical platform and contract selection; the
   current workflow owns supported runner provisioning. CI provisions the
   `macos-arm64` row on the explicit `macos-15` ARM image even when an older

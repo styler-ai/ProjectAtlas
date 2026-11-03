@@ -2959,6 +2959,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     runtime::open_existing_atlas_store_for_project(&cli.db, &plan.root)?;
                 run_watch_loop(
                     &mut store,
+                    &cli.db,
                     &plan,
                     false,
                     *poll_seconds,

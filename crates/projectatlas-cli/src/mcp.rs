@@ -3958,8 +3958,8 @@ impl ProjectAtlasMcpServer {
         observations: &SourceObservationRegistry,
         allow_observed_noop: bool,
     ) -> Result<WatchReport, CliError> {
-        if allow_observed_noop && plan.root == state.root && state.db_path.is_file() {
-            let current = observations.with_verified_current_read(
+        let current = if allow_observed_noop && plan.root == state.root && state.db_path.is_file() {
+            Some(observations.with_verified_current_read(
                 &state.db_path,
                 &state.root,
                 state.config_path.as_deref(),
@@ -3968,7 +3968,23 @@ impl ProjectAtlasMcpServer {
                     Self::require_captured_worktree_identity(state.worktree.as_ref(), store)?;
                     publication_contract_matches(store, plan)
                 },
-            );
+            ))
+        } else {
+            None
+        };
+        Self::run_watch_after_observation(state, control_state, plan, options, control, current)
+    }
+
+    /// Consume observed admission without restarting an exhausted policy pass.
+    fn run_watch_after_observation(
+        state: &McpProjectState,
+        control_state: &McpProjectState,
+        plan: &ScanRuntimePlan,
+        options: &SymbolBuildOptions,
+        control: &IndexWorkControl,
+        current: Option<Result<SourceReadAdmission<VerifiedReadOutcome<bool>>, CliError>>,
+    ) -> Result<WatchReport, CliError> {
+        if let Some(current) = current {
             match current {
                 Ok(SourceReadAdmission::Current(outcome)) if outcome.value => {
                     return Ok(WatchReport::unchanged(plan.text_options));
@@ -3983,6 +3999,11 @@ impl ProjectAtlasMcpServer {
                         control,
                     )?;
                     return Ok(WatchReport::from_refresh(refresh));
+                }
+                Err(CliError::VerificationIncomplete(report))
+                    if report.policy_work_limit.is_some() =>
+                {
+                    return Err(CliError::VerificationIncomplete(report));
                 }
                 Ok(_) | Err(CliError::RefreshRequired(_) | CliError::VerificationIncomplete(_)) => {
                 }
@@ -17489,6 +17510,99 @@ mod tests {
             fs::read(&database)?.is_empty()
                 && fs::read_dir(root.join(".projectatlas"))?.count() == 1,
             "watch initialized or journaled an empty database",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn observed_watch_policy_quota_refuses_without_refresh_and_keeps_other_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn initial() {}\n")?;
+        let config = root.join(".projectatlas/config.toml");
+        init_project_with_config(root, Some(&config))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), None);
+        let control = index_work_control(&options);
+        let mut writer = open_atlas_store_for_project(&database, root)?;
+        run_scan_pipeline(&mut writer, &plan, &options)?;
+        writer.set_purpose(
+            "lib.rs",
+            "Retain authored source purpose",
+            projectatlas_core::PurposeSource::Agent,
+        )?;
+        let before = writer.index_publication()?;
+        let identity = writer.project_instance_id()?;
+        let revision = writer.authored_purpose_revision()?;
+        let state = McpProjectState {
+            root: plan.root.clone(),
+            db_path: database,
+            config_path: Some(config),
+            worktree: None,
+        };
+        // A forbidden retry would reconcile this real pending source change.
+        fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
+        let incomplete = |policy_work_limit| {
+            CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                policy_work_limit,
+                project_root: lossless_project_root_display(root),
+                worktree: None,
+                status: crate::runtime::IndexReadStatus::VerificationIncomplete,
+                reason: crate::runtime::IndexVerificationReason::PolicyUnavailable,
+                scope: crate::runtime::IndexRefreshScope::Full,
+                message: "policy matching exceeds DirectoryContexts: observed 1, limit 0"
+                    .to_owned(),
+            }))
+        };
+        for resource in [
+            crate::runtime::VerificationWorkLimit::Policy(
+                projectatlas_fs::PolicyMatchResource::DirectoryContexts,
+            ),
+            crate::runtime::VerificationWorkLimit::DocumentPrefixes,
+            crate::runtime::VerificationWorkLimit::DocumentRows,
+        ] {
+            let quota = incomplete(Some(resource));
+            let encoded: serde_json::Value =
+                toon_format::decode_default(&ProjectAtlasMcpServer::encode_error_payload(&quota))?;
+            require(
+                encoded
+                    .pointer("/error/verification_incomplete/reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("policy_unavailable")
+                    && encoded
+                        .pointer("/error/verification_incomplete/policy_work_limit")
+                        .is_none(),
+                "policy quota changed the wire contract",
+            )?;
+            require(
+                matches!(ProjectAtlasMcpServer::run_watch_after_observation(
+            &state, &state, &plan, &options, &control, Some(Err(quota)),
+        ), Err(CliError::VerificationIncomplete(report)) if report.policy_work_limit.is_some()),
+                "observed watch restarted exhausted policy work",
+            )?;
+            require(
+                writer.index_publication()? == before,
+                "quota refusal published pending source changes",
+            )?;
+        }
+        ProjectAtlasMcpServer::run_watch_after_observation(
+            &state,
+            &state,
+            &plan,
+            &options,
+            &control,
+            Some(Err(incomplete(None))),
+        )?;
+        require(
+            writer.index_publication()? != before,
+            "ordinary incomplete verification lost refresh recovery",
+        )?;
+        require(
+            writer.project_instance_id()? == identity
+                && writer.authored_purpose_revision()? == revision,
+            "observed refresh/refusal changed identity or authored purposes",
         )?;
         Ok(())
     }
