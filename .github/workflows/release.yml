@@ -288,7 +288,18 @@ jobs:
           CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
             --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit \
             -- --exact --include-ignored --nocapture
-          CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          runtime_digest_before="$("${digest_command[@]}" target/release/projectatlas)"
+          cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          runtime_digest_after="$("${digest_command[@]}" target/release/projectatlas)"
+          if [[ "$runtime_digest_after" != "$runtime_digest_before" ]]; then
+            echo "Release helper build changed the shipping runtime." >&2
+            exit 1
+          fi
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
@@ -299,7 +310,7 @@ jobs:
             fi
             cp "$binary" "contract-artifacts/bin/$binary_name"
           done
-          cp "$contract_target/release/optional_parser_pack_release" contract-artifacts/bin/optional_parser_pack_release
+          cp target/release/optional_parser_pack_release contract-artifacts/bin/optional_parser_pack_release
           cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -415,8 +426,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --release --all-features -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit -- --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $shippingTarget = Join-Path $env:GITHUB_WORKSPACE "target"
+          $shippingRuntime = Join-Path $shippingTarget "release\projectatlas.exe"
+          $runtimeDigestBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $shippingRuntime).Hash
+          $env:CARGO_TARGET_DIR = $shippingTarget
           cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runtimeDigestAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $shippingRuntime).Hash
+          if ($runtimeDigestAfter -ne $runtimeDigestBefore) {
+            throw "Release helper build changed the shipping runtime."
+          }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
@@ -426,7 +445,7 @@ jobs:
             }
             Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
           }
-          Copy-Item -LiteralPath (Join-Path $contractTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
+          Copy-Item -LiteralPath (Join-Path $shippingTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
           @'
           param(
             [Parameter(ValueFromRemainingArguments = $true)]
