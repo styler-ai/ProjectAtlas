@@ -66,6 +66,16 @@ Select the smallest measured improvement in the owning code: avoid redundant tra
 
 Preserve selection, ignores, parser provenance, document partial coverage, source/summary/text/symbol/relation completeness and existing force/rebuild semantics. A required full rebuild cannot be replaced by an unrelated cached no-op. Exact cold/full work necessarily inspects the source evidence it needs; the target is efficient bounded work, not an unsupported constant-time promise. Initial/full/rebuild paths must meet improvement targets, not merely avoid a regression.
 
+Full normalized-graph replacement clears dependency/export owner rows and source
+occurrences before their parent keys, relations and entities. Reuse one private
+storage helper in disposable staging reset, staged full publication, in-memory
+full publication and the root-path replacement sentinel. Keep each caller's
+existing identity checks and transaction/savepoint, and keep identity-rejection
+handling separate. This avoids repeated foreign-key cascade work without changing
+schema, read indexes, durability, sparse affected-path replacement or authored
+state. Causal SQLite coverage checks remaining child work at parent deletion and
+late-publication rollback; the installed product targets remain independent proof.
+
 ### Reuse trustworthy observations; handle missing history honestly
 
 For explicit one-shot refresh, both long-lived MCP and fresh CLI reconcile source exactly. The existing observer may retain operation-local source evidence for the writer, but native callback delivery cannot establish a zero-work freshness witness. A read stamp alone is not permission to publish.

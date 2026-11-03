@@ -4106,11 +4106,8 @@ impl AtlasStore {
         }
         let transaction = self.connection.transaction()?;
         require_bound_project_identity(&transaction, project)?;
-        transaction.execute("DELETE FROM graph_resolution_keys", [])?;
-        transaction.execute("DELETE FROM graph_coverage", [])?;
+        clear_repository_graph_content(&transaction)?;
         transaction.execute("DELETE FROM graph_identity_rejections", [])?;
-        transaction.execute("DELETE FROM graph_relations", [])?;
-        transaction.execute("DELETE FROM graph_entities", [])?;
         Ok(RepositoryGraphStagingGuard {
             transaction,
             project,
@@ -4267,6 +4264,21 @@ const GRAPH_STAGE_COPY_TABLES: &[(&str, &str)] = &[
         "project_instance_id, relation_key, owner_path, resolution_domain, key_digest",
     ),
 ];
+
+/// Clear full-replacement graph children before their parents to avoid cascading row probes.
+/// The caller retains transaction ownership and separately handles identity rejections.
+fn clear_repository_graph_content(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(
+        "DELETE FROM graph_relation_dependencies;
+         DELETE FROM graph_entity_exports;
+         DELETE FROM graph_relation_occurrences;
+         DELETE FROM graph_coverage;
+         DELETE FROM graph_relations;
+         DELETE FROM graph_entities;
+         DELETE FROM graph_resolution_keys;",
+    )?;
+    Ok(())
+}
 
 /// Non-unique graph read indexes rebuilt once after a full bulk replacement.
 const GRAPH_REBUILDABLE_INDEX_NAMES: &[&str] = &[
@@ -4428,10 +4440,7 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
         let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
-        savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
-        savepoint.execute("DELETE FROM graph_coverage", [])?;
-        savepoint.execute("DELETE FROM graph_relations", [])?;
-        savepoint.execute("DELETE FROM graph_entities", [])?;
+        clear_repository_graph_content(&savepoint)?;
         drop_graph_rebuildable_indexes(&savepoint)?;
         for (table, columns) in GRAPH_STAGE_COPY_TABLES {
             copy_graph_stage_table(&staging.connection, &savepoint, table, columns, control)?;
@@ -4505,10 +4514,7 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
         let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
-        savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
-        savepoint.execute("DELETE FROM graph_coverage", [])?;
-        savepoint.execute("DELETE FROM graph_relations", [])?;
-        savepoint.execute("DELETE FROM graph_entities", [])?;
+        clear_repository_graph_content(&savepoint)?;
         drop_graph_rebuildable_indexes(&savepoint)?;
         insert_graph_batch(
             &savepoint,
@@ -4595,10 +4601,7 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         if affected_paths.iter().any(|path| path.as_str() == ".") {
             prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
-            savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
-            savepoint.execute("DELETE FROM graph_coverage", [])?;
-            savepoint.execute("DELETE FROM graph_relations", [])?;
-            savepoint.execute("DELETE FROM graph_entities", [])?;
+            clear_repository_graph_content(&savepoint)?;
             insert_graph_batch(
                 &savepoint,
                 project,
@@ -10810,6 +10813,143 @@ mod tests {
             "resolved ambiguous and unresolved dependency owners",
         )?;
         reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_graph_clear_avoids_foreign_key_cascade_work() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("graph-clear");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture = publish_resolution_fixture(&mut store, "graph-clear")?;
+        store.connection.execute_batch(
+            "CREATE TEMP TABLE graph_cascade_work(children INTEGER NOT NULL);
+             CREATE TEMP TRIGGER resolution_delete_work
+             BEFORE DELETE ON main.graph_resolution_keys
+             BEGIN
+                 INSERT INTO graph_cascade_work
+                 SELECT (SELECT COUNT(*) FROM graph_entity_exports
+                          WHERE project_instance_id = OLD.project_instance_id
+                            AND resolution_domain = OLD.resolution_domain
+                            AND key_digest = OLD.key_digest)
+                      + (SELECT COUNT(*) FROM graph_relation_dependencies
+                          WHERE project_instance_id = OLD.project_instance_id
+                            AND resolution_domain = OLD.resolution_domain
+                            AND key_digest = OLD.key_digest);
+             END;
+             CREATE TEMP TRIGGER relation_delete_work
+             BEFORE DELETE ON main.graph_relations
+             BEGIN
+                 INSERT INTO graph_cascade_work
+                 SELECT COUNT(*) FROM graph_relation_occurrences
+                  WHERE relation_key = OLD.relation_key;
+             END;",
+        )?;
+        let transaction = store.connection.transaction()?;
+        clear_repository_graph_content(&transaction)?;
+        let (parents, children) = transaction.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(children), 0) FROM graph_cascade_work",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        require(parents > 0, "graph clear did not exercise parent deletion")?;
+        require_eq(
+            &children,
+            &0,
+            "full graph clear repeated child work through cascades",
+        )?;
+        for (table, _) in GRAPH_STAGE_COPY_TABLES {
+            let count =
+                transaction.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+            require_eq(&count, &0, &format!("full clear empties {table}"))?;
+        }
+        transaction.rollback()?;
+        require_eq(
+            &store
+                .repository_resolution_candidates(&fixture.resolved, 10)?
+                .rows,
+            &vec![fixture.graph.entities[4].clone()],
+            "rolled-back clear retains the published resolution witness and owner",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_graph_clear_rolls_back_with_late_publication_failure() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("graph-clear-rollback");
+        fs::create_dir(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let fixture = publish_resolution_fixture(&mut store, "graph-clear-rollback")?;
+        store.set_purpose(
+            "src/Äuth.rs",
+            "Own the current source behavior",
+            projectatlas_core::PurposeSource::Agent,
+        )?;
+        let revision = store.authored_purpose_revision()?;
+        let before = store
+            .load_node_by_path("src/Äuth.rs")?
+            .ok_or_else(|| io::Error::other("authored source missing"))?
+            .purpose;
+        let missing = GraphEntity::new(
+            fixture.graph.project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("missing.rs"))?,
+            },
+            IndexGeneration::new(2),
+        )?;
+        {
+            let mut publication = store.begin_index_publication("graph-clear-rollback")?;
+            let error = require_db_error(
+                publication.replace_repository_graph_with_resolution_keys(
+                    fixture.graph.project,
+                    &[missing],
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                ),
+                "unindexed replacement unexpectedly passed its late source constraint",
+            )?;
+            require(
+                matches!(error, DbError::Sqlite(_)),
+                "late graph failure was not a storage constraint",
+            )?;
+        }
+        require_eq(
+            &store
+                .repository_resolution_candidates(&fixture.resolved, 10)?
+                .rows,
+            &vec![fixture.graph.entities[4].clone()],
+            "failed replacement retains resolution witnesses and owners",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &revision,
+            "failed clear retains authored revision",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("src/Äuth.rs")?
+                .ok_or_else(|| io::Error::other("retained authored source missing"))?
+                .purpose,
+            &before,
+            "failed clear retains approved purpose",
+        )?;
+        let foreign_key_errors = store.connection.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &foreign_key_errors,
+            &0,
+            "failed clear retains foreign-key integrity",
+        )?;
         Ok(())
     }
 
