@@ -280,6 +280,9 @@ jobs:
           CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
             --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
             --test e2e_worktrees --test e2e_maintenance --no-run
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
+            --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit \
+            -- --exact --include-ignored --nocapture
           CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
@@ -404,6 +407,8 @@ jobs:
           $contractTarget = Join-Path $env:RUNNER_TEMP "projectatlas-contract-target"
           $env:CARGO_TARGET_DIR = $contractTarget
           cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --release --all-features -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit -- --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

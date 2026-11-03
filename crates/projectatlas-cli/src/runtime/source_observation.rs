@@ -41,6 +41,16 @@ const MAX_POLICY_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
 /// Fixed SQLite sidecar names belonging to one captured database namespace.
 const DATABASE_RUNTIME_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
+/// Send test-only native observer evidence through libtest's captured diagnostics.
+#[cfg(test)]
+#[expect(
+    clippy::print_stderr,
+    reason = "Native observer test evidence must use libtest capture"
+)]
+pub(super) fn report_observation_test_diagnostic(message: fmt::Arguments<'_>) {
+    eprintln!("{message}");
+}
+
 /// Whether exact verification may repair a bounded delta before returning a read.
 #[derive(Clone, Copy)]
 enum SourceRepairPolicy {
@@ -245,10 +255,18 @@ impl VerifiedMutationAdmission {
         verify_source: impl FnOnce() -> Result<(), CliError>,
     ) -> Result<(), CliError> {
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
+            #[cfg(test)]
+            report_observation_test_diagnostic(format_args!(
+                "mutation observer rejected before exact-source comparison: {entry:?}"
+            ));
             entry.invalidate_epoch(epoch);
             return Err(error);
         }
         if let Err(error) = verify_source() {
+            #[cfg(test)]
+            report_observation_test_diagnostic(format_args!(
+                "mutation exact-source comparison rejected: error={error}, entry={entry:?}"
+            ));
             if matches!(error, CliError::RefreshRequired(_)) {
                 entry.invalidate_after_proven_source_mismatch()?;
             } else {
@@ -257,6 +275,10 @@ impl VerifiedMutationAdmission {
             return Err(error);
         }
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
+            #[cfg(test)]
+            report_observation_test_diagnostic(format_args!(
+                "mutation observer rejected after exact-source comparison: {entry:?}"
+            ));
             entry.invalidate_epoch(epoch);
             return Err(error);
         }
@@ -485,6 +507,10 @@ impl RuntimeEventIngress {
                     || self.binding.database_target.as_ref() == Some(&candidate)
             });
         if main_replaced {
+            #[cfg(test)]
+            report_observation_test_diagnostic(format_args!(
+                "source observer database namespace invalidated: event={event:?}"
+            ));
             selection.require_recursive_rebind();
         }
         selected || self.may_affect(event)
@@ -816,13 +842,13 @@ impl SourceObservationEntry {
         if self.continuity_lost.load(Ordering::Acquire)
             || self.policy_selection.recursive_rebind_pending()
         {
-            #[cfg(all(test, windows))]
-            eprintln!(
-                "source observer drain refused: root={:?}, continuity_lost={}, recursive_rebind={}",
-                self.binding.root,
+            #[cfg(test)]
+            report_observation_test_diagnostic(format_args!(
+                "source observer drain refused: root={}, continuity_lost={}, recursive_rebind={}",
+                self.binding.root.display(),
                 self.continuity_lost.load(Ordering::Acquire),
                 self.policy_selection.recursive_rebind_pending()
-            );
+            ));
             self.invalidate();
             return Ok(true);
         }
@@ -862,16 +888,16 @@ impl SourceObservationEntry {
                             || self.preserve_consumed_event(
                                 inputs.ancestor_bindings_changed(&filtered, control),
                             )?;
-                        #[cfg(all(test, windows))]
+                        #[cfg(test)]
                         if event_changes.has_changes() {
-                            eprintln!(
+                            report_observation_test_diagnostic(format_args!(
                                 "source observer event invalidated epoch: root={:?}, database={:?}, event={filtered:?}, full={}, source={:?}, documents={:?}",
                                 self.binding.root,
                                 self.binding.database,
                                 event_changes.requires_full_scan,
                                 event_changes.paths,
                                 event_changes.document_paths
-                            );
+                            ));
                         }
                         changes.merge(event_changes);
                     }
@@ -4248,6 +4274,111 @@ mod tests {
             "mutation admission reused the warm source epoch",
         )?;
         admission.verify()?;
+        Ok(())
+    }
+
+    #[test]
+    fn native_mutation_admission_retains_preexisting_source_repair_through_commit()
+    -> Result<(), Box<dyn Error>> {
+        for warm in [false, true] {
+            for apply in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let (database, source) = indexed_project(temp.path())?;
+                let registry = SourceObservationRegistry::default();
+                let control = test_control();
+                let queued = {
+                    let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+                    store
+                        .load_purpose_curation_batch("native-review", &["source.rs".to_string()])?
+                };
+                let selected = queued
+                    .items
+                    .first()
+                    .ok_or_else(|| std::io::Error::other("queued source missing"))?;
+                if warm {
+                    registry.with_verified_read(
+                        &database,
+                        temp.path(),
+                        None,
+                        &control,
+                        |store, _stamp| Ok(store.overview()?),
+                    )?;
+                }
+                let revised = "fn revised_before_admission() {}\n";
+                fs::write(&source, revised)?;
+                let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+                let binding = SourceBinding::new(&database, temp.path(), None)?;
+                require(
+                    registry
+                        .entries
+                        .lock()
+                        .map_err(|_poisoned| lock_error(temp.path(), "native test registry"))?
+                        .contains_key(&binding),
+                    "native mutation regression used observer-unavailable fallback",
+                )?;
+                report_observation_test_diagnostic(format_args!(
+                    "native mutation admitted: warm={warm}, apply={apply}, observed={}",
+                    matches!(&admission.witness, MutationSourceWitness::Observed { .. })
+                ));
+                if !warm {
+                    require(
+                        matches!(&admission.witness, MutationSourceWitness::Observed { .. }),
+                        "cold native mutation regression did not exercise observer verification",
+                    )?;
+                }
+                let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+                let before_revision = store.authored_purpose_revision()?;
+                let transaction = store.begin_purpose_mutation()?;
+                if apply {
+                    store.set_purpose(
+                        "source.rs",
+                        "Current source responsibility",
+                        PurposeSource::Agent,
+                    )?;
+                } else {
+                    let report = super::super::review_purposes(
+                        &store,
+                        &[super::super::PurposeReviewRequest {
+                            path: "source.rs".to_string(),
+                            purpose: Some("Current source responsibility".to_string()),
+                            confirm_existing: false,
+                            task: Some(queued.task.clone()),
+                            work_key: Some(selected.work_key.clone()),
+                            state_token: Some(selected.state_token.clone()),
+                        }],
+                        true,
+                    )?;
+                    require(
+                        report.changed == 0
+                            && report.conflicts == 1
+                            && report.failed == 0
+                            && report.items.first().is_some_and(|item| {
+                                matches!(&item.action, super::super::PurposeReviewAction::Stale)
+                            }),
+                        "repaired source did not stale the previous conditional review",
+                    )?;
+                }
+                if let Err(error) = admission.verify() {
+                    transaction.rollback()?;
+                    return Err(std::io::Error::other(format!(
+                        "native purpose commit rejected quiescent repaired source: warm={warm}, apply={apply}, error={error}"
+                    )).into());
+                }
+                transaction.commit()?;
+                let node = store
+                    .load_node_by_path("source.rs")?
+                    .ok_or_else(|| std::io::Error::other("reconciled source missing"))?;
+                require(
+                    node.node.content_hash.as_deref()
+                        == Some(blake3::hash(revised.as_bytes()).to_hex().as_str()),
+                    "native mutation admission did not retain the repaired saved source",
+                )?;
+                require(
+                    store.authored_purpose_revision()? == before_revision + u64::from(apply),
+                    "native mutation advanced authored revision outside its applied batch",
+                )?;
+            }
+        }
         Ok(())
     }
 

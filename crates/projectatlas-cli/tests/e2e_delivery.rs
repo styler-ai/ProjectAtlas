@@ -5146,10 +5146,15 @@ gate_status={gate_status}
         )
         .into());
     }
-    if release
-        .matches("cargo test --locked --release --all-features -p projectatlas-cli")
-        .count()
-        != 2
+    let release_commands = release.replace("\\\n", " ");
+    let packaged_contract_builds = release_commands
+        .lines()
+        .filter(|line| line.contains("cargo test") && line.contains("--no-run"))
+        .collect::<Vec<_>>();
+    if packaged_contract_builds.len() != 2
+        || packaged_contract_builds.iter().any(|line| {
+            !line.contains("cargo test --locked --release --all-features -p projectatlas-cli")
+        })
     {
         return Err(io::Error::other(
             "Unix and Windows packaged contract runners must compile all feature-gated contracts",

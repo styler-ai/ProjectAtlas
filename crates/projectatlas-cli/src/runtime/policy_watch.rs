@@ -814,11 +814,11 @@ impl PolicyWatchSelection {
                             .any(|component| matches!(component, std::path::Component::ParentDir)))
             })
         {
-            #[cfg(all(test, windows))]
-            eprintln!(
+            #[cfg(test)]
+            super::source_observation::report_observation_test_diagnostic(format_args!(
                 "source observer recursive coverage invalidated: root={:?}, event={event:?}",
                 self.root
-            );
+            ));
             self.require_recursive_rebind();
         }
         true
