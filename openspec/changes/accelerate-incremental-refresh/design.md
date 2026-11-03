@@ -275,8 +275,9 @@ for that lifetime. There is no added thread, connection pool, persistent cache,
 schema change or new dependency version. The filesystem crate owns a shared
 regular-file opener using its existing Unix `nix` dependency for nonblocking
 opens without controlling-terminal acquisition, then validates descriptor type.
-The database crate's `rustix` dependency remains test-only. A FIFO substituted
-before opening cannot wait for a writer while holding the receiver fence. Supported database symlinks remain
+The database fixture reuses the workspace's portable Unix `nix` API. A FIFO
+substituted before opening cannot wait for a writer while holding the receiver
+fence. Supported database symlinks remain
 followed, subject to the separate canonical-target and selection checks. Coverage
 includes FIFO replacement at capture and path validation, same-object delayed hints with a
 successful purpose commit; copied replacements preserving project/generation;

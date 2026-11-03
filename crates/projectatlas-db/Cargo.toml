@@ -22,7 +22,7 @@ thiserror.workspace = true
 whichdisk.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-rustix.workspace = true
+nix.workspace = true
 
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["trace"] }

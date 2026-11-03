@@ -129,7 +129,9 @@ mod tests {
     #[test]
     fn database_identity_rejects_fifo_replacement_without_waiting_for_a_writer()
     -> Result<(), Box<dyn Error>> {
-        use rustix::fs::{CWD, Mode, OFlags, mkfifoat, openat};
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::os::unix::fs::OpenOptionsExt;
 
         for capture in [false, true] {
             let temp = tempfile::tempdir()?;
@@ -138,7 +140,7 @@ mod tests {
             connection.execute_batch("CREATE TABLE identity(value TEXT);")?;
             let identity = capture_database_file_identity(&connection).ok_or("identity missing")?;
             fs::rename(&selected, temp.path().join("original.db"))?;
-            mkfifoat(CWD, &selected, Mode::RUSR | Mode::WUSR)?;
+            mkfifo(&selected, Mode::S_IRUSR | Mode::S_IWUSR)?;
             let (send, receive) = sync_channel(1);
             let checked_path = selected.clone();
             let worker = std::thread::spawn(move || {
@@ -153,13 +155,11 @@ mod tests {
             // Release an accidentally blocking implementation before joining it;
             // corrected code never needs a FIFO writer to finish its check.
             let _writer = if result.is_err() {
-                openat(
-                    CWD,
-                    &selected,
-                    OFlags::WRONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .ok()
+                fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                    .open(&selected)
+                    .ok()
             } else {
                 None
             };

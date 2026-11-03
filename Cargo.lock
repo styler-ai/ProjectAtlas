@@ -2455,10 +2455,10 @@ version = "0.5.0"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
+ "nix",
  "projectatlas-core",
  "projectatlas-fs",
  "rusqlite",
- "rustix",
  "serde",
  "serde_json",
  "tempfile",
