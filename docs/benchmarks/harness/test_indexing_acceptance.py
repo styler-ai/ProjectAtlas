@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from indexing_acceptance import Campaign
+from indexing_acceptance import Campaign, DENSE_MODULES
 
 
 class AcceptanceTargets(unittest.TestCase):
@@ -63,6 +63,25 @@ class AcceptanceTargets(unittest.TestCase):
             campaign.full_work(complete, 8, "rebuild")
             with self.assertRaisesRegex(AssertionError, "without parser omissions"):
                 campaign.full_work({**complete, "symbols": 96}, 8, "full")
+
+    def test_sparse_work_refuses_missing_duplicate_or_hidden_dense_recovery(self):
+        with tempfile.TemporaryDirectory() as task:
+            campaign = self.campaign(Path(task), .4)
+            complete = {"candidates": DENSE_MODULES, "parsed": DENSE_MODULES,
+                        "unchanged": 0, "symbols": DENSE_MODULES,
+                        "relations": DENSE_MODULES - 1}
+            campaign.sparse_work("candidate", "dense", {"last_symbols": complete}, 0)
+            baseline = {**complete, "parsed": 1, "unchanged": DENSE_MODULES - 1}
+            campaign.sparse_work("baseline", "dense", {"last_symbols": baseline}, 0)
+            for parsed in (1, DENSE_MODULES - 1, DENSE_MODULES + 1):
+                with self.assertRaisesRegex(AssertionError, "exact source parse/recovery work"):
+                    campaign.sparse_work("candidate", "dense",
+                                         {"last_symbols": {**complete, "parsed": parsed}}, 0)
+            with self.assertRaisesRegex(AssertionError, "changed raw-graph output"):
+                campaign.sparse_work("candidate", "dense",
+                                     {"last_symbols": {**complete, "symbols": DENSE_MODULES + 1}}, 0)
+            with self.assertRaisesRegex(AssertionError, "exact source parse/recovery work"):
+                campaign.sparse_work("candidate", "large", {"last_symbols": {"parsed": 2}}, 0)
 
     def test_warm_regression_and_missing_samples_cannot_hide_behind_full_speedups(self):
         with tempfile.TemporaryDirectory() as task:

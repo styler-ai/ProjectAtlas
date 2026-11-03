@@ -1891,7 +1891,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
         .saturating_add(binding_bytes);
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
     let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
-    let graph_work_bytes = symbols
+    let peak_graph_work_bytes = symbols
         .retained_bytes
         .saturating_add(identity_admission.observed_fact_bytes)
         .saturating_add(entity_projection.retained_bytes)
@@ -1899,7 +1899,17 @@ pub(super) fn stage_full_repository_graph_with_limit(
         .saturating_add(document_fact_map_retained_bytes(&document_facts))
         .saturating_add(sources.retained_bytes)
         .saturating_add(document_projection_bytes);
-    let mut staged = if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+    let source_recovery = sources.work;
+    // Key admission, call/import binding and Cargo consumers have finished. Preserve
+    // their original peak budget while freeing proof before raw row materialization.
+    drop(packages);
+    drop(configured_modules);
+    drop(sources);
+    let graphs = graphs
+        .into_iter()
+        .map(SourceGraph::into_bound)
+        .collect::<Vec<_>>();
+    let mut staged = if peak_graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
         finish_projection_in_database_with_documents(
             root,
             nodes,
@@ -1929,7 +1939,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             control,
         )
     }?;
-    staged.source_recovery = sources.work;
+    staged.source_recovery = source_recovery;
     Ok(staged)
 }
 
@@ -2538,6 +2548,24 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
             .saturating_add(sources.retained_bytes)
             .saturating_add(direct_identity_admission.observed_fact_bytes),
     )?;
+    let source_recovery = sources.work;
+    // All source-dependent decisions are owned by the projection now. Reference
+    // vectors and package context must drop before consuming their captured graphs.
+    drop(affected_graphs);
+    drop(binding_graphs);
+    drop(admitted_graphs);
+    drop(package_index_graphs);
+    drop(packages);
+    drop(direct_packages);
+    drop(package_graphs);
+    drop(configured_modules);
+    drop(sources);
+    let affected_graphs = direct_graphs
+        .into_iter()
+        .filter(|graph| affected_graph_paths.contains(&graph.graph().path))
+        .chain(newly_affected_graphs)
+        .map(SourceGraph::into_bound)
+        .collect::<Vec<_>>();
     let mut staged = finish_projection_with_documents(
         project,
         generation,
@@ -2566,7 +2594,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
                     })
                 });
     }
-    staged.source_recovery = sources.work;
+    staged.source_recovery = source_recovery;
     Ok(staged)
 }
 
@@ -7426,8 +7454,8 @@ fn hydrate_reused_identity_admission(
 
 /// One admitted captured source, shared across repeated bounded projection requests.
 struct CapturedSourceGraph {
-    /// Actual parser ordering, independent of persisted row presentation order.
-    graph: SymbolGraph,
+    /// Raw parser ordering retained independently after binding proof is consumed.
+    graph: Arc<SymbolGraph>,
     /// Source identity and ordinal-owned lexical evidence.
     semantics: SourceSemanticFacts,
     /// Identity rejection details produced by the same raw admission boundary.
@@ -7449,7 +7477,36 @@ enum SourceGraph<'a> {
     Persisted(SymbolGraph),
 }
 
-impl SourceGraph<'_> {
+/// Raw graphs retained for row materialization after all binding consumers finish.
+enum BoundSourceGraph<'a> {
+    /// Fresh parser output remains owned by the enclosing symbol stage.
+    Borrowed(&'a SymbolGraph),
+    /// Recovered raw facts outlive their consumed semantic and admission payload.
+    Shared(Arc<SymbolGraph>),
+    /// Persisted graph-only facts need no new reference-counted owner.
+    Owned(SymbolGraph),
+}
+
+impl Borrow<SymbolGraph> for BoundSourceGraph<'_> {
+    fn borrow(&self) -> &SymbolGraph {
+        match self {
+            Self::Borrowed(graph) => graph,
+            Self::Shared(graph) => graph,
+            Self::Owned(graph) => graph,
+        }
+    }
+}
+
+impl<'a> SourceGraph<'a> {
+    /// Consume binding input while retaining the same raw graph and parser ordinals.
+    fn into_bound(self) -> BoundSourceGraph<'a> {
+        match self {
+            Self::Staged { graph, .. } => BoundSourceGraph::Borrowed(graph),
+            Self::Captured(source) => BoundSourceGraph::Shared(Arc::clone(&source.graph)),
+            Self::Persisted(graph) => BoundSourceGraph::Owned(graph),
+        }
+    }
+
     /// Borrow the exact graph whose ordinals own this source proof.
     fn graph(&self) -> &SymbolGraph {
         match self {
@@ -7621,13 +7678,15 @@ impl<'a> SourceBindingCache<'a> {
             .saturating_add(semantics.retained_bytes())
             .saturating_add(admission.observed_fact_bytes)
             .saturating_add(STAGED_GRAPH_ROW_BYTES)
+            // Reserve an additional owner for the independently retained raw graph.
+            .saturating_add(STAGED_GRAPH_ROW_BYTES)
             .saturating_add(path.len() as u64);
         enforce_resolution_registry_budget_with_limit(
             self.retained_bytes.saturating_add(bytes),
             self.retained_limit,
         )?;
         let source = Arc::new(CapturedSourceGraph {
-            graph,
+            graph: Arc::new(graph),
             semantics,
             admission,
         });
@@ -9108,10 +9167,11 @@ mod tests {
         GraphOwners, GraphSymbolIndex, MAX_IN_MEMORY_GRAPH_WORK_BYTES, MAX_INCREMENTAL_GRAPH_BYTES,
         MAX_INCREMENTAL_GRAPH_ROWS, PARTIAL_COVERAGE_REASON, PackageIndex,
         ProjectResolutionRegistry, QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation,
-        SourceGraph, SourceRecoveryWork, StagedRepositoryGraph, build_entity_projection,
-        build_entity_projection_with_config, build_entity_projection_with_config_limit,
-        cleanup_abandoned_graph_staging, coverage_for_graph, document_casefold_resolution_key,
-        document_coverage, document_fact_map_retained_bytes, document_projection_retained_bytes,
+        SourceBindingCache, SourceGraph, SourceRecoveryWork, StagedRepositoryGraph,
+        build_entity_projection, build_entity_projection_with_config,
+        build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging,
+        coverage_for_graph, document_casefold_resolution_key, document_coverage,
+        document_fact_map_retained_bytes, document_projection_retained_bytes,
         enforce_incremental_projection_budget, enforce_incremental_projection_limits,
         enforce_resolution_staging_budget, explicit_external_selector, finish_projection,
         finish_projection_in_database, finish_projection_in_database_with_documents,
@@ -9159,7 +9219,7 @@ mod tests {
         MAX_MARKDOWN_EVIDENCE_BYTES, MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
     };
     use rusqlite::Connection;
-    use std::borrow::Cow;
+    use std::borrow::{Borrow, Cow};
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fmt::Debug;
@@ -9167,6 +9227,7 @@ mod tests {
     use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -20572,6 +20633,45 @@ function helper() {}
             &store.repository_graph_generation()?,
             &Some(base),
             "failed capture preserved publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn bound_graphs_release_recovered_proof_without_copying_raw_facts() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = "module.py";
+        fs::write(
+            temp.path().join(path),
+            "import target\n\ndef caller():\n    target.run()\n",
+        )?;
+        let mut nodes = vec![test_file_node(path, "python")];
+        capture_test_file_hashes(temp.path(), &mut nodes)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut sources = SourceBindingCache::new(temp.path(), &nodes, None);
+        let captured = sources.capture(path, &control)?;
+        require(
+            !captured.semantics.imports().is_empty(),
+            "fixture has no binding proof",
+        )?;
+        let proof = Arc::downgrade(&captured);
+        let raw = Arc::clone(&captured.graph);
+        let graph = SourceGraph::Captured(captured);
+        drop(sources);
+        let bound = graph.into_bound();
+        require(
+            proof.upgrade().is_none(),
+            "materialization retained recovered binding proof",
+        )?;
+        let bound_raw: &SymbolGraph = bound.borrow();
+        require(
+            std::ptr::eq(bound_raw, raw.as_ref()),
+            "raw graph was copied or reordered",
+        )?;
+        require(
+            bound_raw.path == path,
+            "bound graph lost its original source identity",
         )?;
         Ok(())
     }

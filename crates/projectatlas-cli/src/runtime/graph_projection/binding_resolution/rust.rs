@@ -2166,7 +2166,7 @@ mod tests {
             let source = Arc::new(super::BindingSource {
                 source: super::SourceGraph::Captured(Arc::new(
                     super::super::super::CapturedSourceGraph {
-                        graph,
+                        graph: std::sync::Arc::new(graph),
                         semantics: facts,
                         admission: super::super::super::GraphIdentityAdmission::default(),
                     },

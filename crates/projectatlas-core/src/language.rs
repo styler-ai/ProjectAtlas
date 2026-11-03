@@ -2127,7 +2127,20 @@ pub fn semantic_provider_digest() -> String {
 
 /// Hash either achieved runtime truth or accepted minimums deterministically.
 fn hash_language_registry(accepted_only: bool) -> String {
-    hash_language_registry_with_content_rules(accepted_only, CONTENT_DIALECT_RULES)
+    // Both catalogs and their detection rules are immutable for this binary.
+    // Project options and installed parser selections are hashed by their owners.
+    static RUNTIME_DIGEST: OnceLock<String> = OnceLock::new();
+    static ACCEPTED_DIGEST: OnceLock<String> = OnceLock::new();
+    let digest = if accepted_only {
+        &ACCEPTED_DIGEST
+    } else {
+        &RUNTIME_DIGEST
+    };
+    digest
+        .get_or_init(|| {
+            hash_language_registry_with_content_rules(accepted_only, CONTENT_DIALECT_RULES)
+        })
+        .clone()
 }
 
 /// Hash registry truth with an explicit content-rule projection for validation tests.
@@ -3180,6 +3193,11 @@ mod tests {
     #[test]
     fn content_rule_changes_advance_registry_digest() {
         let baseline = hash_language_registry_with_content_rules(false, CONTENT_DIALECT_RULES);
+        assert_eq!(language_registry_digest(), baseline);
+        assert_eq!(
+            accepted_language_capability_digest(),
+            hash_language_registry_with_content_rules(true, CONTENT_DIALECT_RULES)
+        );
         let mut changed = CONTENT_DIALECT_RULES.to_vec();
         changed[0].language = "ruby";
         assert_ne!(

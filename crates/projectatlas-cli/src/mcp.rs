@@ -44,12 +44,11 @@ use crate::runtime::{
     strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
     validated_indexed_file_key, watcher_status_report,
 };
-#[cfg(all(test, unix))]
-use crate::runtime::{IndexReadStatus, IndexRefreshReason, IndexRefreshScope};
 #[cfg(test)]
 use crate::runtime::{
-    PURPOSE_CURATOR_RECOMMENDED_REASONING, db_sidecar_path, mcp_config_path_for_db,
-    run_scan_pipeline, synchronize_registered_worktree_usage,
+    IndexReadStatus, IndexRefreshReason, IndexRefreshScope, PURPOSE_CURATOR_RECOMMENDED_REASONING,
+    db_sidecar_path, mcp_config_path_for_db, run_scan_pipeline,
+    synchronize_registered_worktree_usage,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,

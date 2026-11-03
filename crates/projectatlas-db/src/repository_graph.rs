@@ -5544,6 +5544,9 @@ fn validate_resolution_key_batch(
     Ok(())
 }
 
+/// Bound temporary borrowed witnesses independently of publication cardinality.
+const MAX_CACHED_RESOLUTION_WITNESSES: usize = 1024;
+
 /// Insert a validated resolution-key projection through prepared owner statements.
 fn insert_resolution_key_batch(
     connection: &Connection,
@@ -5597,8 +5600,13 @@ fn insert_resolution_key_batch(
          DO UPDATE SET owner_path = excluded.owner_path",
     )?;
 
+    let cache_capacity = entity_exports
+        .len()
+        .saturating_add(relation_dependencies.len())
+        .min(MAX_CACHED_RESOLUTION_WITNESSES);
+    let mut witnessed = HashSet::with_capacity(cache_capacity);
     for binding in entity_exports {
-        insert_resolution_key(&mut insert_key, binding.key())?;
+        insert_resolution_key_with_cache(&mut insert_key, &mut witnessed, binding.key())?;
         let key = binding.key();
         let inserted = insert_export.execute(params![
             &project.as_bytes()[..],
@@ -5614,7 +5622,7 @@ fn insert_resolution_key_batch(
         }
     }
     for binding in relation_dependencies {
-        insert_resolution_key(&mut insert_key, binding.key())?;
+        insert_resolution_key_with_cache(&mut insert_key, &mut witnessed, binding.key())?;
         let key = binding.key();
         let inserted = insert_dependency.execute(params![
             &project.as_bytes()[..],
@@ -5627,6 +5635,24 @@ fn insert_resolution_key_batch(
                 table: "graph_relation_dependencies",
                 reason: "dependency keys require a local file, symbol, or package source",
             });
+        }
+    }
+    Ok(())
+}
+
+/// Reuse a witness only after its complete identity passed this batch's SQL guard.
+/// Owner inserts cannot change witnesses; a cache miss or different canonical
+/// identity always returns to the ordinary collision check. The bounded set
+/// borrows inputs; excess distinct keys still follow the ordinary SQL path.
+fn insert_resolution_key_with_cache<'key>(
+    statement: &mut rusqlite::CachedStatement<'_>,
+    witnessed: &mut HashSet<&'key CanonicalResolutionKey>,
+    key: &'key CanonicalResolutionKey,
+) -> DbResult<()> {
+    if !witnessed.contains(key) {
+        insert_resolution_key(statement, key)?;
+        if witnessed.len() < MAX_CACHED_RESOLUTION_WITNESSES {
+            witnessed.insert(key);
         }
     }
     Ok(())
@@ -10785,6 +10811,125 @@ mod tests {
         )?;
         reader.finish_index_read_snapshot()?;
         Ok(())
+    }
+
+    #[test]
+    fn shared_resolution_witnesses_preserve_all_export_and_dependency_owners()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("shared-resolution-witnesses");
+        fs::create_dir_all(&project_root)?;
+        let mut store =
+            AtlasStore::open_for_project(&project_root.join("projectatlas.db"), &project_root)?;
+        store.connection.execute_batch(
+            "CREATE TEMP TABLE witness_writes(value INTEGER NOT NULL);
+             CREATE TEMP TRIGGER count_witness_insert
+             AFTER INSERT ON main.graph_resolution_keys
+             BEGIN INSERT INTO witness_writes VALUES(1); END;
+             CREATE TEMP TRIGGER count_witness_update
+             AFTER UPDATE ON main.graph_resolution_keys
+             BEGIN INSERT INTO witness_writes VALUES(1); END;",
+        )?;
+        // One key is shared by duplicate exports and a dependency. Its SQL
+        // witness is written once while every distinct owner still persists.
+        let fixture = publish_resolution_fixture(&mut store, "shared-resolution-witnesses")?;
+        let counts = store.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM witness_writes),
+                    (SELECT COUNT(*) FROM graph_resolution_keys),
+                    (SELECT COUNT(*) FROM graph_entity_exports),
+                    (SELECT COUNT(*) FROM graph_relation_dependencies)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &counts,
+            &(3, 3, 1, 3),
+            "shared witness writes and exact owners",
+        )?;
+        // Reuse is local to one batch: corrupt pre-existing witnesses must still
+        // fail the original SQL collision check on the next publication.
+        store.connection.execute(
+            "UPDATE graph_resolution_keys SET canonical_identity = 'conflicting witness'
+              WHERE project_instance_id = ?1 AND resolution_domain = ?2 AND key_digest = ?3",
+            params![
+                &fixture.graph.project.as_bytes()[..],
+                fixture.resolved.domain().as_str(),
+                &fixture.resolved.digest_bytes()[..]
+            ],
+        )?;
+        let export =
+            EntityResolutionKey::new(fixture.graph.entities[4].key().clone(), fixture.resolved)?;
+        let error = require_db_error(
+            insert_resolution_key_batch(&store.connection, fixture.graph.project, &[export], &[]),
+            "witness reuse accepted a persisted canonical collision",
+        )?;
+        require(
+            matches!(error, DbError::ResolutionKeyCollision { .. }),
+            "persisted witness collision returned the wrong error",
+        )
+    }
+
+    #[test]
+    fn resolution_witness_cache_overflow_preserves_uncached_owners() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let project_root = temp.path().join("resolution-witness-overflow");
+        fs::create_dir_all(&project_root)?;
+        let mut store =
+            AtlasStore::open_for_project(&project_root.join("projectatlas.db"), &project_root)?;
+        let fixture = publish_resolution_fixture(&mut store, "resolution-witness-overflow")?;
+        store.connection.execute_batch(
+            "CREATE TEMP TABLE witness_updates(value INTEGER NOT NULL);
+             CREATE TEMP TRIGGER count_overflow_witness_update
+             AFTER UPDATE ON main.graph_resolution_keys
+             BEGIN INSERT INTO witness_updates VALUES(1); END;",
+        )?;
+        let distinct = MAX_CACHED_RESOLUTION_WITNESSES + 2;
+        let mut exports = Vec::with_capacity(distinct + 2);
+        for index in 0..distinct {
+            let key = declaration_key(
+                fixture.graph.project,
+                &format!("overflow_target_{index}"),
+                GraphRelationKind::Legacy(RelationKind::Calls),
+            )?;
+            exports.push(EntityResolutionKey::new(
+                fixture.graph.entities[4].key().clone(),
+                key,
+            )?);
+        }
+        // The first key is cached; the last exceeds the cache. Repeating both
+        // proves that overflow uses SQL while an admitted witness remains reusable.
+        exports.push(exports[0].clone());
+        exports.push(exports[distinct - 1].clone());
+        insert_resolution_key_batch(&store.connection, fixture.graph.project, &exports, &[])?;
+        let counts = store.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM graph_resolution_keys),
+                    (SELECT COUNT(*) FROM graph_entity_exports),
+                    (SELECT COUNT(*) FROM witness_updates)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        require_eq(
+            &counts,
+            &(
+                i64::try_from(distinct + 3)?,
+                i64::try_from(distinct + 1)?,
+                1,
+            ),
+            "overflow exact witnesses, owners and uncached SQL update",
+        )
     }
 
     #[test]

@@ -5842,11 +5842,9 @@ mod tests {
         required_mcp_surface_present,
     };
     #[cfg(unix)]
+    use super::runtime::{IndexProjectMismatch, lossless_project_root_display};
     use super::runtime::{
-        IndexProjectMismatch, IndexReadStatus, IndexRefreshReason, IndexRefreshRequired,
-        IndexRefreshScope, lossless_project_root_display,
-    };
-    use super::runtime::{
+        IndexReadStatus, IndexRefreshReason, IndexRefreshRequired, IndexRefreshScope,
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
         event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
         refresh_structural_summaries_for_nodes, refresh_text_index_for_nodes,

@@ -27,6 +27,7 @@ from mcp_composition import McpClient, spawn_owned_process, terminate_owned_proc
 
 SOURCE_FILE = "src/group_0/module_0.rs"
 DECLARATIONS_PER_FILE = 12
+DENSE_MODULES = 256
 COMMAND_TIMEOUT = 1800
 
 
@@ -224,6 +225,21 @@ class Campaign:
                    and all(symbols.get(field) == 0 for field in ("too_large", "binary_or_non_utf8", "timed_out")),
                    name + ": complete expected declarations and calls without parser omissions")
 
+    def sparse_work(self, runtime: str, kind: str, payload: dict, iteration: int) -> None:
+        """Count required source recovery separately from changed raw-graph output."""
+        symbols = payload.get("last_symbols", {})
+        # Current binding evidence is transient and retains original parser ordinals.
+        # Dense full-closure fallback must recover every unchanged import source.
+        expected = DENSE_MODULES if runtime == "candidate" and kind == "dense" else 1
+        self.check(symbols.get("parsed") == expected,
+                   runtime + " " + kind + " refresh accounts for exact source parse/recovery work")
+        if kind == "dense":
+            self.check(symbols.get("candidates") == DENSE_MODULES
+                       and symbols.get("unchanged") == DENSE_MODULES - expected
+                       and symbols.get("symbols") == DENSE_MODULES + iteration
+                       and symbols.get("relations") == DENSE_MODULES - 1,
+                       runtime + " dense refresh retains exact changed raw-graph output and work totals")
+
     def reference(self, root: Path) -> None:
         for runtime in self.runtimes:
             fixture(root / runtime)
@@ -380,11 +396,11 @@ class Campaign:
             self.run(runtime, large, ["purpose", "set", SOURCE_FILE, "Preserve large-fixture authored purpose."])
             dense = root / runtime / "dense"
             dense.mkdir()
-            for index in range(256):
+            for index in range(DENSE_MODULES):
                 (dense / f"module_{index}.py").write_text(
-                    "".join(f"import module_{target}\n" for target in range(256) if target != index), encoding="utf-8")
+                    "".join(f"import module_{target}\n" for target in range(DENSE_MODULES) if target != index), encoding="utf-8")
             self.run(runtime, dense, ["init"], "dense_initial")
-            self.check(state(dense)["counts"]["symbol_relations"] >= 256 * 255,
+            self.check(state(dense)["counts"]["symbol_relations"] >= DENSE_MODULES * (DENSE_MODULES - 1),
                        runtime + " dense corpus contains complete intended relationships")
         for iteration in range(3):
             order = ("baseline", "candidate") if iteration % 2 == 0 else ("candidate", "baseline")
@@ -398,8 +414,7 @@ class Campaign:
                     with (current / source_file).open("a", encoding="utf-8") as source:
                         source.write(addition)
                     report = self.run(runtime, current, ["watch", "--once"], kind + "_sparse")
-                    self.check(report.get("last_symbols", {}).get("parsed") == 1,
-                               runtime + " " + kind + " refresh reuses unchanged parse results")
+                    self.sparse_work(runtime, kind, report, iteration)
                     if kind == "large" and runtime == "candidate":
                         self.check(report.get("text_index", {}).get("indexed") == 1,
                                    "large sparse refresh stages only the changed text")

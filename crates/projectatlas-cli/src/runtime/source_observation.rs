@@ -1559,7 +1559,7 @@ impl SourceObservationRegistry {
             // Mutation authority also starts from exact saved source under this lock.
             if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
                 entry.invalidate();
-            } else {
+            } else if entry.current_epoch()?.is_some() {
                 let plan = ScanRuntimePlan::for_path_controlled(
                     entry.binding.config.as_deref(),
                     &entry.binding.root,
@@ -3666,6 +3666,71 @@ mod tests {
         require(
             entry.current_epoch()?.is_none(),
             "ignore policy change left a verified epoch installed",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cold_admission_refreshes_policy_coverage_after_missed_events() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let git = temp.path().join(".git");
+        fs::create_dir_all(git.join("info"))?;
+        fs::create_dir_all(git.join("objects"))?;
+        fs::create_dir_all(git.join("refs"))?;
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n")?;
+        fs::write(git.join("config"), "[core]\n")?;
+        let exclude = git.join("info/exclude");
+        fs::write(&exclude, "spared.rs\n")?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let entry = registry
+            .entry(binding.clone(), &control)?
+            .ok_or("cold observer was not admitted")?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "fixture already has an epoch",
+        )?;
+        let prior_selection = entry.policy_selection.snapshot()?;
+        entry.continuity_lost.store(true, Ordering::Release);
+        drop(entry);
+        detach_native_delivery(&registry, &database, temp.path())?;
+        let modified = fs::metadata(&exclude)?.modified()?;
+        fs::write(&exclude, "source.rs\n")?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&exclude)?
+            .set_modified(modified)?;
+        require(
+            prior_selection.policy_state_changed(&control)?,
+            "policy fixture did not change",
+        )?;
+        let outcome = registry.with_verified_read(
+            &database,
+            temp.path(),
+            None,
+            &control,
+            |store, _stamp| Ok(store.load_node_by_path("source.rs")?.is_some()),
+        )?;
+        require(
+            !outcome.value,
+            "cold admission returned the old policy's indexed source",
+        )?;
+        require(
+            outcome.work.exact_verifications >= 1,
+            "cold admission skipped exact source",
+        )?;
+        let current = registry
+            .entry(binding, &control)?
+            .ok_or("cold observer disappeared")?;
+        require(
+            !current
+                .policy_selection
+                .snapshot()?
+                .policy_state_changed(&control)?,
+            "cold exact admission did not refresh policy observation coverage",
         )?;
         Ok(())
     }

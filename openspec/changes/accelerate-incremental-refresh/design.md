@@ -49,6 +49,15 @@ CLI/MCP init, scan and symbol-build adapters keep their existing shared pipeline
 
 Reuse `WatchChangeSet`, the existing source observer, source verification and store transaction boundaries. Do not add parallel adapter implementations or a second source-of-truth index. Keep native project/worktree identity captured throughout the operation.
 
+Cold observer admission skips cached-policy preparation when no verified epoch
+exists under its reconciliation lock; exact source and policy verification still
+runs. Compute the immutable achieved/accepted language-registry digests once per
+process in their existing core owner. Their bytes remain identical to uncached
+catalog hashing; content-rule validation can still hash explicit alternate input.
+Project-specific scan/text settings and installed optional-parser selection remain
+fresh inputs to every publication-contract comparison. No source, policy, root,
+observer or publication check is removed, and no persisted cache or schema is added.
+
 ### Improve initial indexing and real rebuilds
 
 Profile `run_scan_pipeline_controlled`, symbol rebuilding and their shared staging/publication path before selecting optimizations. Measure directory entries, source bytes, hashing, parser work, stored-source decoding, database statements/writes, graph invalidation, validation passes and peak memory. Use separate initial-index, full-scan and explicit symbol/graph-rebuild fixtures; verify that the required work actually ran.
@@ -81,6 +90,16 @@ zero-source-work admission across requests.
 Task 2.1 settles the exact-discovery/cross-invocation evidence contract and a separate cold-CLI target using code analysis and a focused reference check. The selected initial implementation uses exact discovery plus lightweight ordered comparison and affected updates when no trusted history exists. Task 2.4 proves that CLI approach as well as the warm MCP path. A fast MCP result cannot substitute for a slow CLI result.
 
 If exact cold discovery cannot meet that target, publish and review a concrete trustworthy cross-invocation evidence design before implementing that alternative. Cover how history is obtained and retained, root/identity validation, gaps, restart, fallback, ownership and any required process lifetime or deployment behavior. Do not silently introduce a service. Zero-traversal admission for either route is deferred to unscheduled #725; it is not an RC1 acceptance target.
+
+Recovered source semantics remain live through identity/key admission, native
+call/import binding and Cargo-context consumers. At both full and incremental
+projection boundaries, consume that evidence before raw row materialization:
+retain the same immutable raw graph allocation and parser ordinals through a
+separate private ownership type, drop source-cache and package/context owners,
+and preserve recovery counts. Existing pre-release peak-budget checks and spill
+selection remain conservative; the additional raw-graph reference owner is also
+accounted. This shortens coexistence rather than weakening proof, increasing
+limits, copying the corpus or adding persistent state.
 
 ### Apply the delta and avoid repeated whole-project work
 
@@ -159,6 +178,28 @@ verification. Preserve its source/root/watch/publication guards while applying
 external-policy cost references do not waive any preregistered performance,
 unaffected-navigation or supported-upgrade target. Measure required one-time
 contract repair separately from current-contract reuse on the combined source.
+
+Dense acceptance distinguishes actual source recovery from changed raw-graph
+publication. Accepted #731 binding evidence is transient and tied to original
+parser ordinals: the full dense closure recovers 255 unchanged import sources in
+addition to the one changed source. Its oracle must account for all 256 parses,
+exact changed raw output, unchanged authored state and full-scan convergence.
+The earlier dense one-parse expectation is superseded for this contract; the
+large sparse one-parse limit and all numeric latency/throughput/RSS limits remain.
+Existing owning recovery tests protect ordinal correspondence, exact counts and
+source hashes. No persistent parser-evidence cache is justified by this oracle
+correction.
+
+Resolution-key publication reuses validated witnesses within each prepared batch.
+A bounded standard-library set borrows up to 1,024 complete canonical keys without
+cloning their material. Equality includes the complete project/domain/digest/
+canonical witness; every miss goes through the existing SQL collision guard.
+Additional distinct keys use that ordinary path without growing the set or
+refusing a valid publication. All export and dependency owner writes
+still run. Cache lifetime follows one batch inside the existing transaction, with
+no schema, query-plan, connection, WAL or publication-policy change. SQLite trigger
+coverage proves reduced witness writes, exact owner rows and rejection of a corrupt
+persisted witness; unchanged performance and sampled-RSS targets remain required.
 
 ## Open Questions
 
