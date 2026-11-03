@@ -1,10 +1,90 @@
 """Protect acceptance arithmetic and fail-closed completeness without a campaign."""
 
+from contextlib import contextmanager
+import hashlib
+import importlib.util
+import io
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
+import zipfile
 
-from indexing_acceptance import Campaign, DENSE_MODULES
+from indexing_acceptance import Campaign, DENSE_MODULES, archive_runtime_digest, digest, _stream_digest
+
+
+@contextmanager
+def legacy_hashlib():
+    """Exercise native-host compatibility even when this test runs on newer Python."""
+    missing = object()
+    original = getattr(hashlib, "file_digest", missing)
+    if original is not missing:
+        del hashlib.file_digest
+    try:
+        yield
+    finally:
+        if original is not missing:
+            hashlib.file_digest = original
+
+
+class ArchiveIdentity(unittest.TestCase):
+    def release_helper(self, name):
+        path = Path(__file__).resolve().parents[3] / ".github/scripts" / (name + ".py")
+        spec = importlib.util.spec_from_file_location(name.replace("-", "_"), path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_file_hashes_preserve_complete_bytes_on_legacy_python(self):
+        functions = [digest] + [self.release_helper(name).file_sha256 for name in (
+            "prepare-indexing-baseline", "prepare-published-predecessor")]
+        payload = bytes(range(256)) * 9000 + b"final archive bytes"
+        with tempfile.TemporaryDirectory() as task, legacy_hashlib():
+            path = Path(task) / "archive"
+            for contents in (b"", b"abc", payload, payload[:-1] + b"!"):
+                path.write_bytes(contents)
+                expected = hashlib.sha256(contents).hexdigest()
+                for function in functions:
+                    with self.subTest(function=function.__module__, length=len(contents)):
+                        self.assertEqual(function(path), expected)
+            self.assertNotEqual(hashlib.sha256(payload).hexdigest(), digest(path))
+
+    def test_zip_and_tar_runtime_identity_preserves_full_member_bytes(self):
+        payload = bytes(range(256)) * 9000 + b"native runtime tail"
+        with tempfile.TemporaryDirectory() as task, legacy_hashlib():
+            root = Path(task)
+            archive = root / "runtime.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("projectatlas.exe", payload)
+            self.assertEqual(archive_runtime_digest(archive), hashlib.sha256(payload).hexdigest())
+            archive = root / "runtime.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo("projectatlas/projectatlas")
+                member.size = len(payload)
+                package.addfile(member, io.BytesIO(payload))
+            self.assertEqual(archive_runtime_digest(archive), hashlib.sha256(payload).hexdigest())
+
+    def test_tar_link_cannot_stand_in_for_a_regular_runtime(self):
+        with tempfile.TemporaryDirectory() as task, legacy_hashlib():
+            archive = Path(task) / "runtime.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo("projectatlas/projectatlas")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "other-runtime"
+                package.addfile(member)
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                archive_runtime_digest(archive)
+
+    def test_stream_hash_handles_short_reads_without_unbounded_allocation(self):
+        class ShortReads(io.BytesIO):
+            def read(self, size=-1):
+                if not 0 < size <= 1024 * 1024:
+                    raise AssertionError("hashing must request bounded binary chunks")
+                return super().read(min(size, 113))
+
+        payload = bytes(range(256)) * 9000
+        with ShortReads(payload) as source, legacy_hashlib():
+            self.assertEqual(_stream_digest(source), hashlib.sha256(payload).hexdigest())
 
 
 class AcceptanceTargets(unittest.TestCase):

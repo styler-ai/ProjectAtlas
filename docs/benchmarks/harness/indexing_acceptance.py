@@ -31,22 +31,30 @@ DENSE_MODULES = 256
 COMMAND_TIMEOUT = 1800
 
 
+def _stream_digest(source) -> str:
+    """Hash binary streams with bounded reads, including native Python 3.9 hosts."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def digest(path: Path) -> str:
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        return _stream_digest(source)
 
 
 def archive_runtime_digest(path: Path) -> str:
     """Hash the exact native runtime member without extracting archive paths."""
     if path.suffix == ".zip":
         with zipfile.ZipFile(path) as package, package.open("projectatlas.exe") as executable:
-            return hashlib.file_digest(executable, "sha256").hexdigest()
+            return _stream_digest(executable)
     with tarfile.open(path) as package:
         member = package.getmember("projectatlas/projectatlas")
         if not member.isfile():
             raise ValueError("runtime archive member is not a regular file")
         with package.extractfile(member) as executable:
-            return hashlib.file_digest(executable, "sha256").hexdigest()
+            return _stream_digest(executable)
 
 
 def fixture(root: Path, files: int = 1024, padding: int = 0) -> None:

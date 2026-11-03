@@ -170,6 +170,13 @@ Use the actual optimized installed 0.5.0 CLI/MCP as the baseline with normal tel
 
 Record distributions rather than one timing. Record visited entries, hashed bytes, parse candidates, decoded nodes, store statements/writes, generation changes, CPU and RSS where supported. Reuse `SourceVerificationWork` and existing harnesses; keep benchmark-only detail out of normal product output unless a real user contract needs it.
 
+The release helpers and comparison harness must work with native Python 3.9 hosts.
+Hash archive files, extracted executables and ZIP/TAR runtime streams using bounded
+SHA-256 updates rather than the Python 3.11-only `hashlib.file_digest` helper.
+Retain the preregistered archive identities, published-checksum checks, regular
+archive-member checks and exact runtime binding. These untimed input checks do not
+change fixtures, measured operations, telemetry, sample counts or performance targets.
+
 Choose the smallest causal checks for each implementation slice and a focused before/after comparison for its performance claim. Reuse existing fixtures and counters. Run the complete installed/platform matrix at release acceptance; repeat a passing check only for changed inputs, failures, an uncovered behavior or a mandatory gate. Measurement confirms the architecture; it does not replace the architectural work.
 
 The RC1 work-count target for unchanged current-contract source is one exact detection discovery/comparison with no full-node decode, parse work or new publication. Zero-source-work admission is deferred to #725. Delta processing must avoid unrelated parsing/publication. Cold discovery, initial indexing, full reindexing, symbol rebuilding and recovery each have separate targets. Report each result independently so a warm-path gain cannot conceal another slow path. Normal cases must finish within their selected budgets; injected deadlines still prove safe refusal. A larger budget alone is never a performance result. Unaffected navigation and supported upgrades must not regress beyond preregistered noise/resource limits.

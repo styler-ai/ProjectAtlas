@@ -12,6 +12,15 @@ import tarfile
 import zipfile
 
 
+def file_sha256(path):
+    """Hash complete files with bounded reads on the native Python 3.9 hosts."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suffix", required=True, choices=(
@@ -29,8 +38,7 @@ def main():
         "--pattern", asset, "--pattern", "SHA256SUMS", "--dir", str(root),
     ], check=True, timeout=180)
     archive = root / asset
-    with archive.open("rb") as source:
-        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    digest = file_sha256(archive)
     catalog = json.loads((Path(__file__).resolve().parents[2] /
                           "docs/benchmarks/v0.5.1-indexing-baselines.json").read_text(encoding="utf-8"))
     if catalog["baseline_version"] != "0.5.0" or catalog["assets"].get(asset) != digest:
