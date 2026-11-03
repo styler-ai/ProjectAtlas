@@ -268,6 +268,181 @@ fn concurrent_source_visitors_share_one_nonblocking_directory_handle_bound()
 
 #[cfg(unix)]
 #[test]
+fn cursor_falls_back_under_process_descriptor_pressure() -> Result<(), Box<dyn Error>> {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    // Changing a descriptor limit is safe only in this exact isolated child.
+    const CHILD: &str = "PROJECTATLAS_SOURCE_CURSOR_CAPACITY_CHILD";
+    const SELECTOR: &str =
+        "source_reader::cursor_tests::cursor_falls_back_under_process_descriptor_pressure";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = Command::new(std::env::current_exe()?)
+            .args(["--exact", SELECTOR, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let started = Instant::now();
+        let stop_reason = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break None,
+                Ok(None) => {}
+                Err(error) => {
+                    break Some(format!(
+                        "waiting for descriptor-pressure child failed: {error}"
+                    ));
+                }
+            }
+            if started.elapsed() > Duration::from_secs(15) {
+                break Some("isolated descriptor-pressure test exceeded its bound".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if let Some(reason) = &stop_reason {
+            let kill_error = child.kill().err();
+            let stopping = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if stopping.elapsed() < Duration::from_secs(5) => {}
+                    result => return Err(io::Error::other(format!(
+                        "{reason}; child exit unconfirmed: {result:?}; kill error: {kill_error:?}",
+                    ))
+                    .into()),
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return Err(io::Error::other(format!(
+                "{reason}; child reaped; kill error: {kill_error:?}"
+            ))
+            .into());
+        }
+        // Collect pipes only after the exact child has observably exited.
+        let output = child.wait_with_output()?;
+        require(
+            output.status.success(),
+            &format!(
+                "isolated descriptor-pressure control failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        return Ok(());
+    }
+    let original = getrlimit(Resource::RLIMIT_NOFILE)?;
+    require(
+        original.1 >= 64,
+        "native descriptor-pressure fixture requires a hard limit of 64",
+    )?;
+    setrlimit(Resource::RLIMIT_NOFILE, 64, original.1)?;
+    let result = verify_descriptor_pressure_fallback();
+    setrlimit(Resource::RLIMIT_NOFILE, original.0, original.1)?;
+    result
+}
+
+/// Fill actual process slots until the kernel reports the expected capacity error.
+#[cfg(unix)]
+fn occupy_descriptors(held: &mut Vec<File>) -> io::Result<()> {
+    loop {
+        match File::open("/dev/null") {
+            Ok(file) => held.push(file),
+            Err(error) if error.raw_os_error() == Some(nix::libc::EMFILE) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Prove low-handle construction and hot-leaf fallback using real native failures.
+#[cfg(unix)]
+fn verify_descriptor_pressure_fallback() -> Result<(), Box<dyn Error>> {
+    static OCCUPIED: AtomicUsize = AtomicUsize::new(0);
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let mut directory = root.to_path_buf();
+    for _ in 0..DIRECTORY_CURSOR_MAX_DEPTH {
+        directory.push("child");
+    }
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("source.rs");
+    fs::write(&path, b"source under descriptor pressure")?;
+    let linked = root.join("same-object.rs");
+    fs::hard_link(&path, &linked)?;
+    let admitted = fs::symlink_metadata(&path)?;
+    let source_root = SourceRootReader::open(root)?;
+    require(
+        source_root.directory_handle_limit == 8,
+        "cursor did not derive its real capacity from the low soft limit",
+    )?;
+    let mut reader =
+        reader_with_budget(&source_root, &OCCUPIED, source_root.directory_handle_limit);
+    let mut held = Vec::new();
+    occupy_descriptors(&mut held)?;
+    require(
+        held.len() >= 16,
+        "descriptor fixture cannot release enough construction slots",
+    )?;
+    held.truncate(held.len() - 4);
+    require(
+        read(&mut source_root.uncached(), &path)? == b"source under descriptor pressure",
+        "low-handle secure walk could not read the capacity-control source",
+    )?;
+    require(
+        read(&mut reader, &path).is_ok_and(|bytes| bytes == b"source under descriptor pressure")
+            && reader.cursor.is_none()
+            && OCCUPIED.load(Ordering::Relaxed) == 0,
+        "cursor construction exhaustion did not fall back to the successful secure walk",
+    )?;
+
+    // Enough room to establish a hot cursor, then another owner fills the rest.
+    held.truncate(held.len() - 12);
+    read(&mut reader, &path)?;
+    require(
+        reader.cursor.is_some() && OCCUPIED.load(Ordering::Relaxed) == 8,
+        "leaf-exhaustion control did not retain its complete parent chain",
+    )?;
+    occupy_descriptors(&mut held)?;
+    require(
+        read(&mut reader, &path).is_ok_and(|bytes| bytes == b"source under descriptor pressure")
+            && reader.hits == 1
+            && reader.cursor.is_none()
+            && OCCUPIED.load(Ordering::Relaxed) == 0,
+        "hot cursor handle exhaustion did not release ancestors before secure fallback",
+    )?;
+
+    // Hot fallback freed eight ancestor handles. Refill, then leave only four
+    // slots so fixture writes work while the eight-directory cursor cannot fit.
+    occupy_descriptors(&mut held)?;
+    held.truncate(held.len() - 4);
+    // Fallback must still reject a changed file object paired with old metadata.
+    fs::remove_file(&path)?;
+    fs::write(&path, b"replacement under pressure")?;
+    let control = IndexWorkControl::new(IndexCancellation::new(), None);
+    require(
+        reader.open_file(&path, &admitted, &control).is_err()
+            && OCCUPIED.load(Ordering::Relaxed) == 0,
+        "descriptor-pressure fallback paired replacement bytes with old file identity",
+    )?;
+    require(
+        read(&mut reader, &path)? == b"replacement under pressure",
+        "fresh metadata fallback refused a legitimate replacement under pressure",
+    )?;
+    // Use the ORIGINAL regular metadata: following the alias would open exactly
+    // that same inode, so the leaf-identity check cannot hide a no-follow failure.
+    fs::remove_file(&path)?;
+    std::os::unix::fs::symlink(&linked, &path)?;
+    require(
+        reader.open_file(&path, &admitted, &control).is_err()
+            && OCCUPIED.load(Ordering::Relaxed) == 0,
+        "descriptor-pressure fallback followed a same-object source alias",
+    )?;
+    drop(held);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn cached_source_refuses_leaf_and_each_ancestor_alias_even_for_the_same_inode()
 -> Result<(), Box<dyn Error>> {
     static OCCUPIED: AtomicUsize = AtomicUsize::new(0);
@@ -483,6 +658,34 @@ fn cached_windows_leaf_refuses_inside_outside_and_same_object_symlinks()
                 "cached Windows source followed a leaf symlink",
             )?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_cursor_capacity_retry_keeps_non_capacity_failures_strict() -> Result<(), Box<dyn Error>>
+{
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_NO_SYSTEM_RESOURCES,
+        ERROR_NOT_ENOUGH_MEMORY, ERROR_OPERATION_ABORTED, ERROR_TOO_MANY_OPEN_FILES,
+    };
+    for (code, capacity) in [
+        (ERROR_TOO_MANY_OPEN_FILES, true),
+        (ERROR_NO_SYSTEM_RESOURCES, true),
+        (ERROR_ACCESS_DENIED, false),
+        (ERROR_FILE_NOT_FOUND, false),
+        (ERROR_NOT_ENOUGH_MEMORY, false),
+        (ERROR_OPERATION_ABORTED, false),
+    ] {
+        let error = source_error(
+            Path::new("source.rs"),
+            io::Error::from_raw_os_error(code as i32),
+        );
+        require(
+            directory_handle_capacity_error(&error) == capacity,
+            "Windows source retry crossed its native handle-capacity boundary",
+        )?;
     }
     Ok(())
 }

@@ -366,7 +366,15 @@ directory handles per process, and Unix occupancy to at most one eighth of the
 captured soft descriptor limit. Acquire permits without waiting; deeper paths,
 unavailable permits or unsupported platforms use the existing secure walk.
 Close all directory handles before returning permits, including error, cancellation
-and unwinding. A different parent discards the old chain; no chain survives its
+and unwinding. The logical quota cannot know other owners' actual open handles:
+recognized native handle-capacity errors during chain construction or a cached
+source open discard the complete partial/retained chain before retrying the same
+secure lower-handle walk once. Use Unix `EMFILE`/`ENFILE` and the existing Windows
+SDK's too-many-open-files/no-system-resources codes; all identity, no-follow,
+permission, path and control errors remain strict. If fallback fails, return its
+failure. Prove both allocation and hot-cursor exhaustion under a real isolated
+low descriptor limit, including positive bytes/fresh replacement and negative
+stale-identity/same-inode-alias controls. A different parent discards the old chain; no chain survives its
 discovery. Single-target scans remain uncached. Component checks, exact source
 hashing, work counters and publication fences are unchanged; this adds no worker,
 schema, persistent cache or cross-request source witness. Windows native proof

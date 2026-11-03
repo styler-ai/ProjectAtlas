@@ -134,10 +134,18 @@ impl SourceFileReader<'_> {
         control: &IndexWorkControl,
     ) -> FsResult<(File, std::fs::Metadata)> {
         let result = self.open_source(path, admitted_metadata, control);
+        let retry = self.cursor.is_some()
+            && matches!(&result, Err(error) if directory_handle_capacity_error(error));
         if result.is_err() {
             self.cursor = None;
         }
-        result
+        if retry {
+            // Another owner may consume the remaining descriptors after this
+            // cursor was built. Release every extra handle before the retry.
+            self.root.open_file(path, admitted_metadata, control)
+        } else {
+            result
+        }
     }
 
     /// Reuse a verified sibling parent, or use the ordinary secure component walk.
@@ -163,13 +171,19 @@ impl SourceFileReader<'_> {
                 && let Some(permit) =
                     DirectoryHandlePermit::acquire(self.occupied, depth, self.limit)
             {
-                self.cursor = Some(SourceDirectoryCursor::open(
+                self.cursor = match SourceDirectoryCursor::open(
                     &self.root.directory,
                     parent,
                     path,
                     permit,
                     control,
-                )?);
+                ) {
+                    Ok(cursor) => Some(cursor),
+                    // Logical occupancy cannot know the process's other open
+                    // handles. Partial frames/permit have already been dropped.
+                    Err(error) if directory_handle_capacity_error(&error) => None,
+                    Err(error) => return Err(error),
+                };
             }
         }
         let Some(cursor) = &self.cursor else {
@@ -366,6 +380,34 @@ fn directory_handle_limit() -> usize {
     #[cfg(not(any(unix, windows)))]
     {
         0
+    }
+}
+
+/// Only native handle-capacity errors permit the lower-handle traversal retry.
+fn directory_handle_capacity_error(error: &FsError) -> bool {
+    let FsError::Io { source, .. } = error else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        matches!(
+            source.raw_os_error(),
+            Some(nix::libc::EMFILE | nix::libc::ENFILE)
+        )
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{
+            ERROR_NO_SYSTEM_RESOURCES, ERROR_TOO_MANY_OPEN_FILES,
+        };
+        source.raw_os_error().is_some_and(|code| {
+            code == ERROR_TOO_MANY_OPEN_FILES as i32 || code == ERROR_NO_SYSTEM_RESOURCES as i32
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = source;
+        false
     }
 }
 
