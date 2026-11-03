@@ -2,14 +2,75 @@
 
 mod cargo;
 pub(super) mod ecmascript;
+pub(super) mod ecmascript_context;
+mod ecmascript_identifier;
+mod ecmascript_literal;
 pub(super) mod embedded_source;
 mod python;
 mod rust;
 
+pub(super) use ecmascript_identifier::{EcmascriptNameContext, EcmascriptNameRole};
+
 use crate::configured_modules::ConfiguredModuleSource;
 use crate::resolution_keys::{ImportReference, ImportSyntax};
 use projectatlas_core::language::{EmbeddedHostKind, SemanticProviderOwner, language_capability};
-use projectatlas_core::symbols::{ParserKind, SymbolGraph};
+use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
+use tree_sitter::Node;
+
+/// Explicit ECMAScript module slot shared by import and export evidence.
+pub(super) const DEFAULT_EXPORT_SLOT: &str = "default";
+
+/// Decode an AST-owned export name independently from local binding restrictions.
+pub(super) fn ecmascript_export_name(node: Node<'_>, content: &str) -> Option<String> {
+    ecmascript::source_export_name(node, content)
+}
+
+/// Decode the static source of an import or export-from declaration.
+pub(super) fn ecmascript_source_module(node: Node<'_>, content: &str) -> Option<String> {
+    ecmascript::source_module(node, content)
+}
+
+/// Decode a grammar-owned ECMAScript identifier using the canonical profile.
+pub(super) fn ecmascript_identifier_value(text: &str) -> Option<String> {
+    ecmascript_identifier::identifier_name_value(text).map(std::borrow::Cow::into_owned)
+}
+
+/// Validate a source-owned binding or reference under its actual grammar context.
+pub(super) fn ecmascript_contextual_name(
+    text: &str,
+    context: EcmascriptNameContext,
+    role: EcmascriptNameRole,
+) -> Option<String> {
+    ecmascript_identifier::contextual_identifier_value(text, context, role)
+        .map(std::borrow::Cow::into_owned)
+}
+
+/// Resolve grammar-proven static modules even when their local bindings are invalid.
+pub(super) fn ecmascript_module_scopes(
+    caller_path: &str,
+    module: &str,
+    configured: Option<&ConfiguredModuleSource<'_>>,
+) -> Vec<String> {
+    ecmascript::module_scopes(caller_path, module, configured)
+}
+
+/// Grammar-owned import meaning independent from the raw graph's display text.
+#[derive(Default)]
+pub(super) struct SourceImportProof {
+    /// Independently static module target, absent for unsupported source forms.
+    pub(super) module: Option<String>,
+    /// Canonical local bindings independently admitted from captured source.
+    pub(super) references: Vec<ImportReference>,
+}
+
+/// Collect source-valid ECMAScript import leaves without reparsing their text.
+pub(super) fn ecmascript_source_bindings<E>(
+    node: Node<'_>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<SourceImportProof, E> {
+    ecmascript::source_bindings(node, content, check)
+}
 
 /// Select an independently supported direct or admitted embedded provider.
 pub(super) fn provider_for_graph(graph: &SymbolGraph) -> Option<SemanticProviderOwner> {
@@ -51,6 +112,20 @@ pub(super) fn parse_imports(
         SemanticProviderOwner::Python => python::parse_import(import_text),
         SemanticProviderOwner::Cargo | SemanticProviderOwner::Unavailable => Vec::new(),
     }
+}
+
+/// Exclude declarations whose kind supplies no direct callable value identity.
+pub(super) const fn blocks_direct_call_export(
+    provider: SemanticProviderOwner,
+    kind: SymbolKind,
+) -> bool {
+    matches!(
+        provider,
+        SemanticProviderOwner::Rust | SemanticProviderOwner::EcmaScript
+    ) && matches!(
+        kind,
+        SymbolKind::Type | SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Value
+    )
 }
 
 /// Return whether a declaration participates in project-wide export resolution.
@@ -126,8 +201,8 @@ fn named_reference(
     let item = item.trim();
     let (imported, alias) = split_alias(item, alias_marker)?;
     let imported = imported.trim();
-    let module = module.trim();
-    if !is_compact_module(module) || !is_compact_name(imported) || imported == "*" {
+    let module = import_module_text(syntax, module);
+    if !valid_import_module(syntax, module) || !is_compact_name(imported) || imported == "*" {
         return None;
     }
     let local = alias.unwrap_or(imported).trim();
@@ -136,10 +211,28 @@ fn named_reference(
 
 /// Build a normalized module-import reference when both identities are present.
 fn module_reference(syntax: ImportSyntax, module: &str, local: &str) -> Option<ImportReference> {
-    let module = module.trim();
+    let module = import_module_text(syntax, module);
     let local = local.trim();
-    (is_compact_module(module) && is_compact_name(local))
+    (valid_import_module(syntax, module) && is_compact_name(local))
         .then(|| ImportReference::new(syntax, module, None, local))
+}
+
+/// Module literal contents are source data; identifier-style modules permit trivia trimming.
+fn import_module_text(syntax: ImportSyntax, module: &str) -> &str {
+    match syntax {
+        ImportSyntax::EcmaScript => module,
+        ImportSyntax::Rust | ImportSyntax::Python => module.trim(),
+    }
+}
+
+/// Keep literal paths distinct from the stricter identifier-based module contracts.
+fn valid_import_module(syntax: ImportSyntax, module: &str) -> bool {
+    match syntax {
+        // Invalid identity scalars remain facts for canonical graph admission
+        // to reject and report, rather than being silently dropped here.
+        ImportSyntax::EcmaScript => !module.is_empty(),
+        ImportSyntax::Rust | ImportSyntax::Python => is_compact_module(module),
+    }
 }
 
 /// Split an imported identity from its optional caller-local alias.
@@ -168,19 +261,4 @@ fn is_compact_name(value: &str) -> bool {
 /// Return whether a compact module identity is safe to resolve further.
 fn is_compact_module(value: &str) -> bool {
     is_compact_name(value) && !value.contains("//")
-}
-
-/// Extract one complete single- or double-quoted value.
-fn quoted_text(text: &str) -> Option<&str> {
-    let text = text.trim();
-    let quote = text
-        .chars()
-        .next()
-        .filter(|character| matches!(character, '"' | '\''))?;
-    let rest = &text[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    if !rest[end + quote.len_utf8()..].trim().is_empty() {
-        return None;
-    }
-    Some(&rest[..end])
 }

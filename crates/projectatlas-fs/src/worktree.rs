@@ -2941,15 +2941,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn real_git_worktree_preserves_non_utf8_native_paths() -> Result<(), Box<dyn Error>> {
+    fn real_git_worktree_preserves_supported_native_paths() -> Result<(), Box<dyn Error>> {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
         let temp = tempfile::tempdir()?;
-        let primary = temp
+        let native_primary = temp
             .path()
             .join(OsString::from_vec(b"primary-\xff".to_vec()));
-        fs::create_dir(&primary)?;
+        require(
+            matches!(
+                projectatlas_core::lossless_native_path_display(&native_primary),
+                Err(projectatlas_core::CoreError::NonUtf8Path { .. })
+            ),
+            "invalid native bytes acquired a lossy UTF-8 projection",
+        )?;
+        let (primary, native_bytes_supported) = match fs::create_dir(&native_primary) {
+            Ok(()) => (native_primary, true),
+            Err(source) if source.raw_os_error() == Some(nix::errno::Errno::EILSEQ as i32) => {
+                // APFS can reject the fixture before any ProjectAtlas operation.
+                // Keep real Git/lifecycle coverage with a supported Unicode name.
+                let primary = temp.path().join("primary-\u{e9}");
+                fs::create_dir(&primary)?;
+                (primary, false)
+            }
+            Err(source) => return Err(source.into()),
+        };
         run_git(&primary, ["init"])?;
         run_git(&primary, ["config", "user.name", "ProjectAtlas Test"])?;
         run_git(
@@ -2960,10 +2977,13 @@ mod tests {
         run_git(&primary, ["add", "."])?;
         run_git(&primary, ["commit", "-m", "fixture"])?;
 
-        let linked = temp
-            .path()
-            .join(OsString::from_vec(b"linked-\xfe".to_vec()));
-        add_worktree(&primary, "native-bytes", &linked)?;
+        let linked = if native_bytes_supported {
+            temp.path()
+                .join(OsString::from_vec(b"linked-\xfe".to_vec()))
+        } else {
+            temp.path().join("linked-\u{e9}")
+        };
+        add_worktree(&primary, "native-paths", &linked)?;
 
         let primary = primary.canonicalize()?;
         let linked = linked.canonicalize()?;
@@ -2980,11 +3000,15 @@ mod tests {
             .ok_or_else(|| io::Error::other("native linked worktree was not discovered"))?;
 
         require(
-            primary.to_str().is_none()
-                && linked.to_str().is_none()
-                && structure.common_directory.to_str().is_none()
-                && entry.administrative_directory.to_str().is_none(),
-            "native invalid-byte worktree paths unexpectedly became UTF-8",
+            [
+                &primary,
+                &linked,
+                &structure.common_directory,
+                &entry.administrative_directory,
+            ]
+            .iter()
+            .all(|path| path.to_str().is_none() == native_bytes_supported),
+            "native worktree path encoding changed during discovery",
         )?;
         require(
             structure.common_directory == primary.join(".git"),

@@ -114,7 +114,7 @@ fn valid_module(module: &str) -> bool {
         .all(|component| !component.is_empty() && valid_identifier(component))
 }
 
-/// Accept exact XID spellings with Python's underscore and join-control profile.
+/// Accept exact Unicode 18 XID spellings with underscore and join-control rules.
 fn valid_identifier(value: &str) -> bool {
     // Soft keywords such as `match`, `case` and `type` remain legal names here.
     if matches!(

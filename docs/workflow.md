@@ -49,13 +49,22 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lock
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo deny --locked --all-features check -D warnings
 npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
-npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+npm test --prefix .github/mermaid-parser
+npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
 cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
 ```
+
+The shared Rust preflight prefers canonical Cargo-home proxies and accepts native
+package-managed bundles only after exact Rustup backing checks. On macOS,
+installation can prepare Homebrew's native libexec aliases after matching every
+selected wrapper to that exact formula. Version, override and commit checks remain
+required. Successful hosted preparation carries the native path and Homebrew
+fallback settings to later steps; read-only checks and offline self-tests do not
+publish environment changes.
 
 ## Rust dependency management
 
@@ -215,6 +224,16 @@ RELEASE_VERSION=v0.5.0
 
 ## CI behavior
 
+- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. Tests retain debug assertions and unoptimized code; release profiles, source/test selectors and time budgets remain unchanged.
+
+- The accepted-base planner owns logical platform and contract selection; the
+  current workflow owns supported runner provisioning. CI provisions the
+  `macos-arm64` row on the explicit `macos-15` ARM image even when an older
+  accepted planner retains a retiring image pin. Intel stays on
+  `macos-15-intel`. The submitted planner, bootstrap matrix, release package,
+  installed/post-publication and unsupported parser-pack matrices retain those
+  same separate architectures. Image maintenance does not narrow proof coverage.
+
 - `01-CI` plans from the exact base-to-head diff, runs selected repository,
   affected Rust package or test-target, and platform contracts concurrently, and
   accepts omissions only through the always-run fail-closed `verify` aggregate.
@@ -259,6 +278,33 @@ Environment toggles:
 - `PROJECTATLAS_NO_TELEMETRY=1` runs read/orientation commands without recording usage rows in the local SQLite index.
 
 ## Troubleshooting
+
+### Automatic project-state ownership
+
+If a command refuses an indirect `.projectatlas` directory or a linked conventional
+database/WAL/SHM entry, restore its intended direct ownership and retry while preserving
+the existing database and authored state. Explicit external storage remains available
+through the existing `--db` and configuration selection. A blocked generated host
+destination prevents initialization or a root transition before identity changes;
+ordinary navigation can still read an otherwise valid atlas. A later unrelated I/O
+failure after a committed transition retains the existing committed-state diagnostic
+and repair guidance.
+
+Generated-file publication preserves the last valid output on failure. If the state
+directory changes while a private file is staged, the error reports that cleanup was
+withheld; the original private stage is retained rather than unlinking a pathname under
+uncertain ownership. Restore the intended directory before retrying. These failures do
+not require resetting the index or deleting approved purposes.
+
+If a changed default configuration or default JSON map sidecar is refused because
+it is indirect, restore a direct file at that managed destination before retrying.
+The helper commands preserve outside link targets and existing file permissions.
+Replacement also preserves native access ACLs and their owner/group subjects. If
+the platform cannot retain that access policy, publication refuses while keeping
+the existing output; retry with the access policy and ownership intact.
+Unchanged config edits and existing `.gitignore` entries remain no-ops, including a
+dangling `.gitignore` link. Explicit external config and custom map output selection
+remain supported through their existing options.
 
 ### Optional current map response
 

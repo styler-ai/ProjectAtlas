@@ -53,6 +53,20 @@ const GRAPH_STAGING_MARKER_VALUE: &str = "v1";
 /// Persisted local-resolution status admitted by resolved graph previews.
 const RESOLUTION_STATUS_RESOLVED: &str = "resolved";
 
+/// Indexed keyset over policy-sensitive document inputs; endpoints stay unhydrated.
+const UNRESOLVED_DOCUMENT_INPUTS_SQL: &str = "SELECT relation.relation_key, source.repository_path,
+                            relation.reference_text, relation.document_unresolved_reason
+                       FROM graph_relations AS relation
+                       LEFT JOIN graph_entities AS source
+                         ON source.entity_key = relation.source_entity_key
+                        AND source.project_instance_id = relation.project_instance_id
+                      WHERE relation.project_instance_id = ?1
+                        AND relation.relation_scope = 'extended'
+                        AND relation.relation_kind = 'documents'
+                        AND relation.resolution_status = 'unresolved'
+                        AND relation.relation_key > ?2
+                      ORDER BY relation.relation_key LIMIT ?3";
+
 /// One bounded page of typed normalized graph rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryGraphPage<T> {
@@ -60,6 +74,25 @@ pub struct RepositoryGraphPage<T> {
     pub rows: Vec<T>,
     /// Whether at least one additional validated row exists.
     pub truncated: bool,
+}
+
+/// Resolution rows whose retained ownership remains charged after a bounded read.
+#[derive(Debug)]
+pub struct RepositoryResolutionReadPage<T> {
+    /// Ordinary sorted/truncated graph page, with unchanged row semantics.
+    pub page: RepositoryGraphPage<T>,
+    /// Conservative returned-row envelope to retain through consumer transfers.
+    pub retained_bytes: u64,
+}
+
+impl<T> RepositoryResolutionReadPage<T> {
+    /// Construct an empty result without retaining decoded row payloads.
+    fn empty() -> Self {
+        Self {
+            page: empty_page(),
+            retained_bytes: 0,
+        }
+    }
 }
 
 /// Validated resource envelope for one bounded repository-graph database read.
@@ -371,6 +404,19 @@ pub struct RepositoryGraphRelationRow {
     pub target: Option<GraphEntity>,
     /// Closed reason retained only for an unresolved `documents` relation.
     pub document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
+}
+
+/// Minimal persisted input for rechecking a non-indexed document target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryUnresolvedDocumentRow {
+    /// Stable keyset position inside the selected project and document family.
+    pub digest: [u8; 32],
+    /// Repository-relative file owning the original link selector.
+    pub source: RepositoryFilePath,
+    /// Original bounded selector, interpreted by the document projection owner.
+    pub reference: GraphIdentityText,
+    /// Closed reason from the last complete graph publication.
+    pub reason: DocumentTargetUnresolvedReason,
 }
 
 /// One normalized relation with its file-bearing source classification.
@@ -1584,19 +1630,41 @@ impl AtlasStore {
         keys: &[CanonicalResolutionKey],
         limit: u32,
     ) -> DbResult<RepositoryGraphPage<RepositoryResolutionCandidate>> {
+        self.repository_resolution_candidates_for_keys_with_byte_limit(
+            project,
+            keys,
+            limit,
+            u64::MAX,
+        )
+        .map(|read| read.page)
+    }
+
+    /// Read canonical resolution state under the caller's remaining operation bytes.
+    ///
+    /// # Errors
+    /// Returns the same validation/storage failures as [`Self::repository_resolution_candidates_for_keys`],
+    /// or a typed indexing output-byte refusal before cloning or decoding an owner.
+    pub fn repository_resolution_candidates_for_keys_with_byte_limit(
+        &self,
+        project: ProjectInstanceId,
+        keys: &[CanonicalResolutionKey],
+        limit: u32,
+        byte_limit: u64,
+    ) -> DbResult<RepositoryResolutionReadPage<RepositoryResolutionCandidate>> {
         validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
             "resolution candidates must be nonzero and within the product ceiling",
         )?;
         let Some(generation) = self.repository_graph_generation()? else {
-            return Ok(empty_page());
+            return Ok(RepositoryResolutionReadPage::empty());
         };
         if !verify_project_identity(&self.connection, project)? {
-            return Ok(empty_page());
+            return Ok(RepositoryResolutionReadPage::empty());
         }
-        let keys = normalized_resolution_keys(project, keys)?;
-        validate_persisted_resolution_keys(&self.connection, &keys)?;
+        let mut budget = ResolutionReadBudget::new(byte_limit);
+        let keys = normalized_resolution_keys(project, keys, &mut budget)?;
+        validate_persisted_resolution_keys(&self.connection, &keys, &budget)?;
         let mut candidates = Vec::new();
         for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
             if chunk.is_empty() {
@@ -1637,6 +1705,10 @@ impl AtlasStore {
             let mut statement = self.connection.prepare(&sql)?;
             let mut rows = statement.query(params_from_iter(values.iter()))?;
             while let Some(row) = rows.next()? {
+                budget.reserve_output(ResolutionReadBudget::row_bytes(
+                    row,
+                    std::mem::size_of::<RepositoryResolutionCandidate>(),
+                )?)?;
                 let entity = entity_from_row(entity_row(row)?, project, generation)?;
                 let key_project = project_from_blob(
                     "graph_resolution_keys.project_instance_id",
@@ -1677,9 +1749,21 @@ impl AtlasStore {
         });
         let truncated = candidates.len() > limit as usize;
         candidates.truncate(limit as usize);
-        Ok(RepositoryGraphPage {
-            rows: candidates,
-            truncated,
+        // Small Vecs may retain more than the two inline slots per admitted
+        // row in the envelope. Keep their actual excess capacity through transfer.
+        let extra_slots = candidates
+            .capacity()
+            .saturating_sub(candidates.len().saturating_mul(2));
+        let retained_bytes = budget.output_retained.saturating_add(
+            (extra_slots as u64)
+                .saturating_mul(std::mem::size_of::<RepositoryResolutionCandidate>() as u64),
+        );
+        Ok(RepositoryResolutionReadPage {
+            page: RepositoryGraphPage {
+                rows: candidates,
+                truncated,
+            },
+            retained_bytes,
         })
     }
 
@@ -1698,6 +1782,22 @@ impl AtlasStore {
         paths: &[String],
         limit: u32,
     ) -> DbResult<RepositoryGraphPage<CanonicalResolutionKey>> {
+        self.repository_export_keys_for_paths_with_byte_limit(project, paths, limit, u64::MAX)
+            .map(|read| read.page)
+    }
+
+    /// Read canonical resolution state under the caller's remaining operation bytes.
+    ///
+    /// # Errors
+    /// Returns the same validation/storage failures as [`Self::repository_export_keys_for_paths`],
+    /// or a typed indexing output-byte refusal before cloning or decoding an owner.
+    pub fn repository_export_keys_for_paths_with_byte_limit(
+        &self,
+        project: ProjectInstanceId,
+        paths: &[String],
+        limit: u32,
+        byte_limit: u64,
+    ) -> DbResult<RepositoryResolutionReadPage<CanonicalResolutionKey>> {
         validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
@@ -1706,7 +1806,11 @@ impl AtlasStore {
         if self.repository_graph_generation()?.is_none()
             || !verify_project_identity(&self.connection, project)?
         {
-            return Ok(empty_page());
+            return Ok(RepositoryResolutionReadPage::empty());
+        }
+        let mut budget = ResolutionReadBudget::new(byte_limit);
+        for path in paths {
+            budget.reserve(4_u64.saturating_mul(128_u64.saturating_add(path.len() as u64)))?;
         }
         let paths = normalized_file_paths(paths)?;
         let keys = resolution_keys_for_owner_paths(
@@ -1715,8 +1819,12 @@ impl AtlasStore {
             &paths,
             ResolutionOwner::EntityExports,
             Some(limit),
+            &mut budget,
         )?;
-        Ok(page_from_ordered_set(keys, limit))
+        Ok(RepositoryResolutionReadPage {
+            page: page_from_ordered_set(keys, limit),
+            retained_bytes: budget.output_retained,
+        })
     }
 
     /// Find the bounded distinct source paths that depend on canonical keys.
@@ -1736,6 +1844,22 @@ impl AtlasStore {
         keys: &[CanonicalResolutionKey],
         limit: u32,
     ) -> DbResult<RepositoryGraphPage<RepositoryFilePath>> {
+        self.repository_affected_source_paths_with_byte_limit(project, keys, limit, u64::MAX)
+            .map(|read| read.page)
+    }
+
+    /// Read canonical resolution state under the caller's remaining operation bytes.
+    ///
+    /// # Errors
+    /// Returns the same validation/storage failures as [`Self::repository_affected_source_paths`],
+    /// or a typed indexing output-byte refusal before cloning or decoding an owner.
+    pub fn repository_affected_source_paths_with_byte_limit(
+        &self,
+        project: ProjectInstanceId,
+        keys: &[CanonicalResolutionKey],
+        limit: u32,
+        byte_limit: u64,
+    ) -> DbResult<RepositoryResolutionReadPage<RepositoryFilePath>> {
         validated_limit_plus_one(
             limit,
             GraphLimits::MAX_ROWS,
@@ -1744,12 +1868,16 @@ impl AtlasStore {
         if self.repository_graph_generation()?.is_none()
             || !verify_project_identity(&self.connection, project)?
         {
-            return Ok(empty_page());
+            return Ok(RepositoryResolutionReadPage::empty());
         }
-        let keys = normalized_resolution_keys(project, keys)?;
-        validate_persisted_resolution_keys(&self.connection, &keys)?;
-        let paths = affected_source_paths(&self.connection, &keys, limit)?;
-        Ok(page_from_ordered_set(paths, limit))
+        let mut budget = ResolutionReadBudget::new(byte_limit);
+        let keys = normalized_resolution_keys(project, keys, &mut budget)?;
+        validate_persisted_resolution_keys(&self.connection, &keys, &budget)?;
+        let paths = affected_source_paths(&self.connection, &keys, limit, &mut budget)?;
+        Ok(RepositoryResolutionReadPage {
+            page: page_from_ordered_set(paths, limit),
+            retained_bytes: budget.output_retained,
+        })
     }
 
     /// Account the persisted closure owned by exact affected source paths.
@@ -1980,6 +2108,67 @@ impl AtlasStore {
         page_from_raw(raw, limit, |row| {
             relation_detail_from_row(&entities, row, project, generation)
         })
+    }
+
+    /// Page minimal unresolved-document inputs without hydrating graph endpoints.
+    ///
+    /// Callers retain one publication read snapshot or revalidate its generation
+    /// across all pages. The keyset is exclusive, and every sentinel row is validated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on an invalid limit, missing project identity, cancellation,
+    /// corrupt document input, or SQLite failure. No partial page is returned.
+    pub fn repository_unresolved_documents_page(
+        &self,
+        after: Option<&[u8; 32]>,
+        limit: u32,
+        control: &IndexWorkControl,
+    ) -> DbResult<RepositoryGraphPage<RepositoryUnresolvedDocumentRow>> {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "document rows must be nonzero and within the product ceiling",
+        )?;
+        let project =
+            load_project_identity(&self.connection)?.ok_or(DbError::GraphPublicationUnavailable)?;
+        with_sqlite_read_progress(
+            &self.connection,
+            Some(control),
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(UNRESOLVED_DOCUMENT_INPUTS_SQL)?;
+                let mut query = statement.query(params![
+                    &project.as_bytes()[..],
+                    after.map_or(&[][..], |key| &key[..]),
+                    limit_plus_one
+                ])?;
+                let mut rows = Vec::new();
+                while let Some(row) = query.next()? {
+                    control.check(IndexWorkStage::RepositoryTraversal)?;
+                    let reason: String = row.get(3)?;
+                    rows.push(RepositoryUnresolvedDocumentRow {
+                        digest: fixed_bytes::<32>("graph_relations.relation_key", row.get(0)?)?,
+                        source: RepositoryFilePath::new(Path::new(&row.get::<_, String>(1)?))?,
+                        reference: GraphIdentityText::new(row.get::<_, String>(2)?)?,
+                        reason: DocumentTargetUnresolvedReason::from_db(&reason).ok_or_else(
+                            || DbError::InvalidEnum {
+                                field: "graph_relations.document_unresolved_reason",
+                                value: reason,
+                            },
+                        )?,
+                    });
+                }
+                let truncated = rows.len() > limit as usize;
+                if truncated {
+                    rows.pop();
+                }
+                Ok(RepositoryGraphPage { rows, truncated })
+            },
+        )
     }
 
     /// Load one relation-family page with pre-limit source classification selection.
@@ -4435,6 +4624,7 @@ impl IndexPublicationGuard<'_> {
             &affected_paths,
             ResolutionOwner::Both,
             None,
+            &mut ResolutionReadBudget::new(u64::MAX),
         )?;
         let mut orphan_candidates = affected_external_candidates(&savepoint, &affected_paths)?;
         invalidate_repository_graph_paths(&savepoint, &affected_paths, &mut orphan_candidates)?;
@@ -4741,10 +4931,78 @@ fn normalized_file_paths(paths: &[String]) -> DbResult<Vec<RepositoryNodePath>> 
     Ok(normalized.into_iter().collect())
 }
 
+/// Caller-owned allowance for resolution batches used while indexing state remains live.
+struct ResolutionReadBudget {
+    /// The existing operation ceiling; MAX preserves legacy standalone wrappers.
+    limit: u64,
+    /// Conservative owned payload and conversion/query envelopes already reserved.
+    retained: u64,
+    /// Returned rows stay live when input/query scratch drops at method return.
+    output_retained: u64,
+}
+
+impl ResolutionReadBudget {
+    /// Start one read without claiming a second operation allowance.
+    const fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            retained: 0,
+            output_retained: 0,
+        }
+    }
+
+    /// Reject before materializing a row or query-input clone.
+    fn check(&self, additional: u64) -> DbResult<()> {
+        let requested = self.retained.saturating_add(additional);
+        if requested > self.limit {
+            return Err(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::resource_limit(
+                    IndexWorkStage::SymbolParsing,
+                    projectatlas_core::IndexWorkResource::OutputBytes,
+                    self.limit,
+                    requested,
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Admit the next retained owner, leaving the prior ledger intact on refusal.
+    fn reserve(&mut self, additional: u64) -> DbResult<()> {
+        self.check(additional)?;
+        self.retained = self.retained.saturating_add(additional);
+        Ok(())
+    }
+
+    /// Keep half the four-owner decode envelope until the page is consumed;
+    /// the other half covers the new registry/set during its ownership transfer.
+    fn reserve_output(&mut self, bytes: u64) -> DbResult<()> {
+        self.reserve(bytes)?;
+        self.output_retained = self.output_retained.saturating_add(bytes / 2);
+        Ok(())
+    }
+
+    /// Inspect borrowed SQLite cells before any owned decode. Four copies cover
+    /// raw conversion, reconstructed identity and vector/tree metadata transitions.
+    fn row_bytes(row: &Row<'_>, inline: usize) -> DbResult<u64> {
+        let mut bytes = 128_u64.saturating_add(inline as u64);
+        for column in 0..row.as_ref().column_count() {
+            bytes = bytes.saturating_add(match row.get_ref(column)? {
+                rusqlite::types::ValueRef::Text(value) | rusqlite::types::ValueRef::Blob(value) => {
+                    value.len() as u64
+                }
+                _ => 8,
+            });
+        }
+        Ok(bytes.saturating_mul(4))
+    }
+}
+
 /// Validate project ownership and deduplicate canonical keys deterministically.
 fn normalized_resolution_keys(
     project: ProjectInstanceId,
     keys: &[CanonicalResolutionKey],
+    budget: &mut ResolutionReadBudget,
 ) -> DbResult<Vec<CanonicalResolutionKey>> {
     let mut normalized = BTreeSet::new();
     for key in keys {
@@ -4754,7 +5012,16 @@ fn normalized_resolution_keys(
                 found: key.project().to_string(),
             });
         }
-        normalized.insert(key.clone());
+        if !normalized.contains(key) {
+            budget.reserve(
+                4_u64.saturating_mul(
+                    128_u64
+                        .saturating_add((2 * std::mem::size_of::<CanonicalResolutionKey>()) as u64)
+                        .saturating_add(key.retained_heap_bytes()),
+                ),
+            )?;
+            normalized.insert(key.clone());
+        }
     }
     Ok(normalized.into_iter().collect())
 }
@@ -4775,6 +5042,7 @@ fn resolution_keys_for_owner_paths(
     paths: &[RepositoryNodePath],
     owners: ResolutionOwner,
     limit: Option<u32>,
+    budget: &mut ResolutionReadBudget,
 ) -> DbResult<BTreeSet<CanonicalResolutionKey>> {
     let mut keys = BTreeSet::new();
     for (table, index) in owners.tables() {
@@ -4810,7 +5078,16 @@ fn resolution_keys_for_owner_paths(
             let mut statement = connection.prepare(&sql)?;
             let mut rows = statement.query(params_from_iter(values.iter()))?;
             while let Some(row) = rows.next()? {
-                keys.insert(resolution_key_from_row(row, project)?);
+                let bytes = ResolutionReadBudget::row_bytes(
+                    row,
+                    std::mem::size_of::<CanonicalResolutionKey>(),
+                )?;
+                budget.check(bytes)?;
+                let key = resolution_key_from_row(row, project)?;
+                if !keys.contains(&key) {
+                    budget.reserve_output(bytes)?;
+                    keys.insert(key);
+                }
             }
             if limit.is_some_and(|limit| keys.len() > limit as usize) {
                 return Ok(keys);
@@ -4886,6 +5163,7 @@ fn validate_persisted_resolution_key(
 fn validate_persisted_resolution_keys(
     connection: &Connection,
     keys: &[CanonicalResolutionKey],
+    budget: &ResolutionReadBudget,
 ) -> DbResult<()> {
     for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
         if chunk.is_empty() {
@@ -4908,6 +5186,7 @@ fn validate_persisted_resolution_keys(
         let mut statement = connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(values.iter()))?;
         while let Some(row) = rows.next()? {
+            budget.check(ResolutionReadBudget::row_bytes(row, 0)?)?;
             let domain_text = row.get::<_, String>(0)?;
             let domain = ResolutionKeyDomain::try_from(domain_text.as_str())?;
             let digest = fixed_bytes::<32>(
@@ -4932,6 +5211,7 @@ fn affected_source_paths(
     connection: &Connection,
     keys: &[CanonicalResolutionKey],
     limit: u32,
+    budget: &mut ResolutionReadBudget,
 ) -> DbResult<BTreeSet<RepositoryFilePath>> {
     let mut paths = BTreeSet::new();
     for chunk in keys.chunks(RESOLUTION_KEYS_PER_QUERY) {
@@ -4962,9 +5242,14 @@ fn affected_source_paths(
         let mut statement = connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(values.iter()))?;
         while let Some(row) = rows.next()? {
-            paths.insert(RepositoryFilePath::new(Path::new(
-                &row.get::<_, String>(0)?,
-            ))?);
+            let bytes =
+                ResolutionReadBudget::row_bytes(row, std::mem::size_of::<RepositoryFilePath>())?;
+            budget.check(bytes)?;
+            let path = RepositoryFilePath::new(Path::new(&row.get::<_, String>(0)?))?;
+            if !paths.contains(&path) {
+                budget.reserve_output(bytes)?;
+                paths.insert(path);
+            }
         }
         if paths.len() > limit as usize {
             return Ok(paths);
@@ -10244,6 +10529,143 @@ mod tests {
     }
 
     #[test]
+    fn resolution_batch_reads_admit_long_witnesses_before_decoding_or_cloning()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let db = root.join("atlas.db");
+        let mut store = AtlasStore::open_for_project(&db, root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("missing read-budget fixture identity")?;
+        let graph = graph_fixture(project, IndexGeneration::new(1))?;
+        let key = declaration_key(
+            project,
+            &"n".repeat(3_000),
+            GraphRelationKind::Legacy(RelationKind::Calls),
+        )?;
+        let export = EntityResolutionKey::new(graph.entities[4].key().clone(), key.clone())?;
+        let dependency = RelationDependencyKey::new(graph.relations[0].key().clone(), key.clone())?;
+        {
+            let mut publication = store.begin_index_publication("resolution-read-budget")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&[
+                graph_node(".", NodeKind::Folder, None),
+                graph_node("src", NodeKind::Folder, Some(".")),
+                graph_node("src/Äuth.rs", NodeKind::File, Some("src")),
+                graph_node("Cargo.toml", NodeKind::File, Some(".")),
+            ])?;
+            publication.finish_scan_replacement()?;
+            publication.replace_repository_graph_with_resolution_keys(
+                project,
+                &graph.entities,
+                &graph.relations,
+                &graph.occurrences,
+                &graph.coverage,
+                &[export],
+                &[dependency],
+            )?;
+            publication.complete()?;
+        }
+        drop(store);
+        let reader = AtlasStore::open_read_only_for_project(&db, root)?;
+        let before = reader.index_publication()?;
+        let paths = vec!["src/Äuth.rs".to_string()];
+        let enough = 1_024 * 1_024;
+        let exports =
+            reader.repository_export_keys_for_paths_with_byte_limit(project, &paths, 10, enough)?;
+        require_eq(
+            &exports.page.rows,
+            &vec![key.clone()],
+            "bounded long export witness",
+        )?;
+        let candidates = reader.repository_resolution_candidates_for_keys_with_byte_limit(
+            project,
+            std::slice::from_ref(&key),
+            10,
+            enough,
+        )?;
+        require(
+            candidates.page.rows.len() == 1,
+            "bounded read lost its candidate",
+        )?;
+        let affected = reader.repository_affected_source_paths_with_byte_limit(
+            project,
+            std::slice::from_ref(&key),
+            10,
+            enough,
+        )?;
+        require(
+            !affected.page.rows.is_empty(),
+            "bounded read lost its dependent path",
+        )?;
+        require_eq(
+            &reader
+                .repository_export_keys_for_paths(project, &paths, 10)?
+                .rows,
+            &exports.page.rows,
+            "legacy export reader changed output",
+        )?;
+        require_eq(
+            &reader
+                .repository_resolution_candidates_for_keys(
+                    project,
+                    &[key.clone(), key.clone()],
+                    10,
+                )?
+                .rows,
+            &candidates.page.rows,
+            "legacy/duplicate candidate reader changed output",
+        )?;
+        require(
+            exports.retained_bytes > 0
+                && candidates.retained_bytes > 0
+                && affected.retained_bytes > 0,
+            "bounded reader dropped returned-page ownership",
+        )?;
+        for result in [
+            reader
+                .repository_export_keys_for_paths_with_byte_limit(project, &paths, 10, 1_024)
+                .map(|read| read.page.rows.len()),
+            reader
+                .repository_resolution_candidates_for_keys_with_byte_limit(
+                    project,
+                    std::slice::from_ref(&key),
+                    10,
+                    1_024,
+                )
+                .map(|read| read.page.rows.len()),
+            reader
+                .repository_affected_source_paths_with_byte_limit(
+                    project,
+                    std::slice::from_ref(&key),
+                    10,
+                    1_024,
+                )
+                .map(|read| read.page.rows.len()),
+        ] {
+            require(
+                matches!(
+                    result,
+                    Err(DbError::IndexWork(
+                        projectatlas_core::IndexWorkFailure::ResourceLimitExceeded {
+                            resource: projectatlas_core::IndexWorkResource::OutputBytes,
+                            ..
+                        }
+                    ))
+                ),
+                "long resolution batch decoded or cloned past its allowance",
+            )?;
+        }
+        require_eq(
+            &reader.index_publication()?,
+            &before,
+            "bounded reads changed publication state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn resolution_keys_round_trip_reopen_and_preserve_all_dependency_states()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -11565,6 +11987,130 @@ mod tests {
             &store.symbol_relation_count()?,
             &1,
             "legacy symbol relation compatibility",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_document_inputs_are_indexed_paged_and_fail_closed() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let mut store = AtlasStore::open_for_project(&temp.path().join("atlas.db"), temp.path())?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("missing project"))?;
+        let document = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("guide.md"))?,
+            },
+            IndexGeneration::new(1),
+        )?;
+        let relations = (0..3)
+            .map(|number| {
+                LogicalRelation::new(
+                    &document,
+                    GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                    RelationResolution::Unresolved {
+                        reference: GraphIdentityText::new(format!("missing-{number}.rs"))?,
+                    },
+                    ConfidenceClass::High,
+                    Completeness::Complete,
+                    IndexGeneration::new(1),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reasons = relations
+            .iter()
+            .map(|relation| {
+                (
+                    relation.key().clone(),
+                    DocumentTargetUnresolvedReason::Missing,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut publication = store.begin_index_publication("document-inputs")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("guide.md", NodeKind::File, Some(".")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &[document], &relations, &[], &[])?;
+        publication.set_document_unresolved_reasons(&reasons)?;
+        publication.complete()?;
+        let control = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        let first = store.repository_unresolved_documents_page(None, 2, &control)?;
+        require(
+            first.truncated && first.rows.len() == 2,
+            "document page lost its sentinel",
+        )?;
+        let last = first
+            .rows
+            .last()
+            .ok_or_else(|| io::Error::other("missing document keyset"))?;
+        let second = store.repository_unresolved_documents_page(Some(&last.digest), 2, &control)?;
+        require(
+            !second.truncated && second.rows.len() == 1,
+            "document keyset lost its final row",
+        )?;
+        let all = first.rows.iter().chain(&second.rows).collect::<Vec<_>>();
+        require(
+            all.windows(2).all(|pair| pair[0].digest < pair[1].digest),
+            "document keyset repeated a row",
+        )?;
+        require(
+            all.iter().all(|row| {
+                row.source.as_str() == "guide.md"
+                    && row.reference.as_str().starts_with("missing-")
+                    && row.reason == DocumentTargetUnresolvedReason::Missing
+            }),
+            "document inputs changed in storage",
+        )?;
+
+        let query = format!("EXPLAIN QUERY PLAN {UNRESOLVED_DOCUMENT_INPUTS_SQL}");
+        let mut statement = store.connection.prepare(&query)?;
+        let details = statement
+            .query_map(params![&project.as_bytes()[..], &[][..], 3], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_graph_relations_kind_resolution"))
+                && details.iter().all(|detail| {
+                    !detail.contains("SCAN relation") && !detail.contains("USE TEMP B-TREE")
+                }),
+            &format!("document keyset did not use ordered filtered lookup: {details:?}"),
+        )?;
+        drop(statement);
+        let cancelled = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        cancelled.cancel();
+        require(
+            matches!(
+                store.repository_unresolved_documents_page(None, 2, &cancelled),
+                Err(DbError::IndexWork(_))
+            ),
+            "document page ignored cancellation",
+        )?;
+        require(
+            store
+                .repository_unresolved_documents_page(None, 0, &control)
+                .is_err(),
+            "document page accepted zero limit",
+        )?;
+        let sentinel = &second.rows[0].digest;
+        store
+            .connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        store.connection.execute("UPDATE graph_relations SET document_unresolved_reason = 'invalid' WHERE relation_key = ?1", [&sentinel[..]])?;
+        require(
+            matches!(
+                store.repository_unresolved_documents_page(None, 2, &control),
+                Err(DbError::InvalidEnum { .. })
+            ),
+            "document page returned partial success before a corrupt sentinel",
         )?;
         Ok(())
     }

@@ -469,6 +469,54 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
             .into());
         }
     }
+    #[cfg(any(unix, windows))]
+    {
+        // A registered existing atlas may need native identity repair. Generated
+        // output admission must precede that repair, just as ordinary init does.
+        let target = linked_atlas_dir.join("projectatlas.mcp.json");
+        let outside = temp.path().join("unowned-host.json");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &target)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside, &target)?;
+        let before = fs::read(&linked_db)?;
+        let refused = worktree_session
+            .call_tool("atlas_init", &serde_json::json!({"worktree": "feature"}))?;
+        if !refused.contains("automatic output requires a direct regular file")
+            || fs::read(&linked_db)? != before
+            || outside.exists()
+        {
+            return Err(io::Error::other(format!(
+                "registered identity repair preceded output admission: {refused}"
+            ))
+            .into());
+        }
+        fs::remove_file(&target)?;
+
+        // An absent registered atlas must not activate a hydration candidate into
+        // an aliased private directory. Its accepted control baseline stays usable.
+        let review_state = review.join(ATLAS_DIR_NAME);
+        let outside = temp.path().join("unowned-hydration");
+        fs::create_dir(&outside)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &review_state)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &review_state)?;
+        let refused =
+            worktree_session.call_tool("atlas_init", &serde_json::json!({"worktree": "review"}))?;
+        if !refused.contains("automatic state requires a direct directory")
+            || fs::read_dir(&outside)?.next().is_some()
+        {
+            return Err(io::Error::other(format!(
+                "registered hydration followed an outside state owner: {refused}"
+            ))
+            .into());
+        }
+        #[cfg(unix)]
+        fs::remove_file(&review_state)?;
+        #[cfg(windows)]
+        fs::remove_dir(&review_state)?;
+    }
     let feature_init =
         worktree_session.call_tool("atlas_init", &serde_json::json!({"worktree": "feature"}))?;
     if !feature_init.contains("status: existing") {
@@ -2640,7 +2688,28 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     assert_detailed_resolution(&js_symbol, 1, "resolved")?;
     let js_outbound =
         detailed_relation_payload(&repo, &db, "js/src/js-page.js", Some("value"), "outbound")?;
-    assert_detailed_resolution(&js_outbound, 1, "resolved")?;
+    assert_detailed_resolution(&js_outbound, 0, "resolved")?;
+    let js_module_outbound =
+        detailed_relation_payload(&repo, &db, "js/src/js-page.js", None, "outbound")?;
+    assert_detailed_resolution(&js_module_outbound, 2, "resolved")?;
+    let module_call = js_module_outbound["symbol_relations"]["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row.pointer("/relation/kind/value").and_then(Value::as_str) == Some("calls")
+            })
+        })
+        .ok_or_else(|| io::Error::other("configured module initializer call is missing"))?;
+    require_json_string(
+        module_call,
+        &["source", "entity", "selector", "kind"],
+        "file",
+    )?;
+    require_json_string(
+        module_call,
+        &["target", "entity", "selector", "symbol", "name"],
+        "useJsController",
+    )?;
 
     let impact = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -2917,7 +2986,7 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("caller.rs"),
-        "pub fn caller() { target(); }\n",
+        "use crate::target::target;\npub fn caller() { target(); }\n",
     )?;
     let target = repo.join(SRC_DIR_NAME).join("target.rs");
     let duplicate = repo.join(SRC_DIR_NAME).join(DUPLICATE_RS_FILE_NAME);
@@ -2932,9 +3001,22 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
         .success();
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
 
-    fs::write(&duplicate, "pub fn target() {}\n")?;
+    // Deliberately competing parser declarations must not select one target.
+    // This is an ambiguity/recovery input, not a compiler-valid overload.
+    fs::write(
+        &target,
+        "pub fn target() {}\npub fn target(value: bool) {}\n",
+    )?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Ambiguous(2))?;
+
+    fs::write(&target, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
+
+    fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
 
     fs::remove_file(&duplicate)?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
@@ -2945,6 +3027,10 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Unresolved)?;
 
     fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Unresolved)?;
+
+    fs::write(&target, "pub fn target() {}\n")?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
     Ok(())

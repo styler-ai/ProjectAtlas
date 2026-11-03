@@ -3,8 +3,8 @@
 mod agent_efficiency;
 mod analysis;
 mod federation;
-mod import_aliases;
 mod relations;
+mod summary_callers;
 
 pub use analysis::{
     AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, EntrypointProfile,
@@ -30,7 +30,6 @@ pub use relations::{
 
 use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_for_binding;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
     CoverageScope, CoverageState, ExtendedRelationKind, GraphIdentityRejection, GraphLimitKind,
     GraphLimits, GraphRelationKind,
@@ -55,6 +54,7 @@ use projectatlas_db::{
     RepositoryCoverageQuery, RepositoryCoverageRow, RepositoryNavigationConnections,
     RepositoryNavigationNode,
 };
+#[cfg(test)]
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
 use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
@@ -69,8 +69,6 @@ use thiserror::Error;
 
 /// Maximum caller references retained for one summarized symbol.
 const CALLERS_PER_SYMBOL_LIMIT: usize = 20;
-/// Relation query limit multiplier used for called-by lookup.
-const CALLER_RELATION_LIMIT_PER_TARGET: usize = 20;
 /// Maximum package/module symbols read for file-level metadata.
 const FILE_METADATA_SYMBOL_LIMIT: usize = 20;
 /// Maximum concise reasons attached to one ranked result.
@@ -1281,6 +1279,30 @@ impl From<&SymbolRelation> for FileCallSummary {
     }
 }
 
+/// Run a composed read in one generation, preserving any caller-owned snapshot.
+fn with_index_read_snapshot<T>(
+    store: &AtlasStore,
+    read: impl FnOnce() -> ServiceResult<T>,
+) -> ServiceResult<T> {
+    let owns_snapshot = !store.has_active_read_snapshot();
+    if owns_snapshot {
+        store.begin_index_read_snapshot()?;
+    }
+    let result = read();
+    let finished = if owns_snapshot {
+        store.finish_index_read_snapshot()
+    } else {
+        Ok(())
+    };
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            finished?;
+            Ok(value)
+        }
+    }
+}
+
 /// Build structured file intelligence from the durable index.
 ///
 /// # Errors
@@ -1307,30 +1329,32 @@ pub fn build_file_summary_with_selection(
     limit: usize,
     content_selection: ContentSelection,
 ) -> ServiceResult<FileSummaryReport> {
-    let file_key = validated_indexed_file_key(store, file)?;
-    let classification = selected_file_classification(store, &file_key, content_selection)?;
-    let source_read =
-        indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
-    match source_read {
-        Ok(content) => build_file_summary_with_source_state(
-            store,
-            file_key,
-            limit,
-            Some(&content),
-            SOURCE_STATUS_LIVE.to_string(),
-            String::new(),
-            classification,
-        ),
-        Err(error) => build_file_summary_with_source_state(
-            store,
-            file_key,
-            limit,
-            None,
-            SOURCE_STATUS_INDEXED.to_string(),
-            error.to_string(),
-            classification,
-        ),
-    }
+    with_index_read_snapshot(store, || {
+        let file_key = validated_indexed_file_key(store, file)?;
+        let classification = selected_file_classification(store, &file_key, content_selection)?;
+        let source_read =
+            indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
+        match source_read {
+            Ok(content) => build_file_summary_with_source_state(
+                store,
+                file_key,
+                limit,
+                Some(&content),
+                SOURCE_STATUS_LIVE.to_string(),
+                String::new(),
+                classification,
+            ),
+            Err(error) => build_file_summary_with_source_state(
+                store,
+                file_key,
+                limit,
+                None,
+                SOURCE_STATUS_INDEXED.to_string(),
+                error.to_string(),
+                classification,
+            ),
+        }
+    })
 }
 
 /// Build structured file intelligence from caller-verified source bytes.
@@ -1367,17 +1391,19 @@ pub fn build_file_summary_from_source_with_selection(
     source: &str,
     content_selection: ContentSelection,
 ) -> ServiceResult<FileSummaryReport> {
-    let file_key = validated_indexed_file_key(store, file)?;
-    let classification = selected_file_classification(store, &file_key, content_selection)?;
-    build_file_summary_with_source_state(
-        store,
-        file_key,
-        limit,
-        Some(source),
-        SOURCE_STATUS_LIVE.to_string(),
-        String::new(),
-        classification,
-    )
+    with_index_read_snapshot(store, || {
+        let file_key = validated_indexed_file_key(store, file)?;
+        let classification = selected_file_classification(store, &file_key, content_selection)?;
+        build_file_summary_with_source_state(
+            store,
+            file_key,
+            limit,
+            Some(source),
+            SOURCE_STATUS_LIVE.to_string(),
+            String::new(),
+            classification,
+        )
+    })
 }
 
 /// Build one summary from optional already-selected live source.
@@ -1420,21 +1446,8 @@ fn build_file_summary_with_source_state(
         &class_symbols,
         &type_symbols,
     );
-    let summarized_names = symbol_names(&summarized_symbols);
-    let symbol_name_counts = store.symbol_name_counts(&summarized_names)?;
-    let alias_scope_symbols = store.load_symbols_by_names(&summarized_names)?;
-    let alias_counts = symbol_alias_counts(&alias_scope_symbols);
-    let import_aliases = load_import_alias_map(store, &summarized_symbols, &alias_counts)?;
-    let caller_targets = caller_target_names(&summarized_symbols, &import_aliases);
-    let caller_relations =
-        store.load_call_relations_to_targets(&caller_targets, CALLER_RELATION_LIMIT_PER_TARGET)?;
-    let called_by = called_by_map(
-        &summarized_symbols,
-        &caller_relations,
-        &symbol_name_counts,
-        &alias_counts,
-        &import_aliases,
-    );
+    let (called_by, callers_truncated) =
+        summary_callers::load_summary_callers(store, &file_key, &summarized_symbols)?;
     let functions = summarize_symbols(&function_symbols, &called_by);
     let methods = summarize_symbols(&method_symbols, &called_by);
     let classes = summarize_symbols(&class_symbols, &called_by);
@@ -1480,7 +1493,8 @@ fn build_file_summary_with_source_state(
         total_exports,
     ]
     .iter()
-    .any(|total| *total > effective_limit);
+    .any(|total| *total > effective_limit)
+        || callers_truncated;
 
     let content_summary = indexed.summary.unwrap_or_default();
     let parser_kind = summary_parser_kind(
@@ -3825,17 +3839,6 @@ fn line_count_from_content(content: &str) -> usize {
     content.lines().count()
 }
 
-/// Return distinct symbol names for caller lookup.
-fn symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
-    let mut names = symbols
-        .iter()
-        .map(|symbol| symbol.name.clone())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
 /// Return symbol kinds that can provide file-level metadata.
 fn metadata_symbol_kinds() -> [SymbolKind; 3] {
     [
@@ -3874,120 +3877,17 @@ fn summarized_symbol_set(
         .collect()
 }
 
-/// Return exact call target names that can safely resolve to displayed symbols.
-fn caller_target_names(symbols: &[CodeSymbol], import_aliases: &ImportAliasMap) -> Vec<String> {
-    let mut targets = HashSet::new();
-    for symbol in symbols {
-        targets.insert(symbol.name.clone());
-        for alias in symbol_target_aliases(symbol) {
-            targets.insert(alias);
-        }
-    }
-    for alias in import_aliases.values().flatten() {
-        targets.insert(alias.target_name.clone());
-    }
-    let mut values = targets.into_iter().collect::<Vec<_>>();
-    values.sort();
-    values
-}
-
-/// Build reverse call lookup for displayed symbols across the indexed graph.
-fn called_by_map(
-    symbols: &[CodeSymbol],
-    relations: &[SymbolRelation],
-    name_counts: &HashMap<String, usize>,
-    alias_counts: &HashMap<String, usize>,
-    import_aliases: &ImportAliasMap,
-) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-    for symbol in symbols {
-        let symbol_key = symbol_summary_key(symbol);
-        for relation in relations.iter().filter(|relation| {
-            relation_matches_symbol(relation, symbol, name_counts, alias_counts, import_aliases)
-        }) {
-            let caller = caller_reference(relation);
-            let callers = map.entry(symbol_key.clone()).or_default();
-            if !callers.iter().any(|existing| existing == &caller) {
-                callers.push(caller);
-            }
-        }
-    }
-    for callers in map.values_mut() {
-        callers.sort();
-        callers.truncate(CALLERS_PER_SYMBOL_LIMIT);
-    }
-    map
-}
-
-/// Return whether a relation can be deterministically attached to a symbol.
-fn relation_matches_symbol(
-    relation: &SymbolRelation,
-    symbol: &CodeSymbol,
-    name_counts: &HashMap<String, usize>,
-    alias_counts: &HashMap<String, usize>,
-    import_aliases: &ImportAliasMap,
-) -> bool {
-    if relation.kind != RelationKind::Calls {
-        return false;
-    }
-    let target = relation.target_name.trim();
-    if target == symbol.name
-        && (relation.path == symbol.path
-            || name_counts.get(&symbol.name).copied().unwrap_or(0) <= 1)
-    {
-        return true;
-    }
-    if symbol_target_aliases(symbol)
-        .iter()
-        .any(|alias| alias == target && alias_counts.get(alias).copied().unwrap_or(0) <= 1)
-    {
-        return true;
-    }
-    import_aliases
-        .get(&symbol_summary_key(symbol))
-        .is_some_and(|aliases| {
-            aliases.iter().any(|alias| {
-                alias.caller_path == relation.path && alias.target_name == relation.target_name
-            })
-        })
-}
-
-/// Count target aliases across displayed symbols.
-fn symbol_alias_counts(symbols: &[CodeSymbol]) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for alias in symbols.iter().flat_map(symbol_target_aliases) {
-        *counts.entry(alias).or_insert(0) += 1;
-    }
-    counts
-}
-
-/// Return exact qualified target strings that identify a symbol by file path.
-fn symbol_target_aliases(symbol: &CodeSymbol) -> Vec<String> {
-    let mut aliases = HashSet::new();
-    let modules = module_aliases_for_path(&symbol.path);
-    for module in &modules {
-        aliases.insert(format!("{module}::{}", symbol.name));
-        aliases.insert(format!("{module}.{}", symbol.name));
-        aliases.insert(format!("crate::{module}::{}", symbol.name));
-        aliases.insert(format!("crate.{module}.{}", symbol.name));
-    }
-    if modules.is_empty() {
-        aliases.insert(format!("crate::{}", symbol.name));
-        aliases.insert(format!("self::{}", symbol.name));
-    }
-    let mut values = aliases.into_iter().collect::<Vec<_>>();
-    values.sort();
-    values
-}
-
 /// Build a stable identity key for a summarized symbol row.
 fn symbol_summary_key(symbol: &CodeSymbol) -> String {
-    format!("{}\0{}\0{}", symbol.path, symbol.name, symbol.line_start)
-}
-
-/// Return a compact caller reference.
-fn caller_reference(relation: &SymbolRelation) -> String {
-    format!("{}::{}", relation.path, relation.source_name)
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        symbol.path,
+        symbol.name,
+        symbol.kind,
+        symbol.parent.as_deref().unwrap_or(""),
+        symbol.signature,
+        symbol.line_start
+    )
 }
 
 /// Summarize already-selected symbols.
@@ -5111,7 +5011,7 @@ mod tests {
             root.join("src").join("lib.rs"),
             "/// Shared helper.\npub fn helper() {}\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/lib.rs", "hash-lib"),
@@ -5151,6 +5051,17 @@ mod tests {
             }],
         })?;
 
+        let raw_only = build_file_summary(&store, Path::new("src/lib.rs"), 10)?;
+        require(
+            raw_only
+                .functions
+                .iter()
+                .all(|symbol| symbol.called_by.is_empty()),
+            "raw names fabricated a canonical caller",
+        )?;
+
+        seed_summary_call_edge(&mut store, "src/main.rs", "main", "src/lib.rs", "helper")?;
+
         let report = build_file_summary(&store, Path::new("src/lib.rs"), 10)?;
         require_eq(
             &report.file_purpose_status,
@@ -5186,7 +5097,7 @@ mod tests {
             root.join("src").join("main.rs"),
             "mod a;\nmod b;\nfn main() { b::helper(); }\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/a.rs", "hash-a"),
@@ -5222,6 +5133,8 @@ mod tests {
                 parser: ParserKind::TreeSitter,
             }],
         })?;
+
+        seed_summary_call_edge(&mut store, "src/main.rs", "main", "src/b.rs", "helper")?;
 
         let a_report = build_file_summary(&store, Path::new("src/a.rs"), 10)?;
         let a_helper = a_report
@@ -5326,7 +5239,7 @@ mod tests {
             root.join("src/main.rs"),
             "use crate::foo::service as foo_service;\nfn main() { foo_service::run(); }\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/foo/service.rs", "hash-service"),
@@ -5370,6 +5283,14 @@ mod tests {
             ],
         })?;
 
+        seed_summary_call_edge(
+            &mut store,
+            "src/main.rs",
+            "main",
+            "src/foo/service.rs",
+            "run",
+        )?;
+
         assert_single_called_by(
             &build_file_summary(&store, Path::new("src/foo/service.rs"), 10)?,
             "run",
@@ -5388,7 +5309,7 @@ mod tests {
             root.join("src/main.ts"),
             "import { run as serviceRun } from \"./service\";\nserviceRun();\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/service.ts", "hash-service"),
@@ -5428,6 +5349,8 @@ mod tests {
             ],
         })?;
 
+        seed_summary_call_edge(&mut store, "src/main.ts", "main", "src/service.ts", "run")?;
+
         assert_single_called_by(
             &build_file_summary(&store, Path::new("src/service.ts"), 10)?,
             "run",
@@ -5446,7 +5369,7 @@ mod tests {
             root.join("src/main.ts"),
             "import { run as apiRun } from \"./api/index\";\napiRun();\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/api/index.ts", "hash-api"),
@@ -5485,6 +5408,8 @@ mod tests {
                 },
             ],
         })?;
+
+        seed_summary_call_edge(&mut store, "src/main.ts", "main", "src/api/index.ts", "run")?;
 
         assert_single_called_by(
             &build_file_summary(&store, Path::new("src/api/index.ts"), 10)?,
@@ -5584,7 +5509,7 @@ mod tests {
             root.join("src/main.py"),
             "import package.module as service\nservice.run()\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/package/module.py", "hash-module"),
@@ -5628,6 +5553,14 @@ mod tests {
             ],
         })?;
 
+        seed_summary_call_edge(
+            &mut store,
+            "src/main.py",
+            "main",
+            "src/package/module.py",
+            "run",
+        )?;
+
         assert_single_called_by(
             &build_file_summary(&store, Path::new("src/package/module.py"), 10)?,
             "run",
@@ -5646,7 +5579,7 @@ mod tests {
             root.join("src/main.py"),
             "from package.module import run\nrun()\n",
         )?;
-        let mut store = AtlasStore::in_memory()?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), root)?;
         store.set_project_root(root)?;
         store.replace_scan(&[
             test_node("src/package/module.py", "hash-module"),
@@ -5692,6 +5625,14 @@ mod tests {
                 },
             ],
         })?;
+
+        seed_summary_call_edge(
+            &mut store,
+            "src/main.py",
+            "main",
+            "src/package/module.py",
+            "run",
+        )?;
 
         assert_single_called_by(
             &build_file_summary(&store, Path::new("src/package/module.py"), 10)?,
@@ -7291,6 +7232,207 @@ mod tests {
     }
 
     /// Build a compact test symbol.
+    #[test]
+    fn summary_snapshot_keeps_display_metadata_stable_across_writer_and_failure()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let database = root.join("atlas.db");
+        let path = "src/main.rs";
+        let mut reader = AtlasStore::open_for_project(&database, root)?;
+        reader.replace_scan(&[test_node(path, "fixture")])?;
+        let graph = |name: &str| SymbolGraph {
+            path: path.to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![test_symbol(path, SymbolKind::Function, name)],
+            relations: Vec::new(),
+        };
+        reader.replace_symbol_graph(&graph("before"))?;
+        let mut writer = AtlasStore::open_for_project(&database, root)?;
+        with_index_read_snapshot(&reader, || {
+            let initial = reader.load_symbols(Some(path), None, 10)?;
+            writer.replace_symbol_graph(&graph("after"))?;
+            let report = build_file_summary_from_source(&reader, Path::new(path), 10, "")?;
+            let consistent =
+                report
+                    .functions
+                    .first()
+                    .zip(initial.first())
+                    .is_some_and(|(display, indexed)| {
+                        display.name == indexed.name && display.name == "before"
+                    });
+            if !consistent || !reader.has_active_read_snapshot() {
+                return Err(ServiceError::InvalidInput(
+                    "summary crossed the caller's read snapshot".to_string(),
+                ));
+            }
+            Ok(())
+        })?;
+        require(
+            !reader.has_active_read_snapshot(),
+            "owned summary snapshot leaked",
+        )?;
+        let current = build_file_summary_from_source(&reader, Path::new(path), 10, "")?;
+        require_eq(
+            &current.functions[0].name,
+            &"after".to_string(),
+            "next complete summary",
+        )?;
+        let failed: ServiceResult<()> = with_index_read_snapshot(&reader, || {
+            Err(ServiceError::InvalidInput(
+                "controlled summary failure".to_string(),
+            ))
+        });
+        require(
+            failed.is_err() && !reader.has_active_read_snapshot(),
+            "failed summary retained snapshot",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn summary_callers_require_unique_canonical_parents_and_report_incoming_limits()
+    -> Result<(), Box<dyn Error>> {
+        use projectatlas_core::graph::{
+            Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
+            LogicalRelation, RelationResolution, RepositoryFilePath, SymbolSelector,
+        };
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = "src/main.rs";
+        let mut store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("summary project missing")?;
+        let generation = IndexGeneration::new(1);
+        let entity =
+            |name: &str, kind, parent: Option<&str>| -> Result<GraphEntity, Box<dyn Error>> {
+                Ok(GraphEntity::new(
+                    project,
+                    EntitySelector::Symbol {
+                        symbol: SymbolSelector {
+                            file: RepositoryFilePath::new(Path::new(path))?,
+                            name: GraphIdentityText::new(name)?,
+                            kind,
+                            parent: parent.map(GraphIdentityText::new).transpose()?,
+                            signature: GraphIdentityText::new(name)?,
+                        },
+                    },
+                    generation,
+                )?)
+            };
+        let left = entity("run", SymbolKind::Method, Some("left::Widget"))?;
+        let right = entity("run", SymbolKind::Method, Some("right::Widget"))?;
+        let mut entities = vec![left.clone(), right];
+        let mut relations = Vec::new();
+        for index in 0..=CALLERS_PER_SYMBOL_LIMIT {
+            let source = entity(&format!("caller{index:02}"), SymbolKind::Function, None)?;
+            relations.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&left)?,
+                ConfidenceClass::High,
+                Completeness::Complete,
+                generation,
+            )?);
+            entities.push(source);
+        }
+        let mut publication = store.begin_index_publication("canonical summary bounds")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[test_node(path, "fixture")])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &entities, &relations, &[], &[])?;
+        publication.complete()?;
+        let mut display = test_symbol(path, SymbolKind::Method, "run");
+        display.parent = Some("Widget".to_string());
+        let (ambiguous, omitted) =
+            summary_callers::load_summary_callers(&store, path, std::slice::from_ref(&display))?;
+        require(
+            ambiguous.is_empty() && omitted,
+            "ambiguous nearest parent fabricated callers",
+        )?;
+        require(
+            !store.has_active_read_snapshot(),
+            "summary retained its owned read snapshot",
+        )?;
+        display.parent = Some("left::Widget".to_string());
+        store.begin_index_read_snapshot()?;
+        let (exact, omitted) =
+            summary_callers::load_summary_callers(&store, path, std::slice::from_ref(&display))?;
+        require(
+            store.has_active_read_snapshot(),
+            "summary finished the caller-owned read snapshot",
+        )?;
+        store.finish_index_read_snapshot()?;
+        let callers = exact
+            .get(&symbol_summary_key(&display))
+            .ok_or("exact caller list missing")?;
+        require_eq(
+            &callers.len(),
+            &CALLERS_PER_SYMBOL_LIMIT,
+            "canonical incoming bound",
+        )?;
+        require(omitted, "canonical incoming sentinel omission hidden")?;
+        Ok(())
+    }
+
+    /// Seed the query contract explicitly; producer alias/lexical rules are tested by real CLI E2Es.
+    fn seed_summary_call_edge(
+        store: &mut AtlasStore,
+        source_path: &str,
+        source_name: &str,
+        target_path: &str,
+        target_name: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        use projectatlas_core::graph::{
+            Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
+            LogicalRelation, RelationResolution, RepositoryFilePath, SymbolSelector,
+        };
+        let project = store
+            .project_instance_id()?
+            .ok_or("summary project identity missing")?;
+        let generation = IndexGeneration::new(1);
+        let entity = |path: &str, name: &str| -> Result<GraphEntity, Box<dyn Error>> {
+            let symbol = store
+                .load_symbols(Some(path), None, 100)?
+                .into_iter()
+                .find(|symbol| symbol.name == name)
+                .ok_or("summary fixture declaration missing")?;
+            Ok(GraphEntity::new(
+                project,
+                EntitySelector::Symbol {
+                    symbol: SymbolSelector {
+                        file: RepositoryFilePath::new(Path::new(path))?,
+                        name: GraphIdentityText::new(name)?,
+                        kind: symbol.kind,
+                        parent: symbol.parent.map(GraphIdentityText::new).transpose()?,
+                        signature: GraphIdentityText::new(if symbol.signature.trim().is_empty() {
+                            name
+                        } else {
+                            symbol.signature.trim()
+                        })?,
+                    },
+                },
+                generation,
+            )?)
+        };
+        let source = entity(source_path, source_name)?;
+        let target = entity(target_path, target_name)?;
+        let relation = LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&target)?,
+            ConfidenceClass::High,
+            Completeness::Complete,
+            generation,
+        )?;
+        let mut publication = store.begin_index_publication("summary canonical fixture")?;
+        publication.replace_repository_graph(project, &[source, target], &[relation], &[], &[])?;
+        publication.complete()?;
+        Ok(())
+    }
+
     fn test_symbol(path: &str, kind: SymbolKind, name: &str) -> CodeSymbol {
         CodeSymbol {
             path: path.to_string(),

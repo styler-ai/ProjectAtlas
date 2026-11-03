@@ -573,7 +573,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "80e380a4a77b88454bc8d9ccb784e347061350c98e2c05b3cd9b51a856c2b71b";
+    "2fa4b160266cd041d808e8709f70c3ffe9e9052cd7275fd2986dadb41df3258e";
 const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
@@ -3352,7 +3352,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     ] {
         for command in [
             "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             if !workflow.contains(command) {
                 return Err(io::Error::other(format!(
@@ -3368,7 +3369,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
         for gate in [
             "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             let gate_position = workflow
                 .find(gate)
@@ -3384,7 +3386,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for (name, owner) in [("CI", ci.as_str()), ("pre-push", hook.as_str())] {
         for command in [
             "npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             if !owner.contains(command) {
                 return Err(io::Error::other(format!(
@@ -3730,7 +3733,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
         "if: always()",
-        "needs: [plan, repository, rust, e2e-smoke]",
+        "needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]",
+        "WINDOWS_SECURITY_RESULT: ${{ needs.windows-security-diagnostics.result }}",
+        "if [[ \"$WINDOWS_SECURITY_RESULT\" != \"$windows_security_expected\" ]]; then",
         "python3 \"$trusted_planner\" aggregate",
         "bootstrap proof did not select every job",
         "bootstrap proof omitted a contract",
@@ -3958,8 +3963,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    if !mermaid_setup_step
-        .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
+    if !mermaid_setup_step.contains("npm test --prefix .github/mermaid-parser")
+        || !mermaid_setup_step
+            .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
     {
         return Err(io::Error::other("CI Mermaid setup must avoid an implicit audit").into());
     }
@@ -3970,7 +3976,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .ok_or_else(|| io::Error::other("CI dependency-audit step is missing"))?;
     for required in [
         "contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')",
-        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
     ] {
         if !dependency_audit_step.contains(required) {
             return Err(io::Error::other(format!(
@@ -4493,7 +4499,7 @@ gate_status={gate_status}
         .ok_or_else(|| io::Error::other("ordinary CI omitted hosted PTY TUI upload"))?;
     for required in [
         "if: matrix.label != 'windows'",
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
         "name: token-tui-pty-${{ matrix.label }}",
         "if-no-files-found: error",
     ] {
@@ -6697,7 +6703,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
         r#""macos-x64": "macos-15-intel""#,
-        r#""macos-arm64": "macos-14""#,
+        r#""macos-arm64": "macos-15""#,
     ] {
         if !planner.contains(required) {
             return Err(io::Error::other(format!(
@@ -6708,6 +6714,84 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     }
     if !e2e_smoke.contains("matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}") {
         return Err(io::Error::other("e2e-smoke omitted its affected platform matrix").into());
+    }
+
+    // A trusted base can still select an older image. Current workflow provisioning
+    // retains the logical ARM contract while Intel uses the original matrix row.
+    let documents = YamlLoader::load_from_str(&ci)?;
+    let document = documents
+        .first()
+        .ok_or_else(|| io::Error::other("CI workflow document is empty"))?;
+    if document["jobs"]["e2e-smoke"]["runs-on"].as_str()
+        != Some("${{ matrix.label == 'macos-arm64' && 'macos-15' || matrix.os }}")
+    {
+        return Err(io::Error::other(
+            "CI must provision supported ARM images for inherited accepted-base plans",
+        )
+        .into());
+    }
+    let plan = workflow_job_step(&ci, "plan", "Plan affected proof")?;
+    let bootstrap = plan["run"].as_str().unwrap_or_default();
+    for (label, runner) in [("macos-arm64", "macos-15"), ("macos-x64", "macos-15-intel")] {
+        let expected_label = format!("\"label\": \"{label}\",");
+        let expected_runner = format!("\"os\": \"{runner}\",");
+        if !bootstrap
+            .lines()
+            .zip(bootstrap.lines().skip(1))
+            .any(|(label, runner)| {
+                label.trim() == expected_label && runner.trim() == expected_runner
+            })
+        {
+            return Err(io::Error::other(format!(
+                "bootstrap logical platform {label} omitted runner {runner}"
+            ))
+            .into());
+        }
+    }
+    for path in [
+        ".github/workflows/release.yml",
+        ".github/workflows/optional-parser-pack.yml",
+    ] {
+        let contents = fs::read_to_string(workspace_root.join(path))?;
+        let documents = YamlLoader::load_from_str(&contents)?;
+        let jobs = documents
+            .first()
+            .and_then(|document| document["jobs"].as_hash())
+            .ok_or_else(|| io::Error::other("workflow jobs missing"))?;
+        let mut arm_rows = 0;
+        let mut intel_rows = 0;
+        for (_, job) in jobs {
+            let Some(rows) = job["strategy"]["matrix"]["include"].as_vec() else {
+                continue;
+            };
+            for row in rows {
+                let Some(label) = row["label"].as_str() else {
+                    continue;
+                };
+                let runner = row["os"].as_str().or_else(|| row["runner"].as_str());
+                let expected = if label.starts_with("macos-arm64") {
+                    arm_rows += 1;
+                    Some("macos-15")
+                } else if label.starts_with("macos-x64") {
+                    intel_rows += 1;
+                    Some("macos-15-intel")
+                } else {
+                    continue;
+                };
+                if runner != expected {
+                    return Err(io::Error::other(format!(
+                        "{path} logical platform {label} has incorrect runner {runner:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        if arm_rows == 0 || intel_rows == 0 {
+            return Err(io::Error::other(format!(
+                "{path} omitted required separate ARM and Intel runner rows"
+            ))
+            .into());
+        }
     }
 
     let target_compile = workflow_job_step(&ci, "e2e-smoke", "Affected package target compile")?;
@@ -36605,38 +36689,9 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     Ok(())
 }
 
-/// Publish a separate executable without a writable descriptor in the test parent.
+/// Copy with the shared lifecycle while retaining the installer-owned observer.
 fn copy_executable_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
-    #[cfg(unix)]
-    {
-        let metadata = fs::metadata(source)?;
-        if !metadata.is_file() || destination.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "executable fixture copy requires file paths",
-            )
-            .into());
-        }
-        // A concurrent fork can inherit a parent's writable executable descriptor
-        // even when fs::copy closes it before the subsequent exec (Rust #114554).
-        // Waiting for native cp keeps that writable descriptor in its child only.
-        let mut command = StdCommand::new("/bin/cp");
-        command.arg("--").arg(source).arg(destination);
-        let output = run_bounded_output(command, "executable fixture copy")?;
-        if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "executable fixture copy failed with status {}\nstdout:\n{}\nstderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .into());
-        }
-        fs::set_permissions(destination, metadata.permissions())?;
-    }
-    #[cfg(not(unix))]
-    fs::copy(source, destination)?;
-    Ok(())
+    support::copy_executable_fixture(source, destination, run_bounded_output)
 }
 
 #[test]

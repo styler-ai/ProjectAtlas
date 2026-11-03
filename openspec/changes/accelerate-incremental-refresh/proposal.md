@@ -29,7 +29,7 @@ The existing init, scan, symbol-build and watch adapters; filesystem and source-
 
 ## Release Scope
 
-#708 is a high-priority 0.5.1 must-have under release owner #715. Move it out of #493's 0.6.0 child/blocker set. This change publishes the complete plan; implementation and measured speedups remain pending. Start with the baseline and cold-CLI design gate after specification review and native milestone/parent/blocker admission.
+#708 is a high-priority 0.5.1 must-have under release owner #715. Move it out of #493's 0.6.0 child/blocker set. The implementation tasks distinguish accepted source improvements from remaining combined installed-platform proof. Preserve the settled exact cold-CLI contract and preregistered targets through final integration and release acceptance.
 
 ## Non-Goals
 

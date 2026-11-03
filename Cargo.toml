@@ -81,7 +81,8 @@ cssparser = "0.37"
 ed25519-dalek = { version = "3.0", default-features = false, features = ["fast", "signature", "zeroize"] }
 globset = "0.4"
 getrandom = "0.4.3"
-ignore = "0.4"
+gix-config = { version = "=0.62.2", default-features = false, features = ["sha1"] }
+ignore = "=0.4.34"
 jsonc-parser = { version = "0.34", features = ["serde"] }
 landlock = "=0.4.7"
 libloading = "=0.9.0"
@@ -93,6 +94,7 @@ nix = { version = "=0.31.3", default-features = false, features = [
 ] }
 notify = "8.2"
 object = { version = "=0.40.0", default-features = false, features = ["read"] }
+oxc_syntax = { version = "=0.156.0", default-features = false }
 pulldown-cmark = "0.13"
 lopdf = { version = "=0.44.0", default-features = false }
 wasmi = { version = "=2.0.0", default-features = false, features = ["stable", "std", "validate", "portable-dispatch"] }
@@ -102,7 +104,8 @@ proc-macro2 = { version = "1.0", features = ["span-locations"] }
 quick-xml = { version = "=0.42.0", default-features = false }
 predicates = "3.1"
 regex = "1.11"
-unicode-ident = "=1.0.24"
+unicode-ident = "=1.0.27"
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
 regex-syntax = { version = "0.8.11", default-features = false, features = ["std", "unicode-case"] }
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
@@ -110,6 +113,7 @@ rmcp = { version = "3.1.4", default-features = false, features = ["server", "tra
 rusqlite = { version = "0.40", features = ["backup", "bundled", "hooks", "limits"] }
 scraper = "0.27"
 same-file = "1.0"
+winapi-util = "0.1"
 seccompiler = { version = "=0.5.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -122,7 +126,7 @@ tiktoken = "4.1.2"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "1.1"
 toml_edit = "0.25"
-zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 toon-format = { version = "0.5.0", default-features = false, features = ["json_stream"] }
 tree-sitter = "=0.26.13"
 tree-sitter-c = "=0.24.2"
@@ -141,5 +145,11 @@ tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 zstd = "=0.14.3"
 tree-sitter-zig = "=1.1.2"
-whichdisk = { version = "0.6.0", default-features = false, features = ["list"] }
+whichdisk = { version = "0.7.0", default-features = false, features = ["list"] }
+unicode-casefold = "=0.2.0"
+xattr = "1.6.1"
+rustix = { version = "1.1.4", features = ["fs"] }
+exacl = { version = "=0.13.0", default-features = false }
+windows-permissions = "=0.2.4"
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
 yaml-rust2 = "0.12"

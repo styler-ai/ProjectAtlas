@@ -116,6 +116,95 @@ also resolves path-less root-sensitive tools from config, indexed DB metadata, o
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
 
+Automatic project state uses a direct `.projectatlas` directory beneath the selected
+source root. Before SQLite access, ProjectAtlas checks that root's conventional
+database and WAL/SHM entries are direct regular files with a single hard link.
+Initialization and root transitions also admit generated destinations before changing
+identity or writing defaults. Existing config and nonsource bytes remain intact;
+live nonsource aliases remain read-only inputs, while dangling aliases and aliases
+encountered at creation are refused. Generated host documents are replaced atomically
+with existing permissions preserved.
+Ordinary navigation does not require valid generated host documents.
+Managed paths remain managed through resolvable parent reductions and source-root
+aliases. An unresolved parent such as `.projectatlas/missing/../projectatlas.json`
+is refused before creating the intermediate directory; a failed ownership check
+cannot silently select an external writer. Existing symlink parents retain their
+physical filesystem meaning, and custom external destinations remain supported.
+Missing managed legacy configuration is admitted before database identity repair.
+On Linux, managed aliases use the containing directory's native casefold flag and
+filesystem model. Ext4/f2fs use their frozen Unicode 12.1 comparison; sensitive
+directories retain distinct custom names. Potential fixed-name aliases on an
+unrecognized comparison model report ownership uncertainty before writes. This
+does not claim support for every Linux driver or mount-specific comparison mode.
+
+On Windows, proven managed database aliases open the canonical long filename so
+DOS short names share one SQLite WAL/SHM cohort. Existing recovery sidecars under
+the main entry's actual short name cause a refusal before SQLite. Close their users
+and use external SQLite recovery/checkpoint tooling with that original spelling;
+ProjectAtlas does not retarget or discard pending commits. Explicit `reset-index`
+and `atlas_reset_index` can preview and remove canonical and proven short-name
+recovery entries without opening a corrupt database. Reset discards the selected
+index and its authored data; preview before applying. Separately removed main files
+provide no authoritative short alias, so unknown orphan cohorts need operator
+recovery. Custom/external databases and literal custom filenames remain supported.
+
+On macOS, managed case aliases follow the containing volume's case behavior,
+including Unicode case aliases. Distinct custom filenames on case-sensitive volumes
+remain supported. Unavailable case evidence for a possible managed alias causes a
+refusal before mutation; parent reductions use the destination volume's rules.
+
+Ignore edits and optional JSON map output apply the same ownership boundary to
+their exact managed documents. Changed default or legacy config and default JSON
+sidecars reject indirect entries; atomic replacement preserves outside hardlink
+targets and existing permissions. Unchanged config operations still read valid
+aliases. Gitignore initialization leaves every existing entry untouched, including
+dangling links, and reports a racing entry as existing rather than created.
+New documents use ordinary permissions under the process umask. Explicit custom
+config and map destinations retain their operator-selected behavior, including
+custom filenames directly inside `.projectatlas`; the parent directory alone does
+not make them managed. JSON output still refuses to overwrite its legacy TOON
+import through an alias.
+
+Replacement retains existing ownership and native file access controls: Linux
+POSIX/NFSv4 ACLs and SELinux/Smack file labels, macOS ordered ACLs, and Windows
+owner/group/DACL and system ACL policy. A policy that cannot be preserved causes a
+causal refusal before valid output is replaced. Linux prepares changed policy and
+complete bytes on an unnamed inode. macOS isolates every existing-file replacement
+and binds ACL operations to retained descriptors; Windows policy updates use the
+original staging handle.
+Linux fs-verity-sealed outputs are refused before staging, and sealing is rechecked
+on the retained source before replacement. Ordinary regeneration remains available;
+ProjectAtlas does not silently replace a sealed inode with an unsealed file.
+Existing EFS-encrypted Windows managed outputs are refused before replacement
+because their complete native encryption policy cannot yet be preserved. The
+retained source is rechecked before publication. New outputs still inherit EFS
+from their directory; explicit custom outputs and database/index selection remain
+supported. ProjectAtlas does not decrypt files or recreate their encryption keys.
+Ordinary Windows outputs with no system ACL remain replaceable without additional
+privilege. Replacing explicitly labeled or audited files requires full policy
+access already available to the caller; otherwise it leaves valid output intact.
+The complete retained query includes resource attributes and scoped-policy entries;
+serialization and assignment select those classes explicitly. A codec that omits
+native entries is refused before staging. The Windows binaries use the Rust
+target's Windows 10 / Server 2016 or newer baseline.
+ProjectAtlas does not enable privileges globally. Defaulted system ACLs whose
+control state cannot be reproduced are refused as unsupported. Replacement also
+refuses defaulted owner/group/DACL metadata that the native codec cannot reproduce;
+ordinary file policy is verified through native creation and readback controls.
+New outputs retain ordinary parent inheritance. The destination and staging file
+identities are rechecked before publication; uncertain staging ownership withholds
+cleanup. A private-directory cleanup error after publication explicitly reports
+that the replacement already committed. These are bounded mutation checks, not
+a lock against arbitrary concurrent filesystem changes.
+
+Canonical source-root aliases and explicit external database/configuration paths remain
+supported. A conventional-looking database filename outside the independently selected
+root remains an operator-selected binding. Before startup database discovery, explicit
+configuration supplies that root; an explicit binding without configuration uses the
+current root for admission. Per-call `project_path` and worktree selections use their
+own roots. These checks preserve ownership at the admitted operation boundaries;
+they do not lock arbitrary ancestors against concurrent filesystem replacement.
+
 One MCP server can serve the selected control checkout, its registered worktrees, and unrelated
 indexed repositories. Prefer per-call `worktree` for a registered checkout and use `main` for the
 control atlas. Use `atlas_set_project_path` to change the active process default only in a

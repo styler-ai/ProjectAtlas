@@ -7,5 +7,13 @@
   "dependencies": {
     "jsdom": "27.4.0",
     "mermaid": "11.16.1"
+  },
+  "scripts": {
+    "test": "node --test security.test.mjs"
+  },
+  "overrides": {
+    "mermaid": {
+      "katex": "0.18.2"
+    }
   }
 }

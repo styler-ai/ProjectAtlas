@@ -2,7 +2,7 @@
 
 ## Context
 
-See [proposal.md](proposal.md) for scope. #708 is now a 0.5.1 must-have under #715 and covers initial indexing, full reindexing, symbol/graph rebuilding and refreshes. Stable 0.5.0 is the new performance baseline. This planning change modifies no product code or release artifact.
+See [proposal.md](proposal.md) for scope. #708 is now a 0.5.1 must-have under #715 and covers initial indexing, full reindexing, symbol/graph rebuilding and refreshes. Stable 0.5.0 is the new performance baseline. The implementation remains in the existing runtime, filesystem, parsing and storage owners; the task checklist records remaining acceptance.
 
 The current CLI enters `run_single_watch_refresh_controlled`, then `refresh_index_controlled`. MCP watch-once calls the same refresh owner without using its server's `SourceObservationRegistry`. An unchanged call walks admitted paths, hashes their contents, loads stored nodes and compares the two sets. It avoids parsing and a new generation when nothing changed. A changed one-shot call can stage a full publication and perform two further exact validation scans. Continuous watching already supplies `WatchChangeSet` to an incremental path.
 
@@ -151,6 +151,14 @@ No schema change, public route removal or new dependency is required by this pla
 #708 is a required 0.5.1 child and blocker of #715. Remove its old 0.6.0 membership and #493 blocker relationship without changing #493's remaining children. It has no implementation prerequisite on #310, #314, #388 or the language work in #563. Those 0.6.0 features consume the accepted indexing baseline later.
 
 #699 supplies the cooperative-budget and caller-limit contract. Update affected help, schemas and default-budget guidance together without weakening explicit caller control. #358 supplies historical context only; task 2.1 establishes the optimized 0.5.0 baseline and numerical targets. The release owner implements no performance fix; this plan does not publish 0.5.1.
+
+The final combined candidate consumes accepted #731/#732/#739/#741/#738 source,
+including derivation-26/semantic-23, bounded source recovery and external-policy
+verification. Preserve its source/root/watch/publication guards while applying
+#708 budgets and exact-admission optimizations. The scoped static-binding and
+external-policy cost references do not waive any preregistered performance,
+unaffected-navigation or supported-upgrade target. Measure required one-time
+contract repair separately from current-contract reuse on the combined source.
 
 ## Open Questions
 

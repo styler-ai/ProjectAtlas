@@ -1,0 +1,1240 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-11-02",
+  "scope": "external source-policy repair; bounded Linux affected-work evidence",
+  "host": {
+    "cpu": "AMD Ryzen 7 5700U",
+    "logical_cpus": 16,
+    "kernel": "Linux 7.0.0-38-generic",
+    "target": "x86_64-unknown-linux-gnu",
+    "rustc": "1.98.0 (88d9e12ae178fab0fb5cc050a94da85685d449ea)"
+  },
+  "build": "cargo build --locked -p projectatlas-cli --release (default features)",
+  "baseline": {
+    "accepted_commit": "6927ed0ca64788db6947b4d43eafce29aac5ed61",
+    "equivalent_reviewed_commit": "5dda66c4d203b3b31e58f21f20045160ae088718",
+    "derivation": 24,
+    "semantic": 23,
+    "bytes": 69456960,
+    "sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c"
+  },
+  "candidate": {
+    "derivation": 26,
+    "semantic": 23,
+    "source_manifest_sha256": "7e767ae5332ae90ff8dffb42b2f489338a981fb484c763e6346e93bf1bbe5cab",
+    "bytes": 70000320,
+    "sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488"
+  },
+  "protocol": {
+    "trials": 3,
+    "order": "baseline/candidate, candidate/baseline, baseline/candidate",
+    "construction_iterations": 100,
+    "full_scan_iterations": 5,
+    "targeted_iterations": 1000,
+    "cache": "ordinary warm filesystem/page cache; separate process per sample",
+    "rss": "GNU time complete micro-process maximum; table aggregates sample medians",
+    "source_manifest": "SHA256 of sorted indent=2 JSON plus newline mapping git ls-files -- Cargo.toml Cargo.lock rust-toolchain.toml .cargo crates paths to SHA256 of exact saved bytes",
+    "micro_source_sha256": "be8b7ab61c0230a71b873e6d93ec951b8d0d917037dedea0ee65cec3c8eee397",
+    "baseline_helper_relinked_byte_identically": true,
+    "micro_binaries": {
+      "accepted-main": "fffcc9463873ebd6f7e17072a3d45f475b915a44783eafd4f90a81bc7464468e",
+      "candidate": "544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9"
+    },
+    "observer_namespace_cost": "SourceBinding capture adds one canonical database-target lookup on each observed request, including warm requests; event filtering is bounded to selected and target namespaces and three sidecars. Fresh CLI init/unchanged-refresh costs are measured here; these samples do not isolate persistent MCP warm-request latency. Policy-event namespace resolution is constant for unrelated source-file events; directory events revalidate affected selected bindings once across overlapping paths within an event under the original work control. This resource regression is not a timed persistent-MCP latency claim.",
+    "policy_micro_measurement": {
+      "fresh_samples": 0,
+      "reused_samples": 18,
+      "sha256": "544eb8349e6803c427b11382b32b4297e071336f66b547c465ddc8a339d83fc9",
+      "measurement_source_manifest_sha256": "bb9bf24ff9cec0522faf05df21edaa8648772e8138e7a6ef7c3d9d1b0a456d00",
+      "reuse_basis": "Exact relinked native filesystem helper byte identity; current CLI costs and upgrades measured freshly."
+    },
+    "cli_measurement_source_manifest_sha256": "7e767ae5332ae90ff8dffb42b2f489338a981fb484c763e6346e93bf1bbe5cab",
+    "cli_measurement_reuse_basis": "All 18 CLI samples freshly measured against this exact frozen artifact; only byte-identical native filesystem component samples are reused.",
+    "runtime_event_ingress": "One separate pending runtime wake per observer/CLI loop coalesces exact selected/resolved SQLite notifications without policy uncertainty or callback filesystem I/O. Main structural changes remain observable; MCP drains revalidate target authority and rearm at the shared receiver-fenced owner. Real ASCII/Unicode-root CLI/MCP and source-edit proof is separate from these fresh-process timings."
+  },
+  "fixtures": {
+    "ordinary": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "fixture_manifest_sha256": "c08045041b5e411f5f09aa9638067404ff29af0ff0cb8f1da81a3547834a419c"
+    },
+    "large-config": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "fixture_manifest_sha256": "2c658296dd78e1ee4e674f0495c17b919b142c3834ab334cf3d54ea5f9bf97f9"
+    },
+    "many-rules": {
+      "authored_files": 515,
+      "scanned_nodes": 514,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "fixture_manifest_sha256": "f98066c1af56409e252fe163a68a55efc94b4b800d7c8813d323cc8574bffd3e"
+    }
+  },
+  "samples": [
+    {
+      "case": "ordinary",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.07068860600702465,
+      "peak_rss_kib": 6696,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 2.9860680000000002e-05,
+      "full_scan_seconds": 0.0064313928000000005,
+      "targeted_seconds": 2.4172276e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 0.11071882699616253,
+      "peak_rss_kib": 5600,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 5.938033e-05,
+      "full_scan_seconds": 0.0049622886,
+      "targeted_seconds": 7.580739200000001e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 0.11103783000726253,
+      "peak_rss_kib": 5952,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 5.884882999999999e-05,
+      "full_scan_seconds": 0.0054231788,
+      "targeted_seconds": 7.4864402e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.0530926680075936,
+      "peak_rss_kib": 5352,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 8.99108e-06,
+      "full_scan_seconds": 0.0049464908,
+      "targeted_seconds": 2.4234112e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.05288515595020726,
+      "peak_rss_kib": 6188,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 8.93487e-06,
+      "full_scan_seconds": 0.0049109136,
+      "targeted_seconds": 2.3984943000000002e-05,
+      "nodes": 514
+    },
+    {
+      "case": "ordinary",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 0.11002768197795376,
+      "peak_rss_kib": 6184,
+      "config_bytes": 117,
+      "rules_bytes": 12,
+      "construction_seconds": 5.927634e-05,
+      "full_scan_seconds": 0.004869415199999999,
+      "targeted_seconds": 7.4960784e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.10461287701036781,
+      "peak_rss_kib": 6548,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 9.18103e-06,
+      "full_scan_seconds": 0.0054641104000000005,
+      "targeted_seconds": 7.2135368e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 0.19445148500381038,
+      "peak_rss_kib": 9100,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.0008303478,
+      "full_scan_seconds": 0.0062902904,
+      "targeted_seconds": 7.5040804e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 0.19845084799453616,
+      "peak_rss_kib": 9752,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.0008609631199999999,
+      "full_scan_seconds": 0.0061198124,
+      "targeted_seconds": 7.6302236e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.10123871598625556,
+      "peak_rss_kib": 7204,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 8.99879e-06,
+      "full_scan_seconds": 0.0048769213999999995,
+      "targeted_seconds": 7.2151178e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 0.10467975301435217,
+      "peak_rss_kib": 6472,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 8.97475e-06,
+      "full_scan_seconds": 0.0054850718,
+      "targeted_seconds": 7.2133555e-05,
+      "nodes": 514
+    },
+    {
+      "case": "large-config",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 0.197323699016124,
+      "peak_rss_kib": 9228,
+      "config_bytes": 500121,
+      "rules_bytes": 12,
+      "construction_seconds": 0.0008500331699999999,
+      "full_scan_seconds": 0.0061077356,
+      "targeted_seconds": 7.6179945e-05,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 0,
+      "label": "accepted-main",
+      "process_wall_seconds": 17.955351646989584,
+      "peak_rss_kib": 20360,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 9.191950000000001e-06,
+      "full_scan_seconds": 0.024363447,
+      "targeted_seconds": 0.017827167337999997,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 0,
+      "label": "candidate",
+      "process_wall_seconds": 4.241769902000669,
+      "peak_rss_kib": 19972,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.01625147462,
+      "full_scan_seconds": 0.0240316186,
+      "targeted_seconds": 0.0024739816010000003,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 1,
+      "label": "candidate",
+      "process_wall_seconds": 4.217130384000484,
+      "peak_rss_kib": 20324,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.01621897425,
+      "full_scan_seconds": 0.0240947296,
+      "targeted_seconds": 0.002452786939,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 1,
+      "label": "accepted-main",
+      "process_wall_seconds": 17.888943972007837,
+      "peak_rss_kib": 20548,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 8.973740000000001e-06,
+      "full_scan_seconds": 0.0244279328,
+      "targeted_seconds": 0.017759909628,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 2,
+      "label": "accepted-main",
+      "process_wall_seconds": 20.321024022006895,
+      "peak_rss_kib": 20628,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 9.030349999999999e-06,
+      "full_scan_seconds": 0.0243770148,
+      "targeted_seconds": 0.020192584552,
+      "nodes": 514
+    },
+    {
+      "case": "many-rules",
+      "trial": 2,
+      "label": "candidate",
+      "process_wall_seconds": 4.645898941962514,
+      "peak_rss_kib": 20140,
+      "config_bytes": 119,
+      "rules_bytes": 150012,
+      "construction_seconds": 0.01786508513,
+      "full_scan_seconds": 0.0268556032,
+      "targeted_seconds": 0.0027007152319999997,
+      "nodes": 514
+    }
+  ],
+  "medians": {
+    "ordinary": {
+      "accepted-main": {
+        "construction_seconds": 8.99108e-06,
+        "full_scan_seconds": 0.0049464908,
+        "targeted_seconds": 2.4172276e-05,
+        "peak_rss_kib": 6188
+      },
+      "candidate": {
+        "construction_seconds": 5.927634e-05,
+        "full_scan_seconds": 0.0049622886,
+        "targeted_seconds": 7.4960784e-05,
+        "peak_rss_kib": 5952
+      }
+    },
+    "large-config": {
+      "accepted-main": {
+        "construction_seconds": 8.99879e-06,
+        "full_scan_seconds": 0.0054641104000000005,
+        "targeted_seconds": 7.2135368e-05,
+        "peak_rss_kib": 6548
+      },
+      "candidate": {
+        "construction_seconds": 0.0008500331699999999,
+        "full_scan_seconds": 0.0061198124,
+        "targeted_seconds": 7.6179945e-05,
+        "peak_rss_kib": 9228
+      }
+    },
+    "many-rules": {
+      "accepted-main": {
+        "construction_seconds": 9.030349999999999e-06,
+        "full_scan_seconds": 0.0243770148,
+        "targeted_seconds": 0.017827167337999997,
+        "peak_rss_kib": 20548
+      },
+      "candidate": {
+        "construction_seconds": 0.01625147462,
+        "full_scan_seconds": 0.0240947296,
+        "targeted_seconds": 0.0024739816010000003,
+        "peak_rss_kib": 20140
+      }
+    }
+  },
+  "binary_size": {
+    "baseline_bytes": 69456960,
+    "candidate_bytes": 70000320,
+    "delta_bytes": 543360,
+    "delta_percent": 0.7822974112313474
+  },
+  "upgrade_cases": [
+    {
+      "baseline": "stable050",
+      "baseline_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+      "linked_git_worktree": false,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "stable050",
+      "baseline_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+      "linked_git_worktree": true,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "accepted-main24",
+      "baseline_sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c",
+      "linked_git_worktree": false,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    },
+    {
+      "baseline": "accepted-main24",
+      "baseline_sha256": "adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c",
+      "linked_git_worktree": true,
+      "old_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "upgraded_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ],
+        [
+          "unresolved",
+          "ignored"
+        ]
+      ],
+      "rollback_view": [
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "resolved",
+          ""
+        ],
+        [
+          "unresolved",
+          "missing"
+        ]
+      ],
+      "rollback_view_matches_predecessor": true,
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "Local affected-work micro-costs, not repository-wide throughput or #708 SLO acceptance.",
+    "Default optimized CLI and native filesystem policy owner; package/platform acceptance remains #715.",
+    "Upgrade early zero timeout proves an entry-deadline refusal, not mid-publication cancellation.",
+    "Actual CLI/MCP external-policy and replacement regressions run separately against this frozen candidate.",
+    "All measured ignore rules are nonmatching for authored files: policy-overhead data, not matched-path scan cost. Positive matching is verified by separate public-adapter regressions.",
+    "Component cost fixtures use canonical roots. Alias/relative-root behavior is covered by regression tests, not a separate alias-branch timing claim.",
+    "Watch rename-gap behavior is covered by causal batch and public-adapter tests; these init/unchanged-refresh timings do not quantify the transient-gap branch.",
+    "Measurements use an unisolated desktop host; workspace check and rustdoc overlapped the final filesystem component trial, so small timing differences are not attributed to the change. The cold-document CLI samples completed before that overlap.",
+    "Filesystem component samples are reused only after exact rebuilt helper byte-identity verification. Current CLI cost, cold-document, upgrade/rollback and public-adapter proof use the current frozen optimized binary."
+  ],
+  "cli_pipeline": {
+    "method": "Separate fresh non-Git root per process/trial; same 513 Rust files plus README.md and .gitignore; one absent-document target confirmed missing by public relation query; init and subsequent unchanged watch --once measured independently with GNU time. Warm cache, default optimized profile, three alternating trials per case.",
+    "medians": {
+      "ordinary": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.30905447201803327,
+            "peak_rss_kib": 32836
+          },
+          "noop": {
+            "wall_seconds": 0.04827343695797026,
+            "peak_rss_kib": 21840
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.31271032395306975,
+            "peak_rss_kib": 31352
+          },
+          "noop": {
+            "wall_seconds": 0.04971077397931367,
+            "peak_rss_kib": 20524
+          }
+        }
+      },
+      "large-config": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.3011912349611521,
+            "peak_rss_kib": 32964
+          },
+          "noop": {
+            "wall_seconds": 0.049162801005877554,
+            "peak_rss_kib": 21896
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.3197014139732346,
+            "peak_rss_kib": 34156
+          },
+          "noop": {
+            "wall_seconds": 0.05436959594953805,
+            "peak_rss_kib": 23976
+          }
+        }
+      },
+      "many-rules": {
+        "accepted-main": {
+          "init": {
+            "wall_seconds": 0.3850416080094874,
+            "peak_rss_kib": 45452
+          },
+          "noop": {
+            "wall_seconds": 0.07094603206496686,
+            "peak_rss_kib": 32920
+          }
+        },
+        "candidate": {
+          "init": {
+            "wall_seconds": 0.39777625899296254,
+            "peak_rss_kib": 42208
+          },
+          "noop": {
+            "wall_seconds": 0.09789477894082665,
+            "peak_rss_kib": 33196
+          }
+        }
+      }
+    },
+    "samples": [
+      {
+        "case": "ordinary",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3165099009638652,
+          "peak_rss_kib": 32836
+        },
+        "noop": {
+          "wall_seconds": 0.04827343695797026,
+          "peak_rss_kib": 21648
+        }
+      },
+      {
+        "case": "ordinary",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3169915470061824,
+          "peak_rss_kib": 31352
+        },
+        "noop": {
+          "wall_seconds": 0.050689467927441,
+          "peak_rss_kib": 20932
+        }
+      },
+      {
+        "case": "ordinary",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.31271032395306975,
+          "peak_rss_kib": 31764
+        },
+        "noop": {
+          "wall_seconds": 0.04971077397931367,
+          "peak_rss_kib": 20396
+        }
+      },
+      {
+        "case": "ordinary",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.30905447201803327,
+          "peak_rss_kib": 32664
+        },
+        "noop": {
+          "wall_seconds": 0.048686482943594456,
+          "peak_rss_kib": 22356
+        }
+      },
+      {
+        "case": "ordinary",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.30592257692478597,
+          "peak_rss_kib": 33040
+        },
+        "noop": {
+          "wall_seconds": 0.04727360303513706,
+          "peak_rss_kib": 21840
+        }
+      },
+      {
+        "case": "ordinary",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 133,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3110563230002299,
+          "peak_rss_kib": 30968
+        },
+        "noop": {
+          "wall_seconds": 0.04968320101033896,
+          "peak_rss_kib": 20524
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3002945289481431,
+          "peak_rss_kib": 33092
+        },
+        "noop": {
+          "wall_seconds": 0.04721693496685475,
+          "peak_rss_kib": 21896
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.31370859302114695,
+          "peak_rss_kib": 33980
+        },
+        "noop": {
+          "wall_seconds": 0.05503377108834684,
+          "peak_rss_kib": 23764
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.32485580001957715,
+          "peak_rss_kib": 35512
+        },
+        "noop": {
+          "wall_seconds": 0.05436959594953805,
+          "peak_rss_kib": 23976
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.30898112000431865,
+          "peak_rss_kib": 32836
+        },
+        "noop": {
+          "wall_seconds": 0.049282759078778327,
+          "peak_rss_kib": 21760
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 500141,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3011912349611521,
+          "peak_rss_kib": 32964
+        },
+        "noop": {
+          "wall_seconds": 0.049162801005877554,
+          "peak_rss_kib": 22076
+        }
+      },
+      {
+        "case": "large-config",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 500137,
+        "rules_bytes": 12,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3197014139732346,
+          "peak_rss_kib": 34156
+        },
+        "noop": {
+          "wall_seconds": 0.05363470606971532,
+          "peak_rss_kib": 24224
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 0,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.38206492096651345,
+          "peak_rss_kib": 45208
+        },
+        "noop": {
+          "wall_seconds": 0.07008442003279924,
+          "peak_rss_kib": 34036
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 0,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.39777625899296254,
+          "peak_rss_kib": 42208
+        },
+        "noop": {
+          "wall_seconds": 0.09662916895467788,
+          "peak_rss_kib": 33196
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 1,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.39705134800169617,
+          "peak_rss_kib": 42124
+        },
+        "noop": {
+          "wall_seconds": 0.09927090001292527,
+          "peak_rss_kib": 33128
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 1,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.3850416080094874,
+          "peak_rss_kib": 45564
+        },
+        "noop": {
+          "wall_seconds": 0.07094603206496686,
+          "peak_rss_kib": 32920
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 2,
+        "label": "accepted-main",
+        "config_bytes": 139,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.39749621297232807,
+          "peak_rss_kib": 45452
+        },
+        "noop": {
+          "wall_seconds": 0.07293289504013956,
+          "peak_rss_kib": 32864
+        }
+      },
+      {
+        "case": "many-rules",
+        "trial": 2,
+        "label": "candidate",
+        "config_bytes": 135,
+        "rules_bytes": 150012,
+        "source_files": 515,
+        "symbols": 514,
+        "document_reason": "missing",
+        "init": {
+          "wall_seconds": 0.4002441270276904,
+          "peak_rss_kib": 42448
+        },
+        "noop": {
+          "wall_seconds": 0.09789477894082665,
+          "peak_rss_kib": 33332
+        }
+      }
+    ]
+  },
+  "cold_document_policy": {
+    "documents": 8,
+    "links_per_document": 128,
+    "persisted_unresolved_rows": 1024,
+    "ignore_rules": 2000,
+    "local_policy_bytes": 50890,
+    "page_rows": 256,
+    "order": "Three historical predecessor processes and three freshly measured candidate processes; one distinct freshly initialized fixture per binary, warm filesystem caches. Predecessor identity and sample bytes reused unchanged.",
+    "publication_unchanged": true,
+    "samples": {
+      "before": {
+        "binary_sha256": "ad884f80ca0f3f599ff418c85fd6c3136a79715f58d8e6a38731df5df3a5bf5a",
+        "cold_summary_seconds": [
+          4.377182746015023,
+          4.309598318999633,
+          4.383780615055002
+        ],
+        "median_seconds": 4.377182746015023,
+        "init_seconds": 10.211493673967198
+      },
+      "after": {
+        "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+        "cold_summary_seconds": [
+          0.06967272504698485,
+          0.06997035106178373,
+          0.06784123799297959
+        ],
+        "median_seconds": 0.06967272504698485,
+        "init_seconds": 0.26568442105781287
+      }
+    },
+    "speed_ratio": 62.824910939872154,
+    "limitations": "Bounded local CLI workload on an unisolated desktop; predecessor samples retained from the earlier exact-identity measurement, current candidate sampled separately without overlapping builds. Not a thirty-minute denial experiment, isolated persistent-MCP latency or general performance SLO."
+  },
+  "policy_work_limits": {
+    "scope": "per RootScanMatcher / DocumentResolutionIndex pass; staging and fresh publication revalidation have separate pass accounting under the original operation deadline",
+    "directory_context_loads": 1000000,
+    "local_policy_input_bytes": 134217728,
+    "child_cache_soft_contexts": 256,
+    "child_cache_soft_input_and_key_bytes": 4194304,
+    "reloads_charged_again": true,
+    "root_seed_reparsed_after_eviction": false,
+    "failed_pass_requires_fresh_matcher": true,
+    "quota_refusal": "existing verification_incomplete / policy_unavailable, no incremental or observed-MCP refresh retry",
+    "native_document_prefix_probes_per_pass": 4000000,
+    "native_probe_scope": "Explicit target-prefix, target-leaf and ancestor-fallback metadata/canonical operations; fixed root capture and native ignore-engine setup have their existing separate controls. A probe is not a constant-time syscall.",
+    "cold_verification_rows": {
+      "per_pass_returned_rows": 1000000,
+      "page_rows": 256,
+      "continuation_lookahead_rows": 1,
+      "accounting": "Before normalization and every lookup/reason shortcut. Repeated sentinels plus at most one current over-limit page bound SQL decoding; cancellation/deadline remain original.",
+      "failure": "Existing full-scope PolicyUnavailable verification refusal with private non-retrying DocumentRows marker.",
+      "positive_cli_rows": 10801,
+      "positive_cli_state_and_later_target_change": true
+    }
+  },
+  "native_prefix_verification": {
+    "existing_directory_depth": 64,
+    "documents": 4,
+    "links_per_document": 128,
+    "persisted_missing_relations": 512,
+    "publication_unchanged": true,
+    "samples": {
+      "before": {
+        "binary_sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d",
+        "init_seconds": 5.320103170990478,
+        "cold_summary_seconds": 2.6000373759889044,
+        "traced_syscalls": {
+          "readlink": 1300153,
+          "statx": 2120,
+          "openat": 228,
+          "readlinkat": 130,
+          "newfstatat": 52
+        }
+      },
+      "after": {
+        "binary_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
+        "init_seconds": 0.7350583620136604,
+        "cold_summary_seconds": 0.3216716010356322,
+        "traced_syscalls": {
+          "statx": 68168,
+          "readlink": 5305,
+          "openat": 228,
+          "readlinkat": 130,
+          "newfstatat": 52
+        }
+      }
+    },
+    "method": "One quiet init and one cold summary per exact optimized binary, distinct newly initialized roots with identical authored input. Separate strace -f -c measurements record only readlink/readlinkat/newfstatat/statx/openat; traced timings are not compared with untraced timings.",
+    "owning_counter_regression": {
+      "targets": 128,
+      "ordinary_directory_depth": 32,
+      "before_canonicalizations": 4352,
+      "after_canonicalization_upper_bound": 384,
+      "after_metadata_plus_canonical_probe_upper_bound": 8704,
+      "all_owned_native_probes_charged": true
+    },
+    "limitations": "One local sample per binary on an unisolated Linux desktop, warm caches; scoped repeated-prefix proof, not a throughput or persistent-MCP SLO.",
+    "reported_scale": {
+      "existing_directory_depth": 200,
+      "documents": 2,
+      "links_per_document": 500,
+      "persisted_missing_relations": 1000,
+      "document_coverage_complete": true,
+      "publication_unchanged": true,
+      "before": {
+        "binary_sha256": "1dd76da9ec3df10686c2d92d8309256a170b02ca84d98ccf156a6b692579f28d",
+        "init_seconds": 191.4762373290141,
+        "cold_summary_seconds": 95.70886936801253
+      },
+      "after": {
+        "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+        "init_seconds": 7.186750638997182,
+        "cold_summary_seconds": 3.4444443500833586
+      },
+      "limitations": "One quiet init/read per exact binary on distinct identical-input roots, warm caches and unisolated host; no general SLO. A one-document 1000-link/depth200 trial correctly reached the intermediate_bytes extraction limit at 614 links, so the complete comparison uses two documents without changing that limit.",
+      "document_coverage": [
+        [
+          "guide0.md",
+          "complete",
+          500,
+          500,
+          0
+        ],
+        [
+          "guide1.md",
+          "complete",
+          500,
+          500,
+          0
+        ]
+      ]
+    },
+    "historical_512_link_sample_scope": "The retained 512-link timings and separate syscall counts belong to the identified derivation-25 prefix-repair artifact, not the current CLI. The complete 1000-link reported-scale result below is freshly measured for the current artifact; no binary equivalence is claimed."
+  },
+  "markdown_contract_upgrade_cases": [
+    {
+      "baseline_derivation": 25,
+      "baseline_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
+      "linked_git_worktree": false,
+      "before_heading": "dog.png",
+      "after_heading": "![[cat.png|dog.png]]",
+      "rollback_heading": "dog.png",
+      "reupgrade_heading": "![[cat.png|dog.png]]",
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "unchanged_refresh_preserves_publication": true,
+      "entry_deadline_preserves_last_valid_state": true,
+      "passed": true
+    },
+    {
+      "baseline_derivation": 25,
+      "baseline_sha256": "e89af7a49cca79336001fc8c395c4166bda1de367b06be94049e829d78b28d06",
+      "linked_git_worktree": true,
+      "before_heading": "dog.png",
+      "after_heading": "![[cat.png|dog.png]]",
+      "rollback_heading": "dog.png",
+      "reupgrade_heading": "![[cat.png|dog.png]]",
+      "all_approved_purposes_preserved": true,
+      "project_identity_preserved": true,
+      "unchanged_refresh_preserves_publication": true,
+      "entry_deadline_preserves_last_valid_state": true,
+      "passed": true
+    }
+  ],
+  "optimized_adapter_cases": [
+    {
+      "test": "external_git_exclusions_agree_across_cli_mcp_and_refresh",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "54b63375572345443ad5bafccb3120d381f2fa46656adc38f48c23d5e7c49b53",
+      "seconds": 1.5425661209737882
+    },
+    {
+      "test": "observed_mcp_reconciles_document_only_target_changes",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "54b63375572345443ad5bafccb3120d381f2fa46656adc38f48c23d5e7c49b53",
+      "seconds": 2.3504921549465507
+    },
+    {
+      "test": "source_root_replacement_preserves_cli_mcp_external_bindings",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "54b63375572345443ad5bafccb3120d381f2fa46656adc38f48c23d5e7c49b53",
+      "seconds": 16.875562116038054
+    },
+    {
+      "test": "automatic_state_admission_preserves_cli_mcp_navigation",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "b6cc57506a6e7987218c6bd9b573b68cf65d52efe266d72a37c68a11d5c14178",
+      "seconds": 2.1740929170046
+    },
+    {
+      "test": "continuous_cli_policy_flood_preserves_polling_and_later_edits",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "54b63375572345443ad5bafccb3120d381f2fa46656adc38f48c23d5e7c49b53",
+      "seconds": 8.057158002979122
+    },
+    {
+      "test": "external_policy_ancestor_restart_preserves_cli_mcp_observation",
+      "passed": true,
+      "binary_sha256": "090ad69356456a4077650e336fa6831faf342d6f1b8bd3cb1c92c4697a8fc488",
+      "harness_sha256": "54b63375572345443ad5bafccb3120d381f2fa46656adc38f48c23d5e7c49b53",
+      "seconds": 8.612760990974493
+    }
+  ],
+  "measurement_status": {
+    "source_commit": "90719d9149c175c6f48fd80dfeafcd9271be141e",
+    "status": "current_frozen_source_evidence",
+    "limitation": "Local Linux artifact and affected-work proof; native Windows lifecycle, exact hosted/review gates and final issue/release acceptance remain separately required. Historical 512-link syscall samples are not current-artifact measurements."
+  }
+}

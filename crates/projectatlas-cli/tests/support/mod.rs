@@ -1011,6 +1011,48 @@ pub(super) fn mcp_contract_executable() -> PathBuf {
     )
 }
 
+/// Publish a separate executable without a writable descriptor in the test parent.
+pub(super) fn copy_executable_fixture(
+    source: &Path,
+    destination: &Path,
+    run_copy: impl FnOnce(StdCommand, &str) -> Result<std::process::Output, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    use std::fs;
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(source)?;
+        if !metadata.is_file() || destination.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "executable fixture copy requires file paths",
+            )
+            .into());
+        }
+        // A concurrent fork can inherit a parent's writable executable descriptor
+        // even when fs::copy closes it before the subsequent exec (Rust #114554).
+        // Waiting for native cp keeps that writable descriptor in its child only.
+        let mut command = StdCommand::new("/bin/cp");
+        command.arg("--").arg(source).arg(destination);
+        let output = run_copy(command, "executable fixture copy")?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "executable fixture copy failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        fs::set_permissions(destination, metadata.permissions())?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = run_copy;
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
 /// Run a JSON summary command for one indexed path.
 pub(super) fn json_summary_command(
     repo: &Path,

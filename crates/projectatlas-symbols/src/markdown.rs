@@ -225,7 +225,7 @@ pub(crate) fn extract_markdown_facts_checked<E>(
     let mut extraction = MarkdownExtraction::new(content);
     if content.len() > MAX_MARKDOWN_BYTES {
         extraction.limit(MarkdownFactLimit::InputBytes);
-        return Ok(extraction.finish());
+        return extraction.finish(check);
     }
 
     let parser = Parser::new_ext(content, Options::all()).into_offset_iter();
@@ -234,7 +234,7 @@ pub(crate) fn extract_markdown_facts_checked<E>(
         extraction.consume(event, range);
     }
     check()?;
-    Ok(extraction.finish())
+    extraction.finish(check)
 }
 
 /// Mutable bounded state for one parser pass.
@@ -517,7 +517,7 @@ impl<'a> MarkdownExtraction<'a> {
     }
 
     /// Finalize immutable public facts and derive completeness.
-    fn finish(mut self) -> MarkdownFacts {
+    fn finish<E>(mut self, check: &mut impl FnMut() -> Result<(), E>) -> Result<MarkdownFacts, E> {
         let mut offsets = Vec::with_capacity(
             self.headings
                 .len()
@@ -532,7 +532,7 @@ impl<'a> MarkdownExtraction<'a> {
             offsets.push(source.byte_start);
             offsets.push(source.byte_end);
         }
-        let positions = source_positions(self.content, offsets);
+        let positions = crate::source_positions::source_positions(self.content, offsets, check)?;
         for source in self
             .headings
             .iter_mut()
@@ -550,7 +550,7 @@ impl<'a> MarkdownExtraction<'a> {
         } else {
             MarkdownFactCompleteness::Partial
         };
-        MarkdownFacts {
+        Ok(MarkdownFacts {
             provenance: MarkdownParserProvenance::PulldownCmark,
             headings: self.headings,
             link_candidates: self.link_candidates,
@@ -559,43 +559,8 @@ impl<'a> MarkdownExtraction<'a> {
                 limits: self.limits,
                 unsupported: self.unsupported,
             },
-        }
+        })
     }
-}
-
-/// Map sorted fact byte boundaries to exact source lines and Unicode-scalar columns in one pass.
-fn source_positions(content: &str, mut offsets: Vec<usize>) -> Vec<(usize, usize, usize)> {
-    offsets.sort_unstable();
-    offsets.dedup();
-    let mut positions = Vec::with_capacity(offsets.len());
-    let mut next_offset = 0;
-    let mut byte = 0;
-    let mut line = 1;
-    let mut column = 0;
-    for character in content.chars() {
-        while offsets
-            .get(next_offset)
-            .is_some_and(|offset| *offset == byte)
-        {
-            positions.push((byte, line, column));
-            next_offset += 1;
-        }
-        byte += character.len_utf8();
-        if character == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-    while offsets
-        .get(next_offset)
-        .is_some_and(|offset| *offset == byte)
-    {
-        positions.push((byte, line, column));
-        next_offset += 1;
-    }
-    positions
 }
 
 /// Apply exact positions for one parser source selector.
@@ -814,6 +779,75 @@ fn insert_sorted_unique<T: Ord>(values: &mut Vec<T>, value: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_parser_handles_malformed_wikilinks_without_panicking() {
+        for content in [" \u{fffd} ![[] ]()]]", "- [o]:u\n \t"] {
+            let facts = extract_markdown_facts(content);
+            assert_eq!(facts.provenance, MarkdownParserProvenance::PulldownCmark);
+            assert!(facts.headings.len() <= MAX_MARKDOWN_HEADINGS);
+            assert!(facts.link_candidates.len() <= MAX_DOCUMENT_LINK_CANDIDATES);
+            for capability in projectatlas_core::language::LANGUAGE_CAPABILITIES
+                .iter()
+                .filter(|capability| {
+                    capability.symbol_parser
+                        == projectatlas_core::language::SymbolParserOwner::Markdown
+                })
+            {
+                for language in
+                    std::iter::once(capability.id).chain(capability.aliases.iter().copied())
+                {
+                    for path in [capability.fixtures.positive_path, "fixture.mdx"] {
+                        let graph = crate::extract_symbol_graph(path, Some(language), content);
+                        assert_eq!(graph.path, path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_image_wikilinks_preserve_deepest_embed_and_ordinary_references() {
+        let source = "# ![[cat.png|![[dog.png]]]]\n\n[ordinary](src/lib.rs) [[guide.md|guide]]\n";
+        let facts = extract_markdown_facts(source);
+        assert_eq!(facts.headings[0].text, "![[cat.png|dog.png]]");
+        assert_eq!(
+            facts
+                .link_candidates
+                .iter()
+                .map(|candidate| candidate.selector.as_str())
+                .collect::<Vec<_>>(),
+            ["src/lib.rs", "guide.md"],
+        );
+        assert_eq!(
+            facts.coverage.unsupported,
+            [MarkdownUnsupportedStructure::Image]
+        );
+        let deep = format!(
+            "{}dog.png{}\n\n[retained](src/lib.rs)\n",
+            "![[".repeat(10_000),
+            "]]".repeat(10_000)
+        );
+        let facts = extract_markdown_facts(&deep);
+        assert_eq!(facts.link_candidates.len(), 1);
+        assert_eq!(facts.link_candidates[0].selector, "src/lib.rs");
+    }
+
+    #[test]
+    fn markdown_parser_preserves_linear_wikilink_occurrences() {
+        let source = "[[a|]] ".repeat(16);
+        let facts = extract_markdown_facts(&source);
+        assert_eq!(facts.link_candidates.len(), 16);
+        assert!(facts.coverage.limits.is_empty());
+        for (index, candidate) in facts.link_candidates.iter().enumerate() {
+            assert_eq!(candidate.selector, "a");
+            assert_eq!(candidate.source.byte_start, index * 7);
+            assert_eq!(
+                &source[candidate.source.byte_start..candidate.source.byte_end],
+                "[[a|]]"
+            );
+        }
+    }
 
     #[test]
     fn extracts_exact_unicode_headings_and_static_candidates() {

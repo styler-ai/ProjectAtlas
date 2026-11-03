@@ -7,6 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+oxc_syntax.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
 wasmi.workspace = true
@@ -16,6 +17,7 @@ pulldown-cmark.workspace = true
 quick-xml.workspace = true
 regex.workspace = true
 unicode-ident.workspace = true
+unicode-properties.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 zip.workspace = true

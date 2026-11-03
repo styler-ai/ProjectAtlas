@@ -905,9 +905,14 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         .ok_or_else(|| io::Error::other("Dependabot updates must be a sequence"))?;
     let cargo_update = dependabot_update(dependabot_updates, "cargo")?;
     let actions_update = dependabot_update(dependabot_updates, "github-actions")?;
-    for (ecosystem, update) in [("cargo", cargo_update), ("github-actions", actions_update)] {
+    let npm_update = dependabot_update(dependabot_updates, "npm")?;
+    for (ecosystem, update, directory) in [
+        ("cargo", cargo_update, "/"),
+        ("github-actions", actions_update, "/"),
+        ("npm", npm_update, "/.github/mermaid-parser"),
+    ] {
         for (field, actual, expected) in [
-            ("directory", update["directory"].as_str(), "/"),
+            ("directory", update["directory"].as_str(), directory),
             ("target-branch", update["target-branch"].as_str(), "main"),
             (
                 "schedule.interval",

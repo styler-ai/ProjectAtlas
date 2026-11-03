@@ -3960,8 +3960,8 @@ impl ProjectAtlasMcpServer {
         observations: &SourceObservationRegistry,
         allow_observed_noop: bool,
     ) -> Result<WatchReport, CliError> {
-        if allow_observed_noop && plan.root == state.root && state.db_path.is_file() {
-            let current = observations.with_verified_current_read(
+        let current = if allow_observed_noop && plan.root == state.root && state.db_path.is_file() {
+            Some(observations.with_verified_current_read(
                 &state.db_path,
                 &state.root,
                 state.config_path.as_deref(),
@@ -3970,7 +3970,23 @@ impl ProjectAtlasMcpServer {
                     Self::require_captured_worktree_identity(state.worktree.as_ref(), store)?;
                     publication_contract_matches(store, plan)
                 },
-            );
+            ))
+        } else {
+            None
+        };
+        Self::run_watch_after_observation(state, control_state, plan, options, control, current)
+    }
+
+    /// Consume observed admission without restarting an exhausted policy pass.
+    fn run_watch_after_observation(
+        state: &McpProjectState,
+        control_state: &McpProjectState,
+        plan: &ScanRuntimePlan,
+        options: &SymbolBuildOptions,
+        control: &IndexWorkControl,
+        current: Option<Result<SourceReadAdmission<VerifiedReadOutcome<bool>>, CliError>>,
+    ) -> Result<WatchReport, CliError> {
+        if let Some(current) = current {
             match current {
                 Ok(SourceReadAdmission::Current(outcome)) if outcome.value => {
                     crate::runtime::check_unchanged_index_budget(
@@ -3991,6 +4007,11 @@ impl ProjectAtlasMcpServer {
                         control,
                     )?;
                     return Ok(WatchReport::from_refresh(refresh));
+                }
+                Err(CliError::VerificationIncomplete(report))
+                    if report.policy_work_limit.is_some() =>
+                {
+                    return Err(CliError::VerificationIncomplete(report));
                 }
                 Ok(_) | Err(CliError::RefreshRequired(_) | CliError::VerificationIncomplete(_)) => {
                 }
@@ -4465,6 +4486,8 @@ impl ProjectAtlasMcpServer {
             return Ok(report);
         }
 
+        let state_guard =
+            crate::runtime::preflight_generated_state(&state.root, &state.db_path, config_path)?;
         preflight_existing_project_binding(&state.db_path, &state.root)?;
         let project_dir = state.root.join(PROJECTATLAS_DIR_NAME);
         let nonsource_file = project_dir.join(MCP_NONSOURCE_FILE_NAME);
@@ -4472,6 +4495,11 @@ impl ProjectAtlasMcpServer {
         let config_existed = config_path.exists();
         let nonsource_existed = nonsource_file.exists();
         init_project_with_config(&state.root, Some(config_path))?;
+
+        state_guard.verify().map_err(|source| CliError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
 
         let hydration = if options.no_scan {
             McpWorktreeHydration::Fallback(MCP_HYDRATION_NO_SCAN_REASON.to_string())
@@ -4960,11 +4988,10 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
     ) -> Result<String, CliError> {
-        let report = build_settings_report(
-            &state.db_path,
-            state.config_path.as_deref(),
-            OutputFormat::Toon,
-        )?;
+        let admission = crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+        let database = crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
+        let report =
+            build_settings_report(database, state.config_path.as_deref(), OutputFormat::Toon)?;
         let capabilities = self.session_capabilities(state, report.text_index_max_bytes);
         let rendered = Self::encode_two_named_payloads(
             MCP_PAYLOAD_SETTINGS,
@@ -6363,12 +6390,17 @@ impl ProjectAtlasMcpServer {
                 })?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
+        let admission = crate::runtime::preflight_managed_reset(&state.db_path, &state.root)?;
+        let database = crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
         match control.with_unbound_worktree_registration(registration_id, &alias, |registration| {
             require_registered_worktree_lifecycle(registration, &state.root)?;
             post_validation()?;
-            reset_index_files_with_revalidation(&state.db_path, include_mcp_config, || {
-                require_registered_worktree_lifecycle(registration, &state.root)
-            })
+            reset_index_files_with_revalidation(
+                database,
+                include_mcp_config,
+                admission.as_ref(),
+                || require_registered_worktree_lifecycle(registration, &state.root),
+            )
         }) {
             Ok(result) => result,
             Err(DbError::WorktreeRegistrationConflict { .. }) => Err(CliError::InvalidInput(
@@ -7357,6 +7389,11 @@ impl ProjectAtlasMcpServer {
 
     /// Return whether nearest routing can safely associate one DB with a live root.
     fn nearest_indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
+        let Ok(admission) = crate::runtime::preflight_managed_database(db_path, root.as_path())
+        else {
+            return false;
+        };
+        let db_path = crate::runtime::admitted_database_path(db_path, admission.as_ref());
         match read_project_root_identity_read_only(db_path) {
             Ok(Some(stored_root)) => Self::nearest_existing_roots_match(&stored_root, root),
             Ok(None) => {
@@ -8401,9 +8438,15 @@ impl ProjectAtlasMcpServer {
                 return Ok(render_repository_control_report(&report));
             }
             let state = self.admin_project_root(params.project_path, params.worktree)?;
-            let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
+            let admission =
+                crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+            let database =
+                crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
+            let report = build_root_report(database, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {
-                verify_project_database(&state.db_path, &state.root)?;
+                let _admission =
+                    crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+                verify_project_database(database, &state.root)?;
             }
             Self::with_selected_project_audit(
                 &state,
@@ -10187,6 +10230,9 @@ impl ProjectAtlasMcpServer {
             let apply = params.apply.unwrap_or(false);
             let dry_run = params.dry_run.unwrap_or(false);
             let include_mcp_config = params.include_mcp_config.unwrap_or(false);
+            let admission = crate::runtime::preflight_managed_reset(&state.db_path, &state.root)?;
+            let database =
+                crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
             let report = if apply && !dry_run {
                 if let Some(selection) = state
                     .worktree
@@ -10195,10 +10241,22 @@ impl ProjectAtlasMcpServer {
                 {
                     self.reset_registered_worktree_index(&state, selection, include_mcp_config)?
                 } else {
-                    reset_index_files(&state.db_path, true, false, include_mcp_config)?
+                    reset_index_files(
+                        database,
+                        true,
+                        false,
+                        include_mcp_config,
+                        admission.as_ref(),
+                    )?
                 }
             } else {
-                reset_index_files(&state.db_path, apply, dry_run, include_mcp_config)?
+                reset_index_files(
+                    database,
+                    apply,
+                    dry_run,
+                    include_mcp_config,
+                    admission.as_ref(),
+                )?
             };
             Self::encode_named_payload(MCP_PAYLOAD_RESET_INDEX, &report)
         })())
@@ -17525,6 +17583,99 @@ mod tests {
     }
 
     #[test]
+    fn observed_watch_policy_quota_refuses_without_refresh_and_keeps_other_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn initial() {}\n")?;
+        let config = root.join(".projectatlas/config.toml");
+        init_project_with_config(root, Some(&config))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), None);
+        let control = index_work_control(&options);
+        let mut writer = open_atlas_store_for_project(&database, root)?;
+        run_scan_pipeline(&mut writer, &plan, &options)?;
+        writer.set_purpose(
+            "lib.rs",
+            "Retain authored source purpose",
+            projectatlas_core::PurposeSource::Agent,
+        )?;
+        let before = writer.index_publication()?;
+        let identity = writer.project_instance_id()?;
+        let revision = writer.authored_purpose_revision()?;
+        let state = McpProjectState {
+            root: plan.root.clone(),
+            db_path: database,
+            config_path: Some(config),
+            worktree: None,
+        };
+        // A forbidden retry would reconcile this real pending source change.
+        fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
+        let incomplete = |policy_work_limit| {
+            CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                policy_work_limit,
+                project_root: lossless_project_root_display(root),
+                worktree: None,
+                status: crate::runtime::IndexReadStatus::VerificationIncomplete,
+                reason: crate::runtime::IndexVerificationReason::PolicyUnavailable,
+                scope: crate::runtime::IndexRefreshScope::Full,
+                message: "policy matching exceeds DirectoryContexts: observed 1, limit 0"
+                    .to_owned(),
+            }))
+        };
+        for resource in [
+            crate::runtime::VerificationWorkLimit::Policy(
+                projectatlas_fs::PolicyMatchResource::DirectoryContexts,
+            ),
+            crate::runtime::VerificationWorkLimit::DocumentPrefixes,
+            crate::runtime::VerificationWorkLimit::DocumentRows,
+        ] {
+            let quota = incomplete(Some(resource));
+            let encoded: serde_json::Value =
+                toon_format::decode_default(&ProjectAtlasMcpServer::encode_error_payload(&quota))?;
+            require(
+                encoded
+                    .pointer("/error/verification_incomplete/reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("policy_unavailable")
+                    && encoded
+                        .pointer("/error/verification_incomplete/policy_work_limit")
+                        .is_none(),
+                "policy quota changed the wire contract",
+            )?;
+            require(
+                matches!(ProjectAtlasMcpServer::run_watch_after_observation(
+            &state, &state, &plan, &options, &control, Some(Err(quota)),
+        ), Err(CliError::VerificationIncomplete(report)) if report.policy_work_limit.is_some()),
+                "observed watch restarted exhausted policy work",
+            )?;
+            require(
+                writer.index_publication()? == before,
+                "quota refusal published pending source changes",
+            )?;
+        }
+        ProjectAtlasMcpServer::run_watch_after_observation(
+            &state,
+            &state,
+            &plan,
+            &options,
+            &control,
+            Some(Err(incomplete(None))),
+        )?;
+        require(
+            writer.index_publication()? != before,
+            "ordinary incomplete verification lost refresh recovery",
+        )?;
+        require(
+            writer.project_instance_id()? == identity
+                && writer.authored_purpose_revision()? == revision,
+            "observed refresh/refusal changed identity or authored purposes",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn watch_adapters_reconcile_noop_and_report_real_changed_work()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -18034,7 +18185,7 @@ mod tests {
             "candidate with mismatched DB root was treated as indexed",
         )?;
 
-        reset_index_files(&db_path, true, false, false)?;
+        reset_index_files(&db_path, true, false, false, None)?;
         {
             let _store = open_atlas_store_for_project(&db_path, &repo)?;
         }
