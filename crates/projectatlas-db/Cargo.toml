@@ -21,7 +21,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 whichdisk.workspace = true
 
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 rustix.workspace = true
 
 [dev-dependencies]

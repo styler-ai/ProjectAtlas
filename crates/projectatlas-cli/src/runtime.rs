@@ -772,18 +772,27 @@ fn open_exact_index_assessment(
     let store = open_atlas_store_read_only_for_project(db_path, root)?;
     let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
         .map_err(|source| publication_input_error(root, source))?;
-    let assessment = match detect_index_freshness_controlled(&store, &plan, scan_limits, control) {
-        Ok(assessment) => assessment,
+    let assessment = assess_open_index_against_plan(&store, &plan, scan_limits, control)?;
+    Ok((store, plan, assessment))
+}
+
+/// Compare one validated read snapshot with the caller's operation-owned plan.
+fn assess_open_index_against_plan(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    scan_limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> Result<IndexFreshnessAssessment, CliError> {
+    match detect_index_freshness_controlled(store, plan, scan_limits, control) {
         Err(CliError::VerificationIncomplete(report))
             if report.reason == IndexVerificationReason::PublicationContractMismatch =>
         {
-            return Err(CliError::RefreshRequired(Box::new(
+            Err(CliError::RefreshRequired(Box::new(
                 index_policy_refresh_required(&plan.root),
-            )));
+            )))
         }
-        Err(error) => return Err(error),
-    };
-    Ok((store, plan, assessment))
+        result => result,
+    }
 }
 
 /// Open an explicit ordered set of current project indexes without mutating any root.

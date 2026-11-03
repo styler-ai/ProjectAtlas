@@ -32,7 +32,7 @@ impl DatabaseFileIdentity {
     #[must_use]
     pub fn matches_path(&self, path: &Path) -> bool {
         self.file.metadata().ok().as_ref().and_then(native_key) == Some(self.key)
-            && open_identity_file(path)
+            && projectatlas_fs::open_regular_file(path)
                 .and_then(|file| file.metadata())
                 .ok()
                 .as_ref()
@@ -72,7 +72,7 @@ fn capture_database_file_identity(connection: &Connection) -> Option<DatabaseFil
     #[cfg(unix)]
     {
         let path = Path::new(connection.path()?);
-        let file = open_identity_file(path).ok()?;
+        let file = projectatlas_fs::open_regular_file(path).ok()?;
         let key = native_key(&file.metadata().ok()?)?;
         let identity = DatabaseFileIdentity {
             file: Arc::new(file),
@@ -84,32 +84,6 @@ fn capture_database_file_identity(connection: &Connection) -> Option<DatabaseFil
     {
         let _connection = connection;
         None
-    }
-}
-
-/// Follow supported database aliases without waiting for a FIFO writer.
-///
-/// The opened object is checked with `fstat` by the caller; a metadata precheck
-/// alone cannot prevent replacement between inspection and opening. Symlink
-/// selection and canonical-target continuity remain the observer's responsibility.
-fn open_identity_file(path: &Path) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{CWD, Mode, OFlags, openat};
-        Ok(File::from(openat(
-            CWD,
-            path,
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
-            Mode::empty(),
-        )?))
-    }
-    #[cfg(not(unix))]
-    {
-        let _path = path;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "native database file identity is unavailable",
-        ))
     }
 }
 

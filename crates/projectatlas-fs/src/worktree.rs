@@ -10,6 +10,10 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+/// Inspect rather than traverse a replacement Windows reparse point.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 /// Read-only structural classification for one selected path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepositoryStructure {
@@ -1388,7 +1392,7 @@ fn required_creation_nanos(
     reason = "the stable standard library does not expose Windows volume and 128-bit file identity; this bounded native query avoids a release dependency"
 )]
 mod windows_file_identity {
-    use super::{FsError, FsResult, metadata_is_indirect};
+    use super::{FILE_FLAG_OPEN_REPARSE_POINT, FsError, FsResult, metadata_is_indirect};
     use std::ffi::c_void;
     use std::fs::OpenOptions;
     use std::io;
@@ -1405,8 +1409,6 @@ mod windows_file_identity {
     const FILE_SHARE_DELETE: u32 = 0x0000_0004;
     /// Admit a directory handle through standard Windows file opening.
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    /// Inspect rather than traverse a replacement reparse point.
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     /// Native `FileIdInfo` query discriminator.
     const FILE_ID_INFO_CLASS: i32 = 18;
 
@@ -1538,6 +1540,15 @@ fn read_bounded_text(path: &Path, limit: u64) -> Result<String, GitStructureIssu
 /// Read one bounded control file without following a symbolic-link leaf.
 fn read_bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, GitStructureIssue> {
     let metadata = structural_metadata(path)?;
+    read_bounded_bytes_after_inspection(path, limit, &metadata)
+}
+
+/// Revalidate the opened control object after structural path inspection.
+fn read_bounded_bytes_after_inspection(
+    path: &Path,
+    limit: u64,
+    metadata: &fs::Metadata,
+) -> Result<Vec<u8>, GitStructureIssue> {
     if !metadata.is_file() {
         return Err(issue(
             path.to_path_buf(),
@@ -1553,14 +1564,7 @@ fn read_bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, GitStructureIs
             },
         ));
     }
-    let file = fs::File::open(path).map_err(|source| {
-        issue(
-            path.to_path_buf(),
-            GitStructureIssueKind::FilesystemUnavailable {
-                error_kind: source.kind(),
-            },
-        )
-    })?;
+    let file = open_control_file(path)?;
     let mut bytes =
         Vec::with_capacity(usize::try_from(metadata.len().min(limit)).unwrap_or(usize::MAX));
     file.take(limit.saturating_add(1))
@@ -1583,6 +1587,55 @@ fn read_bounded_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, GitStructureIs
         ));
     }
     Ok(bytes)
+}
+
+/// Open a direct regular control file without waiting for a substituted FIFO.
+fn open_control_file(path: &Path) -> Result<fs::File, GitStructureIssue> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY | nix::libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(|source| {
+        #[cfg(unix)]
+        if source.raw_os_error() == Some(nix::libc::ELOOP) {
+            return issue(path.to_path_buf(), GitStructureIssueKind::SymbolicLink);
+        }
+        issue(
+            path.to_path_buf(),
+            GitStructureIssueKind::FilesystemUnavailable {
+                error_kind: source.kind(),
+            },
+        )
+    })?;
+    let metadata = file.metadata().map_err(|source| {
+        issue(
+            path.to_path_buf(),
+            GitStructureIssueKind::FilesystemUnavailable {
+                error_kind: source.kind(),
+            },
+        )
+    })?;
+    if metadata_is_indirect(&metadata) {
+        return Err(issue(
+            path.to_path_buf(),
+            GitStructureIssueKind::SymbolicLink,
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(issue(
+            path.to_path_buf(),
+            GitStructureIssueKind::UnsupportedPathType,
+        ));
+    }
+    Ok(file)
 }
 
 /// Return one non-empty native path record and reject ambiguous extra content.
@@ -1781,6 +1834,62 @@ mod tests {
     use std::error::Error;
     use std::ffi::OsStr;
     use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn control_reader_refuses_fifo_substituted_after_inspection() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected = temp.path().join("commondir");
+        fs::write(&selected, "../..\n")?;
+        let metadata = structural_metadata(&selected)
+            .map_err(|failure| io::Error::other(format!("{failure:?}")))?;
+        fs::rename(&selected, temp.path().join("saved"))?;
+        nix::unistd::mkfifo(
+            &selected,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )?;
+        let checked = selected.clone();
+        crate::regular_file::verify_fifo_refusal(&selected, move || {
+            matches!(
+                read_bounded_bytes_after_inspection(&checked, 128, &metadata),
+                Err(GitStructureIssue {
+                    kind: GitStructureIssueKind::UnsupportedPathType,
+                    ..
+                })
+            )
+        })
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn control_reader_keeps_direct_leaf_after_inspection() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected = temp.path().join("commondir");
+        fs::write(&selected, "../..\n")?;
+        let metadata = structural_metadata(&selected)
+            .map_err(|failure| io::Error::other(format!("{failure:?}")))?;
+        let saved = temp.path().join("saved");
+        fs::rename(&selected, &saved)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&saved, &selected)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&saved, &selected)?;
+        if !matches!(
+            read_bounded_bytes_after_inspection(&selected, 128, &metadata),
+            Err(GitStructureIssue {
+                kind: GitStructureIssueKind::SymbolicLink,
+                ..
+            })
+        ) {
+            return Err("control reader followed a replacement symlink leaf".into());
+        }
+        fs::remove_file(&selected)?;
+        fs::rename(&saved, &selected)?;
+        if !read_bounded_bytes(&selected, 128).is_ok_and(|bytes| bytes == b"../..\n") {
+            return Err("direct pointer bytes changed after regular-file restoration".into());
+        }
+        Ok(())
+    }
 
     #[test]
     fn structural_discovery_covers_real_git_worktree_lifecycle_matrix() -> Result<(), Box<dyn Error>>

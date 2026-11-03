@@ -226,7 +226,7 @@ fn read_config(
     {
         use std::os::unix::fs::OpenOptionsExt;
         // A path replaced by a FIFO after metadata inspection must not block open.
-        options.custom_flags(nix::libc::O_NONBLOCK);
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
     }
     let file = options.open(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),

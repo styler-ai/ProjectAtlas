@@ -95,6 +95,17 @@ background task cancellation and final exact publication validation. Operation-l
 evidence is reusable within this operation; a retained epoch cannot authorize
 zero-source-work admission across requests.
 
+The no-repair exact assessment borrows the immutable `before_plan` already owned
+by the observed request instead of rebuilding the same scan plan inside that
+assessment. A private shared runtime helper retains validated store/root,
+publication and typed contract-mismatch checks. Native-observer fallback has no
+such retained plan and builds a fresh one for each exact read. Incremental repair
+keeps its existing owner. Independent after-admission and final acceptance plans,
+policy witnesses, exact discovery/comparison and callback checks remain fresh.
+The fresh after-plan/policy comparison guards both current results and stale-source
+assessments before transfer to the refresh owner; changed policy drops the
+assessment and retries within the original control. This removes duplicate operation-local setup, not a freshness check or source walk.
+
 ### Prove the standalone CLI approach before production changes
 
 Task 2.1 settles the exact-discovery/cross-invocation evidence contract and a separate cold-CLI target using code analysis and a focused reference check. The selected initial implementation uses exact discovery plus lightweight ordered comparison and affected updates when no trusted history exists. Task 2.4 proves that CLI approach as well as the warm MCP path. A fast MCP result cannot substitute for a slow CLI result.
@@ -261,10 +272,11 @@ The registry remains bounded to sixteen entries. Each accepted entry retains one
 file object shared with live operation witnesses; RAII releases it when replaced
 or the entry/witness is dropped. A renamed or unlinked database can remain pinned
 for that lifetime. There is no added thread, connection pool, persistent cache,
-schema change or new dependency version. The database crate reuses the workspace
-Unix `rustix` dependency for nonblocking identity opens, then validates a regular
-file with descriptor metadata; a FIFO substituted before opening cannot wait for
-a writer while holding the receiver fence. Supported database symlinks remain
+schema change or new dependency version. The filesystem crate owns a shared
+regular-file opener using its existing Unix `nix` dependency for nonblocking
+opens without controlling-terminal acquisition, then validates descriptor type.
+The database crate's `rustix` dependency remains test-only. A FIFO substituted
+before opening cannot wait for a writer while holding the receiver fence. Supported database symlinks remain
 followed, subject to the separate canonical-target and selection checks. Coverage
 includes FIFO replacement at capture and path validation, same-object delayed hints with a
 successful purpose commit; copied replacements preserving project/generation;
@@ -272,6 +284,39 @@ replacement-open/path-restore races; recreated selected symlinks; replacement
 while callback delivery waits behind the acceptance fence; and the existing
 source/policy/continuity/cancellation controls. Optimized native installed proof
 and unchanged four-platform performance targets remain acceptance requirements.
+
+## Regular-file races across source and control readers
+
+The native database investigation exposed the same check/open assumption in source
+hashing, source-policy hashing and Git pointer reads: earlier regular-file metadata
+does not prove the object subsequently opened is still regular. Repair the owning
+readers before consuming bytes. Scanner hashing, policy witnesses and database
+identity reuse the filesystem crate's regular-file opener; each retains its own
+error mapping, cancellation/read bounds and root/selection contract. Followed
+policy and database aliases remain supported. Initial absent, directory and other
+policy witness states retain their existing classification; a nonregular object
+substituted after regular admission refuses conservatively. The existing Git
+configuration reader already uses a nonblocking open plus descriptor validation;
+retain that behavior and prevent controlling-terminal acquisition there too.
+
+Git `.git`/`commondir` control pointers have a different direct-leaf contract.
+Their private opener uses Unix nonblocking/no-follow flags or Windows
+`FILE_FLAG_OPEN_REPARSE_POINT`, then rejects an indirect or nonregular opened
+object before the existing bounded read. Keep the prior structural preflight,
+byte limits, pointer parsing and typed errors. The shared followed-alias opener
+must not relax this control-file rule. Deterministic fixtures substitute a FIFO or
+symlink after retaining the original regular metadata; normal pointer restoration
+and regular/aliased source reads remain positive controls. Native Windows
+compilation and reparse-point execution remain separate platform proof; each
+optimized native package lane runs the direct-pointer substitution/restoration
+unit contract before accepting the packaged runner.
+
+This scope covers the confirmed scanner, policy, database and structural-control
+read boundaries. It adds no schema, watcher thread, cache, filesystem restriction
+or new dependency version. It does not promise preemptible ordinary filesystem
+I/O or assert a complete audit of unrelated repository readers. Descriptor checks
+add metadata work, which must be included in the unchanged installed performance
+targets rather than waived as hardening overhead.
 
 ## Concrete automatic-budget policy
 

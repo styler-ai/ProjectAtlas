@@ -4,8 +4,10 @@ pub mod worktree;
 
 mod git_config;
 mod policy_match;
+mod regular_file;
 
 pub use policy_match::{PolicyMatchError, PolicyMatchLimits, PolicyMatchResource, RootScanMatcher};
+pub use regular_file::open_regular_file;
 
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState};
@@ -1520,7 +1522,7 @@ fn hash_file(
     retain_content_prefix: bool,
 ) -> FsResult<HashedFile> {
     budget.control.check(IndexWorkStage::SourceHash)?;
-    let file = fs::File::open(path).map_err(|source| FsError::Io {
+    let file = open_regular_file(path).map_err(|source| FsError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -1579,6 +1581,33 @@ mod tests {
     use std::io;
     use std::process::Command;
     use std::time::Instant;
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_fifo_substituted_after_metadata() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let source = root.join("source.rs");
+        fs::write(&source, "fn saved() {}\n")?;
+        let metadata = fs::metadata(&source)?;
+        fs::rename(&source, temp.path().join("saved.rs"))?;
+        nix::unistd::mkfifo(
+            &source,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )?;
+        let checked = source.clone();
+        crate::regular_file::verify_fifo_refusal(&source, move || {
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            matches!(
+                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget),
+                Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+            )
+        })
+    }
 
     /// Reader that requests cancellation after yielding its first non-empty chunk.
     struct CancelAfterFirstChunk<R> {

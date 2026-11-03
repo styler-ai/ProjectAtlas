@@ -90,6 +90,7 @@ impl SourceRepairPolicy {
     fn open_exact(
         self,
         binding: &SourceBinding,
+        before_plan: Option<&ScanRuntimePlan>,
         control: &IndexWorkControl,
     ) -> Result<SourceReadAdmission<super::ExactFreshIndexRead>, CliError> {
         match self {
@@ -101,10 +102,24 @@ impl SourceRepairPolicy {
             )
             .map(SourceReadAdmission::Current),
             Self::RequireCurrent => {
-                let (store, _plan, assessment) = super::open_exact_index_assessment(
-                    &binding.database,
-                    &binding.root,
-                    binding.config.as_deref(),
+                let store =
+                    open_atlas_store_read_only_for_project(&binding.database, &binding.root)?;
+                let fresh_plan;
+                let plan = if let Some(plan) = before_plan {
+                    plan
+                } else {
+                    fresh_plan = ScanRuntimePlan::for_path_controlled(
+                        binding.config.as_deref(),
+                        &binding.root,
+                        None,
+                        control,
+                    )
+                    .map_err(|source| publication_input_error(&binding.root, source))?;
+                    &fresh_plan
+                };
+                let assessment = super::assess_open_index_against_plan(
+                    &store,
+                    plan,
                     projectatlas_fs::ScanLimits::default(),
                     control,
                 )?;
@@ -1731,22 +1746,28 @@ impl SourceObservationRegistry {
                 .map_err(|source| publication_input_error(&entry.binding.root, source))?;
                 let before_contract = before_plan.publication_contract_fingerprint();
                 let before_policy = source_policy_witness(&before_plan, control)?;
-                let exact = match repair.open_exact(&entry.binding, control)? {
+                let admission = repair.open_exact(&entry.binding, Some(&before_plan), control)?;
+                if let SourceReadAdmission::Current(exact) = &admission {
+                    work.add_exact(exact.work);
+                }
+                let Some(after_plan) = source_policy_plan_matching(
+                    &entry.binding,
+                    &before_contract,
+                    &before_policy,
+                    control,
+                )?
+                else {
+                    if let SourceReadAdmission::Current(exact) = admission {
+                        drop(exact.store.finish_index_read_snapshot());
+                    }
+                    continue;
+                };
+                let exact = match admission {
                     SourceReadAdmission::Current(exact) => exact,
                     SourceReadAdmission::Reconcile(assessment) => {
                         return Ok(SourceReadAdmission::Reconcile(assessment));
                     }
                 };
-                work.add_exact(exact.work);
-                let after_plan = ScanRuntimePlan::for_path_controlled(
-                    entry.binding.config.as_deref(),
-                    &entry.binding.root,
-                    None,
-                    control,
-                )
-                .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-                let after_contract = after_plan.publication_contract_fingerprint();
-                let after_policy = source_policy_witness(&after_plan, control)?;
                 #[cfg(test)]
                 if self
                     .preparation_invalidations
@@ -1756,10 +1777,6 @@ impl SourceObservationRegistry {
                     .is_ok()
                 {
                     entry.invalidate_after_proven_source_mismatch()?;
-                }
-                if before_contract != after_contract || before_policy != after_policy {
-                    drop(exact.store.finish_index_read_snapshot());
-                    continue;
                 }
                 let publication = exact
                     .store
@@ -1790,7 +1807,7 @@ impl SourceObservationRegistry {
                     &captured,
                     publication.generation,
                     ingress_sequence,
-                    (after_contract, after_policy),
+                    (before_contract, before_policy),
                     database_identity,
                 )?;
                 return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
@@ -1920,7 +1937,7 @@ impl SourceObservationRegistry {
         let started = Instant::now();
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
-            let exact = match repair.open_exact(binding, control)? {
+            let exact = match repair.open_exact(binding, None, control)? {
                 SourceReadAdmission::Current(exact) => exact,
                 SourceReadAdmission::Reconcile(assessment) => {
                     return Ok(SourceReadAdmission::Reconcile(assessment));
@@ -1931,7 +1948,7 @@ impl SourceObservationRegistry {
             let value = query(&exact.store, stamp.clone())?;
             exact.store.finish_index_read_snapshot()?;
 
-            let post = match repair.open_exact(binding, control)? {
+            let post = match repair.open_exact(binding, None, control)? {
                 SourceReadAdmission::Current(exact) => exact,
                 SourceReadAdmission::Reconcile(assessment) => {
                     return Ok(SourceReadAdmission::Reconcile(assessment));
@@ -2103,10 +2120,11 @@ pub(super) fn hash_policy_paths<'a>(
         hash_field(hasher, "path", path.as_os_str().as_encoded_bytes());
         match path.metadata() {
             Ok(metadata) if metadata.is_file() => {
-                let file = File::open(path).map_err(|source| CliError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
+                let file =
+                    projectatlas_fs::open_regular_file(path).map_err(|source| CliError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
                 hash_policy_file(hasher, path.as_path(), file, control)?;
             }
             Ok(metadata) if metadata.is_dir() => {
@@ -2144,6 +2162,27 @@ fn exact_source_policy(
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let policy_witness = source_policy_witness(&plan, control)?;
     Ok((contract_fingerprint, policy_witness))
+}
+
+/// Rebuild policy before accepting either a current read or stale-source handoff.
+fn source_policy_plan_matching(
+    binding: &SourceBinding,
+    contract: &str,
+    policy: &str,
+    control: &IndexWorkControl,
+) -> Result<Option<ScanRuntimePlan>, CliError> {
+    let plan = ScanRuntimePlan::for_path_controlled(
+        binding.config.as_deref(),
+        &binding.root,
+        None,
+        control,
+    )
+    .map_err(|source| publication_input_error(&binding.root, source))?;
+    if plan.publication_contract_fingerprint() != contract {
+        return Ok(None);
+    }
+    let after_policy = source_policy_witness(&plan, control)?;
+    Ok((after_policy == policy).then_some(plan))
 }
 
 /// Collect every scanner policy input whose state contributes to source selection.
@@ -2314,6 +2353,106 @@ mod tests {
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
+    }
+
+    #[test]
+    fn exact_refresh_borrows_operation_plan_and_fresh_fallback_rechecks_config()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let (database, _source) = indexed_project(&root)?;
+        let config = temp.path().join("selected.toml");
+        let canonical_root = root.canonicalize()?;
+        let config_root = toml::Value::String(
+            canonical_root
+                .to_str()
+                .ok_or("fixture root is not UTF-8")?
+                .to_owned(),
+        );
+        fs::write(&config, format!("[project]\nroot = {config_root}\n"))?;
+        let binding = SourceBinding::new(&database, &root, Some(&config))?;
+        let control = test_control();
+        let before_plan =
+            ScanRuntimePlan::for_path_controlled(Some(&config), &binding.root, None, &control)?;
+        let mut store = super::super::open_atlas_store_for_project(&database, &binding.root)?;
+        super::super::run_scan_pipeline(
+            &mut store,
+            &before_plan,
+            &super::super::SymbolBuildOptions::new(
+                super::super::MAX_SYMBOL_FILE_BYTES,
+                Some(1),
+                None,
+            ),
+        )?;
+        drop(store);
+        fs::write(&config, "invalid = [\n")?;
+        let SourceReadAdmission::Current(exact) = SourceRepairPolicy::RequireCurrent.open_exact(
+            &binding,
+            Some(&before_plan),
+            &control,
+        )?
+        else {
+            return Err("unchanged saved source unexpectedly required reconciliation".into());
+        };
+        exact.store.finish_index_read_snapshot()?;
+        require(
+            SourceRepairPolicy::RequireCurrent
+                .open_exact(&binding, None, &control)
+                .is_err(),
+            "fresh exact fallback reused the earlier configuration plan",
+        )?;
+        require(
+            ScanRuntimePlan::for_path_controlled(Some(&config), &binding.root, None, &control)
+                .is_err(),
+            "independent post-admission plan did not inspect the current configuration",
+        )
+    }
+
+    #[test]
+    fn stale_exact_assessment_rechecks_policy_before_refresh_handoff() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let control = test_control();
+        let before_plan =
+            ScanRuntimePlan::for_path_controlled(None, &binding.root, None, &control)?;
+        let contract = before_plan.publication_contract_fingerprint();
+        let policy = source_policy_witness(&before_plan, &control)?;
+        fs::write(&source, "fn stale_source_requires_refresh() {}\n")?;
+        require(
+            matches!(
+                SourceRepairPolicy::RequireCurrent.open_exact(
+                    &binding,
+                    Some(&before_plan),
+                    &control,
+                )?,
+                SourceReadAdmission::Reconcile(_)
+            ),
+            "changed source did not produce a real exact reconciliation assessment",
+        )?;
+        require(
+            source_policy_plan_matching(&binding, &contract, &policy, &control)?.is_some(),
+            "unchanged policy refused an ordinary stale-source handoff",
+        )?;
+        let ignore = binding.root.join(".ignore");
+        fs::write(&ignore, "not_present.rs\n")?;
+        require(
+            source_policy_plan_matching(&binding, &contract, &policy, &control)?.is_none(),
+            "policy changed after stale assessment without invalidating its handoff",
+        )?;
+        fs::remove_file(ignore)?;
+        let config = binding.root.join(".projectatlas/config.toml");
+        fs::write(&config, "invalid = [\n")?;
+        require(
+            source_policy_plan_matching(&binding, &contract, &policy, &control).is_err(),
+            "invalid current configuration crossed the stale-source handoff boundary",
+        )?;
+        fs::remove_file(config)?;
+        require(
+            source_policy_plan_matching(&binding, &contract, &policy, &control)?.is_some(),
+            "restored policy could not retry its stale-source reconciliation",
+        )
     }
 
     #[test]
