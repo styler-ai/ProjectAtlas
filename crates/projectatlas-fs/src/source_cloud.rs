@@ -37,6 +37,21 @@ static FETCH_COUNT: AtomicU32 = AtomicU32::new(0);
 static POPULATION_COUNT: AtomicU32 = AtomicU32::new(0);
 /// First native transfer failure, retained without unwinding across the callback.
 static TRANSFER_FAILURE: AtomicI32 = AtomicI32::new(0);
+/// Keep the registered table and its functions live through provider disconnect.
+static CALLBACKS: [CF_CALLBACK_REGISTRATION; 3] = [
+    CF_CALLBACK_REGISTRATION {
+        Type: CF_CALLBACK_TYPE_FETCH_DATA,
+        Callback: Some(fetch_data),
+    },
+    CF_CALLBACK_REGISTRATION {
+        Type: CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS,
+        Callback: Some(fetch_placeholders),
+    },
+    CF_CALLBACK_REGISTRATION {
+        Type: CF_CALLBACK_TYPE_NONE,
+        Callback: None,
+    },
+];
 
 /// Return a terminated native path with no replacement-character conversion.
 fn wide(path: &Path) -> Vec<u16> {
@@ -393,27 +408,14 @@ fn serve_client(root: &Path, provider: &mut Provider) -> io::Result<()> {
         )
     })?;
     provider.registered = true;
-    let callbacks = [
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_FETCH_DATA,
-            Callback: Some(fetch_data),
-        },
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS,
-            Callback: Some(fetch_placeholders),
-        },
-        CF_CALLBACK_REGISTRATION {
-            Type: CF_CALLBACK_TYPE_NONE,
-            Callback: None,
-        },
-    ];
     let mut connection = 0;
-    // SAFETY: The callback table is terminated, its functions are process-static,
-    // and no borrowed callback context is retained. This fixture owns the root.
+    // SAFETY: The terminated callback table and its functions are process-static,
+    // so both outlive disconnect. No borrowed callback context is retained.
+    // This fixture owns the root.
     check("CfConnectSyncRoot", unsafe {
         CfConnectSyncRoot(
             provider.root.as_ptr(),
-            callbacks.as_ptr(),
+            CALLBACKS.as_ptr(),
             std::ptr::null(),
             CF_CONNECT_FLAG_NONE,
             &raw mut connection,

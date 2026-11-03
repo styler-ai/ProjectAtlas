@@ -378,7 +378,9 @@ Parent-owned callback counters and hydrated-byte checks prove that the client
 caused actual hydration and population. The marker proves client completion only;
 the parent explicitly disconnects/unregisters after success, failure or timeout
 and reports cleanup errors. A bounded client process contains missing-callback
-read waits. Native failure
+read waits. The registered callback table and its functions have process lifetime,
+remaining valid through disconnect without assuming the native API copies them.
+Native failure
 or missing prerequisites fail this proof rather than silently skipping it. No
 account, network, external sync root or production FFI is involved. The native
 optimized filesystem suite runs in each existing package lane. API contracts:
