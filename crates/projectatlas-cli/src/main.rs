@@ -3764,7 +3764,7 @@ fn with_admitted_purpose_mutation<T>(
     let transaction = store.begin_purpose_mutation()?;
     let operation = (|| {
         let value = mutation(&store)?;
-        admission.verify()?;
+        admission.verify(&store)?;
         Ok(value)
     })();
     match operation {

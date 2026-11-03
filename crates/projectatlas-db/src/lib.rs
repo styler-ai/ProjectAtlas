@@ -1,6 +1,7 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
 mod content_classification;
+mod database_file_identity;
 mod derived_snapshot;
 mod diagnostics;
 mod hydration;
@@ -16,6 +17,7 @@ pub use content_classification::{
     FileContentClassification, FileContentClassificationPage,
     MAX_FILE_CONTENT_CLASSIFICATION_PAGE_ROWS, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
 };
+pub use database_file_identity::DatabaseFileIdentity;
 pub use derived_snapshot::{
     DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
     DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,

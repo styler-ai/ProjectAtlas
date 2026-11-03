@@ -4170,7 +4170,7 @@ impl ProjectAtlasMcpServer {
             if let Some(bridge) = bridge {
                 bridge.synchronize(control);
             }
-            admission.verify()?;
+            admission.verify(&store)?;
             if let Some(bridge) = bridge {
                 bridge.synchronize(control);
             }
@@ -10999,7 +10999,7 @@ mod tests {
                 ),
                 "invalid purpose path passed admission preflight",
             )?;
-            admission.verify()?;
+            admission.verify(&store)?;
         }
         transaction.commit()?;
         require(

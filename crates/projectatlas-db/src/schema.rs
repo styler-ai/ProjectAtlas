@@ -1762,14 +1762,14 @@ fn adopt_legacy_project_root_on_connection(
     }
 }
 
-/// Bind recovery to the opened Unix database rather than a replacement pathname.
+/// Verify the opened Unix database against its VFS pathname, not only a path stat.
 /// Windows SQLite opens without delete sharing, preventing replacement while open.
 #[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "SQLite exposes opened-file identity only through its VFS control"
 )]
-fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+pub(crate) fn opened_database_still_at_path(connection: &Connection) -> bool {
     let mut moved: std::ffi::c_int = 1;
     // SAFETY: the borrowed connection remains live and exclusively used by this
     // synchronous operation. SQLite borrows the main schema name and writable
@@ -1782,10 +1782,17 @@ fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
             std::ptr::from_mut(&mut moved).cast(),
         )
     };
-    if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
-        return Err(DbError::LegacyRootAdoptionUnavailable);
+    result == rusqlite::ffi::SQLITE_OK && moved == 0
+}
+
+/// Preserve legacy adoption's typed refusal when opened-file authority is unavailable.
+#[cfg(unix)]
+fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+    if opened_database_still_at_path(connection) {
+        Ok(())
+    } else {
+        Err(DbError::LegacyRootAdoptionUnavailable)
     }
-    Ok(())
 }
 
 /// Revalidate a predecessor's legacy root against the caller's native root.

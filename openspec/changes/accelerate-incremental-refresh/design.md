@@ -226,6 +226,53 @@ gains, deferring zero-source-work warm admission to unscheduled #725. No sleep o
 Linux timing pass can replace the future causal proof. Task 2.4 retains exact
 unchanged/change/failure acceptance rather than the deferred target.
 
+The optimized native mutation test subsequently isolated a distinct namespace
+failure: a target-database `Create(File)` callback arrived after exact admission
+and immediately forced recursive rebinding. A callback kind describes a native
+notification, not proof that the opened database was replaced. The ARM trace
+establishes the delayed hint; it does not establish before/after inode equality.
+A deterministic same-object callback reproduction protects the common mechanism.
+
+Retain optional physical database identity at the existing storage boundary. On
+supported Unix filesystems, a retained `File` supplies device/inode identity and
+SQLite's `SQLITE_FCNTL_HAS_MOVED` checks the actual opened connection against its
+pathname. Both are needed: a replacement can preserve project ID and generation,
+and a pathname restored to the original file can conceal a connection still open
+on the replacement. Reuse the existing VFS check used by legacy-root adoption;
+preserve its typed refusal and all existing connection, schema and WAL settings.
+Unsupported native/VFS identity, including the current Windows implementation,
+retains conservative namespace-event handling rather than using an incomplete
+identifier.
+
+Keep this witness outside the path-based registry key. Preserve the last accepted
+file object across epoch invalidation, and carry an exact-read candidate during
+cold admission. The callback performs no filesystem or SQLite I/O: it queues an
+exact canonical-target `Create(File)` hint without coalescing it away. Controlled
+drain may ignore that hint only when the retained object and selected canonical
+target still match. Selected-link creation, removal, rename, rescan, unknown
+identity and continuity loss retain their existing refusal or exact-repair path.
+Actual reader/writer connection identity is checked during admission and inside
+the final callback-receiver fence; mutation verification receives the real writer,
+including the exact fallback. Source, policy, root, generation, cancellation and
+transaction rollback checks remain independent requirements. This adds no native
+delivery fence and does not authorize zero-source-work freshness.
+
+The registry remains bounded to sixteen entries. Each accepted entry retains one
+file object shared with live operation witnesses; RAII releases it when replaced
+or the entry/witness is dropped. A renamed or unlinked database can remain pinned
+for that lifetime. There is no added thread, connection pool, persistent cache,
+schema change or new dependency version. The database crate reuses the workspace
+Unix `rustix` dependency for nonblocking identity opens, then validates a regular
+file with descriptor metadata; a FIFO substituted before opening cannot wait for
+a writer while holding the receiver fence. Supported database symlinks remain
+followed, subject to the separate canonical-target and selection checks. Coverage
+includes FIFO replacement at capture and path validation, same-object delayed hints with a
+successful purpose commit; copied replacements preserving project/generation;
+replacement-open/path-restore races; recreated selected symlinks; replacement
+while callback delivery waits behind the acceptance fence; and the existing
+source/policy/continuity/cancellation controls. Optimized native installed proof
+and unchanged four-platform performance targets remain acceptance requirements.
+
 ## Concrete automatic-budget policy
 
 The coefficients, unknown-work admission, explicit-limit precedence and same-clock
