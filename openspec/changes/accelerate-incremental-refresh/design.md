@@ -474,3 +474,16 @@ and the shipping-runtime digest guard. Its 60-minute job budget accounts for bot
 builds: the Intel Mac shipping build consumed 16 minutes before contract compilation
 exhausted the previous 30-minute combined budget. This construction budget changes
 neither indexing deadlines nor any installed performance acceptance threshold.
+
+For Windows regular files, the parallel walker reuses the locked `ignore` crate's
+native directory-entry metadata only for preliminary admission. The existing
+ambient path lookup also existed in 0.5.0; it is now redundant with the secured
+reader's authoritative opened-handle metadata. This removes one path lookup per
+regular file without treating directory-entry size, timestamp or type as final
+source evidence. Every source still passes the anchored no-follow leaf open,
+opened regular-file check, exact byte hash and publication fences. Missing or
+substituted leaves fail at that open. Unix keeps its fresh device/inode admission;
+directory and targeted-path handling remain unchanged. No entry metadata survives
+the discovery or becomes a content cache. Native producer tests cover ordinary
+saves and stale-entry deletion/alias substitution; native installed measurements
+must establish the actual latency effect before accepting this optimization.

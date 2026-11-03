@@ -580,7 +580,7 @@ pub fn scan_repo_controlled_with_work(
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path, &options, &budget, &mut source_reader) {
+            match scanned_walk_entry(&root, &entry, &options, &budget, &mut source_reader) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -1309,7 +1309,39 @@ fn skip_entry_state(entry: &DirEntry) -> WalkState {
     }
 }
 
-/// Convert one walker entry into an indexed node.
+/// Reuse native Windows directory-entry metadata for preliminary file admission.
+///
+/// This is not source evidence: `file_node` still opens the exact no-follow leaf
+/// and uses its opened metadata and bytes. Unix retains fresh path metadata for
+/// its admitted device/inode fence; directories and targeted paths stay unchanged.
+fn scanned_walk_entry(
+    root: &Path,
+    entry: &ignore::DirEntry,
+    options: &ScanOptions,
+    budget: &ScanBudget,
+    source_reader: &mut SourceFileReader<'_>,
+) -> FsResult<Option<Node>> {
+    #[cfg(windows)]
+    if !entry.path_is_symlink() && entry.file_type().is_some_and(|kind| kind.is_file()) {
+        budget.control.check(IndexWorkStage::SourceMetadata)?;
+        let metadata = entry.metadata().map_err(|source| FsError::Io {
+            path: entry.path().to_path_buf(),
+            source: io::Error::other(source),
+        })?;
+        return file_node(
+            root,
+            entry.path(),
+            &metadata,
+            options,
+            budget,
+            source_reader,
+        )
+        .map(Some);
+    }
+    scanned_node(root, entry.path(), options, budget, source_reader)
+}
+
+/// Convert one freshly inspected source path into an indexed node.
 fn scanned_node(
     root: &Path,
     path: &Path,
@@ -1832,6 +1864,31 @@ mod tests {
         Ok(())
     }
 
+    /// Capture the actual parallel walker's entry before a deliberate source race.
+    fn parallel_source_entry(root: &Path, path: &Path) -> Result<ignore::DirEntry, Box<dyn Error>> {
+        let selected = Arc::new(Mutex::new(None));
+        WalkBuilder::new(root)
+            .threads(1)
+            .follow_links(false)
+            .build_parallel()
+            .run(|| {
+                let selected = Arc::clone(&selected);
+                Box::new(move |result| {
+                    if result.as_ref().is_ok_and(|entry| entry.path() != path) {
+                        return WalkState::Continue;
+                    }
+                    if let Ok(mut selected) = selected.lock() {
+                        *selected = Some(result);
+                    }
+                    WalkState::Quit
+                })
+            });
+        let selected = Arc::try_unwrap(selected)
+            .map_err(|_remaining| io::Error::other("source entry fixture retained a worker"))?
+            .into_inner()?;
+        Ok(selected.ok_or_else(|| io::Error::other("source entry fixture was not visited"))??)
+    }
+
     #[test]
     fn source_node_uses_opened_file_metadata_for_modified_content() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -1843,7 +1900,8 @@ mod tests {
             .open(&path)?
             .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000))?;
         let original_metadata = fs::symlink_metadata(&path)?;
-        let edited = b"fn after_edit() {}\n";
+        let entry = parallel_source_entry(root, &path)?;
+        let edited = b"fn after_edit_with_a_different_size() {}\n";
         fs::write(&path, edited)?;
         let opened_metadata = fs::metadata(&path)?;
         require(
@@ -1870,6 +1928,177 @@ mod tests {
                 && node.mtime_ns == expected_mtime,
             "source node paired edited bytes with pre-open metadata",
         )?;
+        let walked = scanned_walk_entry(
+            root,
+            &entry,
+            &ScanOptions::default(),
+            &budget,
+            &mut reader.reader(),
+        )?
+        .ok_or_else(|| io::Error::other("ordinary save lost the admitted source entry"))?;
+        require(
+            walked.content_hash == node.content_hash
+                && walked.mtime_ns == expected_mtime
+                && walked.size_bytes == Some(u64::try_from(edited.len())?),
+            "walker metadata replaced opened source bytes, size or timestamp",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_refuses_leaf_aliases_after_admission() -> Result<(), Box<dyn Error>> {
+        for target_in_root in [false, true] {
+            for same_file_object in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("repo");
+                let directory = root.join("src");
+                fs::create_dir_all(&directory)?;
+                let path = directory.join("source.rs");
+                let original = b"fn original_source() {}\n";
+                fs::write(&path, original)?;
+                let target = if target_in_root {
+                    root.join("target.rs")
+                } else {
+                    temp.path().join("outside.rs")
+                };
+                if same_file_object {
+                    fs::hard_link(&path, &target)?;
+                } else {
+                    fs::write(&target, b"fn redirected_source() {}\n")?;
+                }
+                let entry = parallel_source_entry(&root, &path)?;
+                let reader = SourceRootReader::open(&root)?;
+                let mut cursor = reader.reader();
+                let budget = ScanBudget::new(
+                    ScanLimits::default(),
+                    IndexWorkControl::new(IndexCancellation::new(), None),
+                );
+                let options = ScanOptions::default();
+                require(
+                    scanned_walk_entry(&root, &entry, &options, &budget, &mut cursor)?.is_some_and(
+                        |node| {
+                            node.content_hash == Some(blake3::hash(original).to_hex().to_string())
+                        },
+                    ),
+                    "ordinary walker source was not admitted before substitution",
+                )?;
+                fs::rename(&path, directory.join("saved.rs"))?;
+                std::os::windows::fs::symlink_file(&target, &path)?;
+                require(
+                    scanned_node(&root, &path, &options, &budget, &mut reader.uncached())?
+                        .is_none(),
+                    "fresh path control did not classify the substituted leaf alias",
+                )?;
+                require(
+                    scanned_walk_entry(&root, &entry, &options, &budget, &mut cursor).is_err()
+                        && scanned_walk_entry(
+                            &root,
+                            &entry,
+                            &options,
+                            &budget,
+                            &mut reader.reader(),
+                        )
+                        .is_err(),
+                    "stale walker entry followed or silently dropped a substituted leaf alias",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_refuses_missing_or_directory_source() -> Result<(), Box<dyn Error>> {
+        for becomes_directory in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            let path = root.join("source.rs");
+            fs::write(&path, b"fn removed_source() {}\n")?;
+            let entry = parallel_source_entry(root, &path)?;
+            let reader = SourceRootReader::open(root)?;
+            fs::remove_file(&path)?;
+            require(
+                entry.metadata()?.is_file() && fs::symlink_metadata(&path).is_err(),
+                "Windows walker fixture did not retain independent preliminary metadata",
+            )?;
+            if becomes_directory {
+                fs::create_dir(&path)?;
+            }
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            let result = scanned_walk_entry(
+                root,
+                &entry,
+                &ScanOptions::default(),
+                &budget,
+                &mut reader.reader(),
+            );
+            require(
+                if becomes_directory {
+                    result.is_err()
+                } else {
+                    matches!(result, Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound)
+                },
+                "cached walker metadata admitted a missing or nonregular source",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_freshly_admits_replaced_nonfiles() -> Result<(), Box<dyn Error>> {
+        for was_directory in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            fs::create_dir(&root)?;
+            let path = root.join("source.rs");
+            if was_directory {
+                fs::create_dir(&path)?;
+            } else {
+                let target = temp.path().join("outside.rs");
+                fs::write(&target, b"fn original_alias_target() {}\n")?;
+                std::os::windows::fs::symlink_file(&target, &path)?;
+            }
+            let entry = parallel_source_entry(&root, &path)?;
+            require(
+                if was_directory {
+                    entry.file_type().is_some_and(|kind| kind.is_dir())
+                } else {
+                    entry.path_is_symlink()
+                },
+                "reverse source fixture did not capture its original nonfile classification",
+            )?;
+            let reader = SourceRootReader::open(&root)?;
+            if was_directory {
+                fs::remove_dir(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+            let saved = b"fn freshly_admissible_source() {}\n";
+            fs::write(&path, saved)?;
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            require(
+                scanned_walk_entry(
+                    &root,
+                    &entry,
+                    &ScanOptions::default(),
+                    &budget,
+                    &mut reader.reader(),
+                )?
+                .is_some_and(|node| {
+                    node.content_hash == Some(blake3::hash(saved).to_hex().to_string())
+                        && node.size_bytes == Some(saved.len() as u64)
+                }),
+                "cached nonfile classification hid a newly regular source",
+            )?;
+        }
         Ok(())
     }
 
