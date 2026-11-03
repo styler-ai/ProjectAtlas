@@ -212,17 +212,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn source_reader_uses_native_non_utf8_components() -> Result<(), Box<dyn Error>> {
+    fn source_reader_preserves_names_accepted_by_native_filesystem() -> Result<(), Box<dyn Error>> {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let temp = tempfile::tempdir()?;
         let root = temp.path();
+        let reader = SourceRootReader::open(root)?;
+        let unicode = root.join("source-λ.rs");
+        fs::write(&unicode, b"native Unicode source")?;
+        if read_source(&reader, &unicode)? != b"native Unicode source" {
+            return Err("source reader replaced native Unicode path components".into());
+        }
         let directory = root.join(OsStr::from_bytes(b"native-\xff"));
-        fs::create_dir(&directory)?;
         let path = directory.join(OsStr::from_bytes(b"source-\xfe.rs"));
-        fs::write(&path, b"native source bytes")?;
-        if read_source(&SourceRootReader::open(root)?, &path)? != b"native source bytes" {
+        // APFS permits only valid UTF-8 names. Probe the native creation boundary,
+        // not the source reader: an EILSEQ from an actual read must still fail.
+        // Other native creation errors (permissions, storage, etc.) also fail.
+        // https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/APFS_Guide/FAQ/FAQ.html
+        match fs::create_dir(&directory).and_then(|()| fs::write(&path, b"native source bytes")) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(nix::libc::EILSEQ) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        if read_source(&reader, &path)? != b"native source bytes" {
             return Err("source reader replaced native path components".into());
         }
         Ok(())

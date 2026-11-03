@@ -217,6 +217,26 @@ fn on_disk_bytes(path: &Path) -> io::Result<i64> {
     Ok(info.OnDiskDataSize)
 }
 
+/// Diagnose whether reopening the captured file object restores normal recall.
+/// This is diagnostic-only after an already failed scanner assertion.
+fn captured_reopen_hash(root: &Path, path: &Path) -> io::Result<String> {
+    use cap_fs_ext::Reopen;
+    use projectatlas_core::{IndexCancellation, IndexWorkControl};
+    use std::io::Read;
+
+    let control = IndexWorkControl::new(IndexCancellation::new(), None);
+    let reader = super::SourceRootReader::open(root).map_err(io::Error::other)?;
+    let (file, _) = reader
+        .open_file(path, &fs::symlink_metadata(path)?, &control)
+        .map_err(io::Error::other)?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    let mut reopened = file.reopen(&options)?;
+    let mut bytes = Vec::new();
+    reopened.read_to_end(&mut bytes)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 /// Exercise baseline followed reads, then actual scanner hydration and warm reads.
 fn run_provider(root: &Path) -> io::Result<()> {
     let provider_name: Vec<u16> = "ProjectAtlas source-read test"
@@ -360,9 +380,30 @@ fn run_provider(root: &Path) -> io::Result<()> {
                 .iter()
                 .any(|node| node.path == *path && node.content_hash.as_ref() == Some(&expected))
         }) {
-            return Err(io::Error::other(
-                "scanner changed online or hydrated source bytes",
-            ));
+            // Capture native state before diagnostic followed reads can hydrate
+            // anything; a missing row and wrong bytes need different repairs.
+            let source_disk = on_disk_bytes(&source);
+            let nested_disk = on_disk_bytes(&root.join("nested/nested-source.rs"));
+            let fetches = FETCH_COUNT.load(Ordering::Acquire);
+            let populations = POPULATION_COUNT.load(Ordering::Acquire);
+            let transfer = TRANSFER_FAILURE.load(Ordering::Acquire);
+            let source_attributes =
+                fs::symlink_metadata(&source).map(|metadata| metadata.file_attributes());
+            let reopened_source = captured_reopen_hash(root, &source);
+            let reopened_nested = captured_reopen_hash(root, &root.join("nested/nested-source.rs"));
+            let ordinary_source =
+                fs::read(&source).map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+            let ordinary_nested = fs::read(root.join("nested/nested-source.rs"))
+                .map(|bytes| blake3::hash(&bytes).to_hex().to_string());
+            let observed: Vec<_> = nodes
+                .iter()
+                .take(8)
+                .map(|node| (&node.path, &node.kind, node.size_bytes, &node.content_hash))
+                .collect();
+            return Err(io::Error::other(format!(
+                "scanner changed online or hydrated source bytes: expected={expected}; rows={observed:?}; total_rows={}; fetches={fetches}; populations={populations}; transfer={transfer:#010x}; source_disk={source_disk:?}; source_attributes={source_attributes:?}; nested_disk={nested_disk:?}; reopened_source={reopened_source:?}; reopened_nested={reopened_nested:?}; ordinary_source={ordinary_source:?}; ordinary_nested={ordinary_nested:?}",
+                nodes.len()
+            )));
         }
     }
     if POPULATION_COUNT.load(Ordering::Acquire) == 0

@@ -251,7 +251,7 @@ impl RootScanPolicy {
     /// Returns an error when the path cannot be normalized or an ignore
     /// source cannot be parsed safely.
     pub fn excludes_path(&self, path: &Path) -> FsResult<bool> {
-        let absolute = self.absolute_target(path);
+        let absolute = self.absolute_target(path)?;
         if should_skip_path(&self.root, &absolute, &self.options) {
             return Ok(true);
         }
@@ -259,19 +259,33 @@ impl RootScanPolicy {
     }
 
     /// Rebase selected-root aliases without resolving target components.
-    fn absolute_target(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+    fn absolute_target(&self, path: &Path) -> FsResult<PathBuf> {
+        let anchored = if path.is_absolute() {
+            Cow::Borrowed(path)
+        } else {
+            #[cfg(windows)]
+            let selected = self.selected_root_alias.as_deref().unwrap_or(&self.root);
+            #[cfg(not(windows))]
+            let selected = &self.root;
+            Cow::Owned(selected.join(path))
+        };
+        // Use native lexical normalization, not canonicalization: Unix retains
+        // unresolved .. components; Win32 ordinary paths collapse them before
+        // filesystem lookup. Both policy APIs and source admission share this.
+        let absolute = std::path::absolute(anchored.as_ref()).map_err(|source| FsError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(
             match self
                 .selected_root_alias
                 .as_deref()
-                .and_then(|selected| path.strip_prefix(selected).ok())
+                .and_then(|selected| absolute.strip_prefix(selected).ok())
             {
                 Some(relative) => self.root.join(relative),
-                None => path.to_path_buf(),
-            }
-        } else {
-            self.root.join(path)
-        }
+                None => absolute,
+            },
+        )
     }
 }
 
@@ -657,28 +671,7 @@ pub fn scan_path_with_policy_controlled(
     budget.claim_entry()?;
     let root = &policy.root;
     let options = &policy.options;
-    #[cfg(windows)]
-    let native_path = if path.is_absolute() {
-        Cow::Borrowed(path)
-    } else {
-        // Ordinary selected-root spelling retains Win32 parent normalization;
-        // an explicitly selected verbatim root retains its native semantics.
-        Cow::Owned(
-            policy
-                .selected_root_alias
-                .as_deref()
-                .unwrap_or(root)
-                .join(path),
-        )
-    };
-    #[cfg(windows)]
-    let native_path = std::path::absolute(native_path.as_ref()).map_err(|source| FsError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    #[cfg(windows)]
-    let path = native_path.as_path();
-    let absolute = policy.absolute_target(path);
+    let absolute = policy.absolute_target(path)?;
     if !absolute.exists() {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
@@ -3018,7 +3011,15 @@ mod tests {
                 scan_repo(&selected, &options)? == canonical_nodes,
                 "selected spelling changed canonical source rows",
             )?;
+            let mut batch = policy.batch_matcher(&control);
             for prefix in [&root, &absolute] {
+                require(
+                    !batch.excludes_path(&prefix.join("kept.rs"))?
+                        && batch.excludes_path(&prefix.join("blocked.rs"))?
+                        && batch.excludes_path(&prefix.join("missing.md"))?
+                        && !batch.excludes_path(&prefix.join("absent.rs"))?,
+                    "selected root spelling changed batch policy admission",
+                )?;
                 require(
                     !policy.excludes_path(&prefix.join("kept.rs"))?,
                     "selected root spelling hid an admitted file",

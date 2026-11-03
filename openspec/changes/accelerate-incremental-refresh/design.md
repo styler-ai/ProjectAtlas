@@ -352,7 +352,7 @@ are removed when the canonical dependency ranges converge; advisory, license
 and registry-source gates remain unchanged.
 
 Targeted scans first rebase the explicitly selected root spelling through the
-existing policy helper, then preserve native component semantics: Unix inspects unresolved source
+existing policy helper, shared by exclusion checks and targeted scans, then preserve native component semantics: Unix inspects unresolved source
 components before lexical normalization; Windows uses its standard native absolute
 normalization on non-verbatim absolute input before rebasing. Canonicalizing a parent first hides an inside-root symlink. Do not
 resolve child aliases into admitted direct paths. Ordinary relative paths, the
@@ -384,7 +384,12 @@ This fixture is not evidence until the actual Windows run passes.
 
 Causal proof includes leaf/parent replacement after retained metadata crossed with
 inside/outside targets and a targeted same-root ancestor alias. Positive controls
-cover selected-root aliases, hardlinks, native path spelling, non-UTF-8 refusal,
+cover selected-root aliases, hardlinks and native path spelling. The private
+reader proves raw non-UTF-8 components only where native creation accepts them;
+[APFS requires valid UTF-8 filenames](https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/APFS_Guide/FAQ/FAQ.html).
+The fixture recognizes only native EILSEQ during creation, after a successful
+Unicode read; it never masks errors from the reader. Product path normalization
+continues its existing non-UTF-8 refusal. Other controls cover
 replacement after an open descriptor, fresh-discovery replacement, absence and
 resource/cancellation bounds. On Unix, regular atomic replacement between metadata
 and open is an intentional transient refusal; a fresh-metadata retry succeeds.
