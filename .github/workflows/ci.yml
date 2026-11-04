@@ -415,6 +415,13 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Native SQLite observer compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          PYTHONPATH=docs/benchmarks/harness "$python_command" -m unittest test_indexing_acceptance.DatabaseInspection
+
       - name: Affected package target compile
         # Full Linux compiles in rust; full macOS compiles in the all-targets warning gate.
         if: contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')

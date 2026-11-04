@@ -190,6 +190,15 @@ and committed WAL backup. This repairs a confirmed lifecycle defect; it does not
 establish the cause of the observed Apple Silicon baseline query failure, which
 requires replay through the corrected native campaign.
 
+The corrected campaign still failed during baseline inspection on Apple Silicon.
+Capture owner IDs, the IDs used by access checks, access results and the optional
+SQLite error name without replacing the original exception. Run the focused
+reader compatibility tests on the existing native CI matrix before compilation:
+cover a settled WAL database without sidecars and a live committed WAL, read-only
+DML/DDL refusal and unchanged main-database/WAL contents. Coordination sidecar
+creation is permitted by SQLite's read-only contract. These tests isolate the
+host boundary; they do not waive the failed campaign or establish its cause.
+
 The Linux continuous-watch flood fixture identifies native receive and polling
 sleep through `/proc/<pid>/syscall` and the target ABI's `futex` and sleep syscall
 constants. Kernel `wchan` symbols are diagnostic hints, not the phase contract.

@@ -83,7 +83,13 @@ def database_file_state(path: Path) -> dict:
     try:
         metadata = path.stat()
         return {"path": str(path), "exists": True, "mode": oct(metadata.st_mode),
-                "size_bytes": metadata.st_size}
+                "size_bytes": metadata.st_size, "uid": metadata.st_uid,
+                "gid": metadata.st_gid,
+                "access_ids": "effective" if os.access in os.supports_effective_ids else "real",
+                "access": {
+                    name: os.access(path, mode, effective_ids=os.access in os.supports_effective_ids)
+                    for name, mode in (("read", os.R_OK), ("write", os.W_OK), ("search", os.X_OK))
+                }}
     except FileNotFoundError:
         return {"path": str(path), "exists": False}
     except OSError as error:
@@ -103,6 +109,9 @@ def database_reader(root: Path):
         print(json.dumps({"sqlite_inspection": {
             "stage": stage, "sqlite_version": sqlite3.sqlite_version,
             "error_code": getattr(error, "sqlite_errorcode", None),
+            "error_name": getattr(error, "sqlite_errorname", None),
+            "effective_uid": os.geteuid() if hasattr(os, "geteuid") else None,
+            "effective_gid": os.getegid() if hasattr(os, "getegid") else None,
             "files": {name: database_file_state(candidate) for name, candidate in (
                 ("database", path), ("parent", path.parent),
                 ("wal", Path(str(path) + "-wal")), ("shm", Path(str(path) + "-shm")))},

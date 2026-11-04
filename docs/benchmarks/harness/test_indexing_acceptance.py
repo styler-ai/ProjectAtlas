@@ -173,6 +173,46 @@ class DatabaseInspection(unittest.TestCase):
             self.assertFalse(details["files"]["database"]["exists"])
             self.assertFalse(details["files"]["parent"]["exists"])
 
+    def test_reader_observes_settled_and_live_wal_without_writing_database(self):
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            self.project(root)
+            path = database(root)
+            writer = sqlite3.connect(path)
+            try:
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+                writer.execute("UPDATE purposes SET purpose='Settled WAL authority'")
+                writer.commit()
+            finally:
+                writer.close()
+            wal = Path(str(path) + "-wal")
+            shm = Path(str(path) + "-shm")
+            self.assertFalse(wal.exists(), "closed writer left WAL; fixture is not settled")
+            self.assertFalse(shm.exists(), "closed writer left SHM; fixture is not settled")
+            before = digest(path)
+            with database_reader(root) as reader:
+                self.assertEqual(reader.execute("SELECT purpose FROM purposes").fetchone(),
+                                 ("Settled WAL authority",))
+                with self.assertRaises(sqlite3.OperationalError):
+                    reader.execute("UPDATE purposes SET purpose='Forbidden change'")
+            self.assertEqual(digest(path), before)
+
+            writer = sqlite3.connect(path)
+            try:
+                writer.execute("UPDATE purposes SET purpose='Committed live WAL authority'")
+                writer.commit()
+                self.assertTrue(wal.exists())
+                before, wal_before = digest(path), digest(wal)
+                with database_reader(root) as reader:
+                    self.assertEqual(reader.execute("SELECT purpose FROM purposes").fetchone(),
+                                     ("Committed live WAL authority",))
+                    with self.assertRaises(sqlite3.OperationalError):
+                        reader.execute("CREATE TABLE forbidden(value TEXT)")
+                self.assertEqual(digest(path), before)
+                self.assertEqual(digest(wal), wal_before)
+            finally:
+                writer.close()
+
     def test_backup_closes_handles_and_preserves_committed_wal_content(self):
         original_connect = sqlite3.connect
         for fail_target in (False, True):
