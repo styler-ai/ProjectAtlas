@@ -136,6 +136,17 @@ the omission, preserves last-change-wins and unchanged import bindings, and chec
 cancellation even when every selected graph is staged. Measure the affected full
 and sparse paths before claiming latency or sampled-RSS acceptance.
 
+Schema admission still inspects complete current table definitions, columns,
+indexes and foreign keys on its actual connection and snapshot. Reuse only the
+five fixed parameterized SQL preparations through rusqlite's existing bounded
+connection-local statement cache; bind each table/index name and execute again.
+No schema facts, acceptance result, project identity or cross-connection witness
+is cached, and no capacity, SQL, compatibility rule or connection profile changes.
+Real SQLite authorizer counts prove bounded preparation across tables; comparison
+with cache-disabled reads and DDL changes protects rebinding and fresh column,
+index and foreign-key results. Measure optimized navigation and no-op latency/RSS
+before retaining a performance claim.
+
 ### Apply the delta and avoid repeated whole-project work
 
 Convert discovered or observed changes into the existing incremental path. Use source/dependency invalidation rules to expand the affected set only when necessary. Relevant compiler, ignore, parser or publication-policy changes may legitimately invalidate a wider scope.

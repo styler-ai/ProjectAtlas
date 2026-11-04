@@ -3594,11 +3594,9 @@ fn read_schema_contract(connection: &Connection) -> DbResult<SchemaContract> {
 
 /// Return a whitespace-normalized table definition from the durable schema.
 fn table_definition(connection: &Connection, table: &str) -> DbResult<String> {
-    let definition = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-        [table],
-        |row| row.get::<_, String>(0),
-    )?;
+    let mut statement = connection
+        .prepare_cached("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1")?;
+    let definition = statement.query_row([table], |row| row.get::<_, String>(0))?;
     Ok(definition.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
@@ -3614,7 +3612,7 @@ fn user_table_names(connection: &Connection) -> DbResult<Vec<String>> {
 
 /// Return complete columns for one `SQLite`-validated table name.
 fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<ColumnContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT cid, name, type, \"notnull\", dflt_value, pk, hidden \
          FROM pragma_table_xinfo(?1) ORDER BY cid",
     )?;
@@ -3634,7 +3632,7 @@ fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<ColumnCon
 
 /// Return complete logical indexes for one table.
 fn table_indexes(connection: &Connection, table: &str) -> DbResult<Vec<IndexContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1) ORDER BY name",
     )?;
     let rows = statement.query_map([table], |row| {
@@ -3656,7 +3654,7 @@ fn index_columns(
     connection: &Connection,
     index: &str,
 ) -> rusqlite::Result<Vec<IndexColumnContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT seqno, cid, name, \"desc\", coll, key \
          FROM pragma_index_xinfo(?1) ORDER BY seqno",
     )?;
@@ -3675,7 +3673,7 @@ fn index_columns(
 
 /// Return complete foreign-key behavior for one table.
 fn table_foreign_keys(connection: &Connection, table: &str) -> DbResult<Vec<ForeignKeyContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT id, seq, \"table\", \"from\", \"to\", on_update, on_delete, match \
          FROM pragma_foreign_key_list(?1) ORDER BY id, seq",
     )?;
@@ -4533,6 +4531,112 @@ mod tests {
                 .into());
             }
             require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    /// Parameterized metadata queries reuse preparation, never the inspected schema facts.
+    #[test]
+    fn schema_metadata_reuses_preparation_and_rechecks_changed_shapes() -> Result<(), Box<dyn Error>>
+    {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let connection = Connection::open_in_memory()?;
+        for index in 0..16 {
+            connection.execute_batch(&format!(
+                "CREATE TABLE inspected_{index} (
+                     id INTEGER PRIMARY KEY,
+                     parent INTEGER REFERENCES inspected_0(id),
+                     value TEXT NOT NULL
+                 );
+                 CREATE INDEX inspected_{index}_value ON inspected_{index}(value DESC);"
+            ))?;
+        }
+        let preparations: Arc<[AtomicUsize; 5]> =
+            Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+        let observed = Arc::clone(&preparations);
+        // SQLite authorizes these virtual-table reads when preparing SQL, not
+        // on every execution with a different table/index parameter.
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let slot = match context.action {
+                AuthAction::Read {
+                    table_name: "pragma_table_xinfo",
+                    column_name: "name",
+                } => Some(0),
+                AuthAction::Read {
+                    table_name: "pragma_index_list",
+                    column_name: "name",
+                } => Some(1),
+                AuthAction::Read {
+                    table_name: "pragma_index_xinfo",
+                    column_name: "name",
+                } => Some(2),
+                AuthAction::Read {
+                    table_name: "pragma_foreign_key_list",
+                    column_name: "from",
+                } => Some(3),
+                AuthAction::Read {
+                    table_name: "sqlite_schema" | "sqlite_master",
+                    column_name: "sql",
+                } => Some(4),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                observed[slot].fetch_add(1, Ordering::Relaxed);
+            }
+            Authorization::Allow
+        }))?;
+        let inspected = read_schema_contract(&connection)?;
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        let counts = preparations
+            .each_ref()
+            .map(|count| count.load(Ordering::Relaxed));
+        if counts
+            .iter()
+            .any(|count| *count == 0 || *count >= inspected.tables.len())
+        {
+            return Err(io::Error::other(format!(
+                "schema metadata preparation scaled with table count: {counts:?} for {} tables",
+                inspected.tables.len()
+            ))
+            .into());
+        }
+        // Cache-disabled execution must inspect exactly the same tables,
+        // columns, index ordinals/collations and foreign-key definitions.
+        connection.set_prepared_statement_cache_capacity(0);
+        let uncached = read_schema_contract(&connection)?;
+        if inspected != uncached {
+            return Err(io::Error::other("metadata statement reuse changed schema facts").into());
+        }
+        connection.set_prepared_statement_cache_capacity(16);
+        let _warm = read_schema_contract(&connection)?;
+        connection.execute_batch(
+            "ALTER TABLE inspected_0 ADD COLUMN added TEXT DEFAULT 'fresh';
+             DROP INDEX inspected_1_value;
+             CREATE UNIQUE INDEX inspected_1_parent ON inspected_1(parent) WHERE parent IS NOT NULL;
+             DROP TABLE inspected_2;
+             CREATE TABLE inspected_2 (replacement INTEGER PRIMARY KEY);",
+        )?;
+        let changed = read_schema_contract(&connection)?;
+        connection.set_prepared_statement_cache_capacity(0);
+        if changed != read_schema_contract(&connection)? || changed == inspected {
+            return Err(io::Error::other("statement reuse retained stale schema facts").into());
+        }
+        if !changed.tables.iter().any(|table| {
+            table.name == "inspected_0" && table.columns.iter().any(|column| column.name == "added")
+        }) || !changed
+            .indexes
+            .iter()
+            .any(|index| index.name == "inspected_1_parent" && index.partial)
+            || changed
+                .foreign_keys
+                .iter()
+                .any(|key| key.table == "inspected_2")
+        {
+            return Err(io::Error::other(
+                "schema inspection missed changed column/index/key shape",
+            )
+            .into());
         }
         Ok(())
     }
