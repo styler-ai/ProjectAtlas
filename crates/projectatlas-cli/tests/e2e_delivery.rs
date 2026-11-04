@@ -173,7 +173,7 @@ const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 
 const DOCS_WORKFLOW_FILE_NAME: &str = "04-docs.yml";
 
-const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
+const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled";
 
 const CODEX_CONFIG_DIR: &str = ".codex";
 const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
