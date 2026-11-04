@@ -8237,6 +8237,35 @@ pub(crate) fn run_notify_watch_loop(
     max_cycles: usize,
     symbol_options: &SymbolBuildOptions,
 ) -> Result<WatchReport, CliError> {
+    run_notify_watch_loop_with_backend(
+        store,
+        database,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        |handler| RecommendedWatcher::new(handler, Config::default()),
+        &mut |duration| {
+            thread::sleep(duration);
+            Ok(())
+        },
+    )
+}
+
+/// Callback owned by the selected native watch backend.
+type NativeWatchEventHandler = Box<dyn FnMut(notify::Result<Event>) + Send>;
+
+/// Own native reconciliation and polling handoff independently of platform I/O.
+fn run_notify_watch_loop_with_backend<W: Watcher>(
+    store: &mut AtlasStore,
+    database: &Path,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    create_watcher: impl FnOnce(NativeWatchEventHandler) -> notify::Result<W>,
+    wait: &mut dyn FnMut(Duration) -> Result<(), CliError>,
+) -> Result<WatchReport, CliError> {
     let control = index_work_control(symbol_options);
     let mut current_plan = plan.reload_controlled(&control)?;
     let watch_root = current_plan
@@ -8258,28 +8287,25 @@ pub(crate) fn run_notify_watch_loop(
             current_plan.selected_config_path.as_deref(),
         )?);
     let callback_runtime = runtime_ingress.clone();
-    let mut watcher = RecommendedWatcher::new(
-        move |result: notify::Result<Event>| {
-            if let Ok(event) = &result
-                && !callback_runtime.observe(&callback_selection, event)
-            {
-                return;
+    let mut watcher = create_watcher(Box::new(move |result: notify::Result<Event>| {
+        if let Ok(event) = &result
+            && !callback_runtime.observe(&callback_selection, event)
+        {
+            return;
+        }
+        if result.is_err() {
+            callback_selection.require_recursive_rebind();
+        }
+        match sender.try_send(result) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_result)) => {
+                callback_continuity_lost.store(true, Ordering::Release);
             }
-            if result.is_err() {
-                callback_selection.require_recursive_rebind();
+            Err(TrySendError::Disconnected(_result)) => {
+                // Receiver shutdown means the command is exiting.
             }
-            match sender.try_send(result) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_result)) => {
-                    callback_continuity_lost.store(true, Ordering::Release);
-                }
-                Err(TrySendError::Disconnected(_result)) => {
-                    // Receiver shutdown means the command is exiting.
-                }
-            }
-        },
-        Config::default(),
-    )
+        }
+    }))
     .map_err(|source| CliError::Watcher(source.to_string()))?;
     watcher
         .watch(&watch_root, RecursiveMode::Recursive)
@@ -8314,7 +8340,7 @@ pub(crate) fn run_notify_watch_loop(
         Ok(report) => report,
         Err(error @ CliError::Watcher(_)) => {
             drop(watcher);
-            return run_polling_watch_loop_controlled(
+            return run_polling_watch_loop_with_wait(
                 store,
                 plan,
                 poll_seconds,
@@ -8322,6 +8348,7 @@ pub(crate) fn run_notify_watch_loop(
                 symbol_options,
                 Some(error.to_string()),
                 &control,
+                wait,
             );
         }
         Err(error) => return Err(error),
@@ -8378,7 +8405,7 @@ pub(crate) fn run_notify_watch_loop(
                 Ok(report) => report,
                 Err(error @ CliError::Watcher(_)) => {
                     drop(watcher);
-                    let mut report = run_polling_watch_loop_controlled(
+                    let mut report = run_polling_watch_loop_with_wait(
                         store,
                         plan,
                         poll_seconds,
@@ -8386,6 +8413,7 @@ pub(crate) fn run_notify_watch_loop(
                         symbol_options,
                         Some(error.to_string()),
                         &control,
+                        wait,
                     )?;
                     report.cycles += cycles;
                     return Ok(report);
@@ -8750,13 +8778,39 @@ fn run_polling_watch_loop_controlled(
     fallback_reason: Option<String>,
     control: &IndexWorkControl,
 ) -> Result<WatchReport, CliError> {
+    run_polling_watch_loop_with_wait(
+        store,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        fallback_reason,
+        control,
+        &mut |duration| {
+            thread::sleep(duration);
+            Ok(())
+        },
+    )
+}
+
+/// Run real polling captures while the caller owns interval waiting.
+fn run_polling_watch_loop_with_wait(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    fallback_reason: Option<String>,
+    control: &IndexWorkControl,
+    wait: &mut dyn FnMut(Duration) -> Result<(), CliError>,
+) -> Result<WatchReport, CliError> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
     let mut cycles = 0;
     let mut current_plan = plan.reload_controlled(control)?;
     let mut last_refresh = refresh_index_controlled(store, &current_plan, symbol_options, control)?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
-        thread::sleep(Duration::from_secs(poll_seconds.max(1)));
+        wait(Duration::from_secs(poll_seconds.max(1)))?;
         current_plan = plan.reload()?;
         last_refresh = refresh_index(store, &current_plan, symbol_options)?;
         cycles += 1;
@@ -16303,6 +16357,240 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             }
             Err(source) => Err(source),
         }
+    }
+
+    #[test]
+    fn native_policy_overlap_hands_off_initial_and_later_work_through_real_polling()
+    -> Result<(), Box<dyn Error>> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// Deliver one callback from each controlled native registration batch.
+        struct FenceWatcher {
+            /// Actual runtime callback, including classification and bounded ingress.
+            handler: NativeWatchEventHandler,
+            /// Rechecks reported while each cold reconcile is in progress.
+            uncertain: PathBuf,
+            /// A queued source event starts the later branch after its quiet first capture.
+            source: PathBuf,
+            /// Quiet registration batches preceding sustained overlap.
+            quiet_batches: usize,
+            /// Completed native registration batches across the run.
+            batches: Rc<Cell<usize>>,
+            /// The polling owner must outlive native observer shutdown.
+            closed: Rc<Cell<bool>>,
+        }
+
+        /// Canonical batch lifecycle whose commit delivers the controlled event.
+        struct FencePaths<'a>(&'a mut FenceWatcher);
+
+        impl notify::PathsMut for FencePaths<'_> {
+            fn add(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn remove(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn commit(self: Box<Self>) -> notify::Result<()> {
+                let batch = self.0.batches.get() + 1;
+                self.0.batches.set(batch);
+                if batch > 4 + self.0.quiet_batches {
+                    return Err(notify::Error::generic(
+                        "test stopped unbounded native reconciliation",
+                    ));
+                }
+                let path = if batch > self.0.quiet_batches {
+                    &self.0.uncertain
+                } else {
+                    &self.0.source
+                };
+                (self.0.handler)(Ok(Event::new(EventKind::Modify(
+                    notify::event::ModifyKind::Data(notify::event::DataChange::Any),
+                ))
+                .add_path(path.clone())));
+                Ok(())
+            }
+        }
+
+        impl Watcher for FenceWatcher {
+            fn new<F: notify::EventHandler>(_handler: F, _config: Config) -> notify::Result<Self> {
+                Err(notify::Error::generic(
+                    "controlled watcher requires its explicit event schedule",
+                ))
+            }
+
+            fn watch(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+                Box::new(FencePaths(self))
+            }
+
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+
+        impl Drop for FenceWatcher {
+            fn drop(&mut self) {
+                self.closed.set(true);
+            }
+        }
+
+        for initial in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            let root = base.join("repo");
+            fs::create_dir(&root)?;
+            let source = root.join("source.rs");
+            fs::write(&source, "pub fn initial() {}\n")?;
+            fs::write(root.join("README.md"), "# Watch responsibility\n")?;
+            let root_value =
+                toml::Value::String(root.to_str().ok_or("fixture root is not UTF-8")?.to_owned());
+            let config = base.join("selected.toml");
+            let config_prefix = format!("[project]\nroot = {root_value}\n[scan]\n");
+            fs::write(
+                &config,
+                format!("{config_prefix}exclude_path_prefixes = []\n"),
+            )?;
+            let plan = ScanRuntimePlan::for_path(Some(&config), &root, Some(1_024))?;
+            let database = root.join(".projectatlas/projectatlas.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), None);
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "README.md",
+                "Retain watch responsibility",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let revision = store.authored_purpose_revision()?;
+            fs::write(root.join("ready.rs"), "pub fn ready() {}\n")?;
+            let batches = Rc::new(Cell::new(0));
+            let closed = Rc::new(Cell::new(false));
+            let backend_batches = Rc::clone(&batches);
+            let backend_closed = Rc::clone(&closed);
+            let uncertain = base.join("λ-sibling");
+            let backend_source = source.clone();
+            let mut waits = 0;
+            let expected_batches = if initial { 4 } else { 5 };
+            let report = run_notify_watch_loop_with_backend(
+                &mut store,
+                &database,
+                &plan,
+                1,
+                4,
+                &options,
+                move |handler| {
+                    Ok(FenceWatcher {
+                        handler,
+                        uncertain,
+                        source: backend_source,
+                        quiet_batches: usize::from(!initial),
+                        batches: backend_batches,
+                        closed: backend_closed,
+                    })
+                },
+                &mut |duration| {
+                    if duration != Duration::from_secs(1)
+                        || !closed.get()
+                        || batches.get() != expected_batches
+                    {
+                        return Err(CliError::InvalidInput(
+                            "polling began before bounded native reconciliation and shutdown"
+                                .to_string(),
+                        ));
+                    }
+                    if waits == 0 {
+                        let sampled = AtlasStore::open_read_only(&database)?;
+                        if sampled.load_node_by_path("ready.rs")?.is_none()
+                            || sampled.load_node_by_path("later.rs")?.is_some()
+                        {
+                            return Err(CliError::InvalidInput(
+                                "first polling capture lost pending native work".to_string(),
+                            ));
+                        }
+                        fs::write(
+                            &config,
+                            format!("{config_prefix}exclude_path_prefixes = [\"source.rs\"]\n"),
+                        )
+                        .map_err(|source| CliError::Io {
+                            path: config.clone(),
+                            source,
+                        })?;
+                        let later = root.join("later.rs");
+                        fs::write(&later, "pub fn later() {}\n").map_err(|source| {
+                            CliError::Io {
+                                path: later,
+                                source,
+                            }
+                        })?;
+                    }
+                    waits += 1;
+                    Ok(())
+                },
+            )?;
+            require_eq(
+                &report.mode.as_str(),
+                &WATCH_MODE_POLLING,
+                "automatic handoff mode",
+            )?;
+            require_eq(&report.cycles, &4, "automatic handoff total cycle budget")?;
+            require_eq(
+                &waits,
+                &if initial { 3 } else { 2 },
+                "remaining polling intervals",
+            )?;
+            require_eq(
+                &report
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("bounded native refresh")),
+                &true,
+                "automatic handoff retained its bounded-overlap reason",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "handoff project identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "handoff authored revision",
+            )?;
+            require_eq(
+                &store.load_node_by_path("source.rs")?.is_none(),
+                &true,
+                "later policy applied",
+            )?;
+            require_eq(
+                &store.load_node_by_path("later.rs")?.is_some(),
+                &true,
+                "later source applied",
+            )?;
+            let guide = store
+                .load_node_by_path("README.md")?
+                .ok_or("guide disappeared")?;
+            require_eq(
+                &guide.purpose.status,
+                &PurposeStatus::Approved,
+                "handoff guide approval",
+            )?;
+            require_eq(
+                &guide.purpose.purpose.as_deref(),
+                &Some("Retain watch responsibility"),
+                "handoff guide purpose",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

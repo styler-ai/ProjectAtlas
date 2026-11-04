@@ -419,8 +419,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
-          PYTHONPATH=docs/benchmarks/harness "$python_command" -m unittest test_indexing_acceptance.DatabaseInspection
+          python_commands=(python3)
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python_commands=(python)
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Release isolation selects Apple's system interpreter before Homebrew.
+            python_commands+=(/usr/bin/python3)
+          fi
+          status=0
+          for python_command in "${python_commands[@]}"; do
+            "$python_command" - <<'PY'
+          from contextlib import closing
+          import json, sqlite3, sys
+          with closing(sqlite3.connect(":memory:")) as connection:
+              print(json.dumps({"executable": sys.executable, "python": sys.version,
+                  "sqlite": sqlite3.sqlite_version,
+                  "source_id": connection.execute("SELECT sqlite_source_id()").fetchone()[0],
+                  "compile_options": [row[0] for row in connection.execute("PRAGMA compile_options")]}))
+          PY
+            PYTHONPATH=docs/benchmarks/harness "$python_command" -m unittest test_indexing_acceptance.DatabaseInspection || status=1
+          done
+          exit "$status"
 
       - name: Affected package target compile
         # Full Linux compiles in rust; full macOS compiles in the all-targets warning gate.
@@ -505,6 +524,7 @@ jobs:
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::polling_handoff_preserves_active_control_and_authored_state -- --exact
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::native_policy_overlap_hands_off_initial_and_later_work_through_real_polling -- --exact
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::graph_projection::tests::document_verification_charges_rows_before_all_shortcuts_across_pages -- --exact
 
       - name: Managed project-state ownership platform regressions

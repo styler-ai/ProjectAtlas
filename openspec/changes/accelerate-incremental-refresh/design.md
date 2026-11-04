@@ -199,22 +199,55 @@ DML/DDL refusal and unchanged main-database/WAL contents. Coordination sidecar
 creation is permitted by SQLite's read-only contract. These tests isolate the
 host boundary; they do not waive the failed campaign or establish its cause.
 
-The Linux continuous-watch flood fixture identifies native receive and polling
-sleep through `/proc/<pid>/syscall` and the target ABI's `futex` and sleep syscall
-constants. Kernel `wchan` symbols are diagnostic hints, not the phase contract.
-Retain the native inotify-presence check, repeated syscall snapshot, exact
-post-stop equality, owned-child signal guard and cleanup. Both initial and later
-handoffs still require four polling cycles, the bounded-native-refresh fallback
-reason, actual later edits and preserved authored state. Sibling writes alone
-do not prove callback delivery. Preserve phase, exit status, observed wait state
-and child stdout/stderr on failure without replacing the original error chain.
-An actual healthy four-cycle watch was rejected by the previous observer when
-its wait symbol was unavailable (`0`); the corrected observer accepts that same
-workflow. The original hosted failure omitted phase/output evidence, so its
-specific cause remains unproven until a diagnostic replay. No production
-watcher behavior, retry count, deadline or acceptance threshold changes.
-The Linux [syscall](https://man7.org/linux/man-pages/man5/proc_pid_syscall.5.html)
-and [wchan](https://man7.org/linux/man-pages/man5/proc_pid_wchan.5.html) interfaces
+Cold external-policy coverage uses the existing `notify::Watcher::paths_mut`
+batch API. Remove and re-add every selected parent, and retire removed parents,
+before explicitly committing once. This preserves same-path replacement handling
+while avoiding a full FSEvents stream restart per directory command on both Mac
+architectures. Linux and Windows retain the canonical backend's per-path command
+behavior. No source epoch, callback fence or policy sampling is skipped.
+
+Check the operation budget before creating a batch, between native edits and
+around commit. Commit even after an edit failure or cancellation so a deferred
+backend is not left stopped. Keep the original typed operation error when both
+editing and commit fail; any failure invalidates observer continuity. Failed
+commit retains the bounded union of prior and desired registrations for retry
+and teardown. Immediate/deferred backend controls prove command equivalence,
+one commit, partial/commit failures, cancellation and coverage recovery; existing
+native replacement and policy-race tests protect the real adapter. FSEvents'
+existing internal stream-start error reporting is unchanged by the batch API.
+
+Continuous-watch handoff proof uses the canonical `notify::Watcher` boundary
+and an interval-wait closure in one private shared runner. Production supplies
+`RecommendedWatcher` and `thread::sleep`; no runtime switch or reconciliation hook
+is added. A controlled backend delivers a policy recheck after each fence's
+snapshot, forcing exactly three uncertain attempts in both initial and later
+refresh branches. It proves native watcher release before the same-control polling
+owner, four total cycles, the bounded-native-refresh reason, pending work in the
+first polling capture, subsequent policy/source edits, and unchanged project
+identity and authored purpose state. Existing cancellation/deadline proof retains
+the original clock and never renews a handoff budget.
+
+The Linux real-CLI flood fixture separately proves native producer compatibility
+with noise before startup and after a quiet initial capture. Sibling writes can
+legitimately miss every bounded fence, so either notify or automatic polling is
+valid; any polling outcome must retain the bounded-native-refresh reason. Actual
+policy and source edits, four-cycle completion, document outcomes and authored
+state remain required. Pause and join the noise producer between edit phases;
+keep it active during the source/policy refresh under test. Increasing a corpus
+or counting writes cannot force or prove callback/fence overlap.
+
+The fixture identifies idle native receive and polling sleep through
+`/proc/<pid>/syscall`, target ABI futex/sleep constants and inotify presence.
+Native idle requires an untimed channel park, excluding timed debounce and worker
+join waits. Kernel `wchan` symbols remain diagnostics. Retain repeated syscall
+snapshots, exact post-stop equality, owned-child signal guards and cleanup.
+Preserve the required phase, exit status, observed wait and child stdout/stderr on
+failure. Authenticated hosted and installed-runtime probes distinguish the
+original unavailable-symbol observer defect from the later incorrect assumption
+that unrelated noise always forces handoff. No retry, deadline or performance
+acceptance threshold changes. The Linux
+[syscall](https://man7.org/linux/man-pages/man5/proc_pid_syscall.5.html) and
+[wchan](https://man7.org/linux/man-pages/man5/proc_pid_wchan.5.html) interfaces
 define the distinction between the actual call and its symbolic kernel location.
 
 Choose the smallest causal checks for each implementation slice and a focused before/after comparison for its performance claim. Reuse existing fixtures and counters. Run the complete installed/platform matrix at release acceptance; repeat a passing check only for changed inputs, failures, an uncovered behavior or a mandatory gate. Measurement confirms the architecture; it does not replace the architectural work.

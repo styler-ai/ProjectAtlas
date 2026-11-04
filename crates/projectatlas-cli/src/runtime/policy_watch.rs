@@ -1,7 +1,9 @@
 //! Selected external policy inputs and their non-recursive native watch coverage.
 
 use super::{CliError, IndexWorkControl, IndexWorkStage};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(any(windows, test))]
+use notify::RecommendedWatcher;
+use notify::{Event, RecursiveMode, Watcher};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -602,7 +604,7 @@ impl PolicyWatchInputs {
         root: &Path,
         config: Option<&Path>,
         selection: &PolicyWatchSelection,
-        watcher: &mut RecommendedWatcher,
+        watcher: &mut impl Watcher,
         registered: &mut BTreeSet<PathBuf>,
         control: &IndexWorkControl,
     ) -> Result<Arc<Self>, CliError> {
@@ -614,7 +616,7 @@ impl PolicyWatchInputs {
     /// Keep discovery at the native registration boundary for deterministic handoff tests.
     fn install_selected_with_discovery(
         selection: &PolicyWatchSelection,
-        watcher: &mut RecommendedWatcher,
+        watcher: &mut impl Watcher,
         registered: &mut BTreeSet<PathBuf>,
         control: &IndexWorkControl,
         mut discover: impl FnMut() -> Result<Self, CliError>,
@@ -640,7 +642,7 @@ impl PolicyWatchInputs {
     /// replacement without adding platform identity requirements to legitimate source paths.
     pub(super) fn install(
         &self,
-        watcher: &mut RecommendedWatcher,
+        watcher: &mut impl Watcher,
         registered: &mut BTreeSet<PathBuf>,
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
@@ -656,42 +658,76 @@ impl PolicyWatchInputs {
                 "external policy observation exceeds its {MAX_POLICY_WATCH_DIRECTORIES} directory capacity"
             )));
         }
-        for directory in &self.directories {
-            control.check(IndexWorkStage::RepositoryTraversal)?;
-            if registered.contains(directory) {
-                if let Err(error) = watcher.unwatch(directory)
+        if self.directories.is_empty() && registered.is_empty() {
+            return Ok(());
+        }
+        let previous = registered.clone();
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        // FSEvents restarts its entire stream for each ordinary watch command.
+        // Its canonical batch retains every cold rebind with one stream restart.
+        let mut paths = watcher.paths_mut();
+        let updated = (|| {
+            for directory in &self.directories {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                if registered.contains(directory) {
+                    if let Err(error) = paths.remove(directory)
+                        && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
+                    {
+                        return Err(CliError::Watcher(format!(
+                            "cannot rebind external policy parent {}: {error}",
+                            directory.display()
+                        )));
+                    }
+                    registered.remove(directory);
+                }
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                paths
+                    .add(directory, RecursiveMode::NonRecursive)
+                    .map_err(|error| {
+                        CliError::Watcher(format!(
+                            "cannot watch external policy parent {}: {error}",
+                            directory.display()
+                        ))
+                    })?;
+                registered.insert(directory.clone());
+            }
+            let retired: Vec<_> = registered.difference(&self.directories).cloned().collect();
+            for directory in retired {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                if let Err(error) = paths.remove(&directory)
                     && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
                 {
                     return Err(CliError::Watcher(format!(
-                        "cannot rebind external policy parent {}: {error}",
+                        "cannot retire external policy parent {}: {error}",
                         directory.display()
                     )));
                 }
-                registered.remove(directory);
+                registered.remove(&directory);
             }
-            watcher
-                .watch(directory, RecursiveMode::NonRecursive)
-                .map_err(|error| {
-                    CliError::Watcher(format!(
-                        "cannot watch external policy parent {}: {error}",
-                        directory.display()
-                    ))
-                })?;
-            registered.insert(directory.clone());
+            Ok(())
+        })();
+        let updated = updated.and_then(|()| {
+            control
+                .check(IndexWorkStage::RepositoryTraversal)
+                .map_err(CliError::from)
+        });
+        // Dropping an uncommitted batch can leave the native watcher stopped,
+        // including when cancellation or an earlier edit already refused the update.
+        let committed = paths.commit().map_err(|error| {
+            CliError::Watcher(format!(
+                "cannot commit external policy observation: {error}"
+            ))
+        });
+        if committed.is_err() {
+            // A deferred backend may have applied any prefix, or none. Retain
+            // every possible namespace for conservative retry and teardown.
+            registered.extend(previous);
+            registered.extend(self.directories.iter().cloned());
         }
-        let retired: Vec<_> = registered.difference(&self.directories).cloned().collect();
-        for directory in retired {
-            control.check(IndexWorkStage::RepositoryTraversal)?;
-            if let Err(error) = watcher.unwatch(&directory)
-                && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
-            {
-                return Err(CliError::Watcher(format!(
-                    "cannot retire external policy parent {}: {error}",
-                    directory.display()
-                )));
-            }
-            registered.remove(&directory);
-        }
+        // Preserve the original typed update/cancellation error on dual failure;
+        // the owning observer invalidates continuity on either failure.
+        updated.and(committed)?;
+        control.check(IndexWorkStage::RepositoryTraversal)?;
         Ok(())
     }
 
@@ -896,7 +932,7 @@ impl PolicyWatchSelection {
     /// Sampling follows this gap under the caller's original cooperative budget.
     pub(super) fn rebind_recursive_if_required(
         &self,
-        watcher: &mut RecommendedWatcher,
+        watcher: &mut impl Watcher,
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
         if !self.recursive_rebind_required.swap(false, Ordering::AcqRel) {
@@ -946,6 +982,387 @@ mod tests {
         } else {
             Err(std::io::Error::other(message).into())
         }
+    }
+
+    /// Native watch commands recorded at the public backend boundary.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum WatchEdit {
+        /// Install immediate-child observation.
+        Add(PathBuf),
+        /// Remove a previously installed observation.
+        Remove(PathBuf),
+    }
+
+    /// Exercise immediate and deferred backends without relying on wall-clock timing.
+    #[derive(Default)]
+    struct RecordingWatcher {
+        /// Native namespaces actually observed by this backend.
+        live: BTreeSet<PathBuf>,
+        /// Successfully submitted operations, preserving ordering.
+        edits: Vec<WatchEdit>,
+        /// Operations attempted, including a refused command.
+        attempts: usize,
+        /// Direct operations bypassing the batch API.
+        direct: usize,
+        /// Batches whose lifecycle was begun.
+        batches: usize,
+        /// Batches explicitly committed, including failed commits.
+        commits: usize,
+        /// Defer native changes until commit, as on `FSEvents`.
+        deferred: bool,
+        /// Inject failure at one native command.
+        fail_at: Option<usize>,
+        /// Refuse final batch acknowledgement.
+        fail_commit: bool,
+        /// Cancel the operation after one command completes.
+        cancel_after: Option<(usize, IndexWorkControl)>,
+        /// Cancel while the backend acknowledges queued native changes.
+        cancel_commit: Option<IndexWorkControl>,
+    }
+
+    impl RecordingWatcher {
+        /// Submit a command and preserve deterministic failure/cancellation evidence.
+        fn record(&mut self, edit: WatchEdit) -> notify::Result<()> {
+            self.attempts += 1;
+            if self.fail_at == Some(self.attempts) {
+                return Err(notify::Error::generic("injected native watch edit failure"));
+            }
+            self.edits.push(edit);
+            if let Some((after, control)) = &self.cancel_after
+                && *after == self.attempts
+            {
+                control.cancel();
+            }
+            Ok(())
+        }
+
+        /// Apply only a command whose owning API acknowledged success.
+        fn apply(&mut self, edit: WatchEdit) {
+            match edit {
+                WatchEdit::Add(path) => {
+                    self.live.insert(path);
+                }
+                WatchEdit::Remove(path) => {
+                    self.live.remove(&path);
+                }
+            }
+        }
+    }
+
+    /// One canonical update scope, borrowing the backend until explicit completion.
+    struct RecordingPaths<'a> {
+        /// Watcher whose live coverage and acknowledgements are inspected.
+        watcher: &'a mut RecordingWatcher,
+        /// Deferred edits remain unapplied if commit fails.
+        pending: Vec<WatchEdit>,
+    }
+
+    impl RecordingPaths<'_> {
+        /// Submit a command according to the selected backend's application model.
+        fn edit(&mut self, edit: WatchEdit) -> notify::Result<()> {
+            self.watcher.record(edit.clone())?;
+            if self.watcher.deferred {
+                self.pending.push(edit);
+            } else {
+                self.watcher.apply(edit);
+            }
+            Ok(())
+        }
+    }
+
+    impl notify::PathsMut for RecordingPaths<'_> {
+        fn add(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if !matches!(mode, RecursiveMode::NonRecursive) {
+                return Err(notify::Error::generic(
+                    "policy observation must be nonrecursive",
+                ));
+            }
+            self.edit(WatchEdit::Add(path.to_path_buf()))
+        }
+
+        fn remove(&mut self, path: &Path) -> notify::Result<()> {
+            self.edit(WatchEdit::Remove(path.to_path_buf()))
+        }
+
+        fn commit(mut self: Box<Self>) -> notify::Result<()> {
+            self.watcher.commits += 1;
+            if let Some(control) = &self.watcher.cancel_commit {
+                control.cancel();
+            }
+            if self.watcher.fail_commit {
+                return Err(notify::Error::generic(
+                    "injected native watch commit failure",
+                ));
+            }
+            for edit in self.pending.drain(..) {
+                self.watcher.apply(edit);
+            }
+            Ok(())
+        }
+    }
+
+    impl Watcher for RecordingWatcher {
+        fn new<F: notify::EventHandler>(
+            _handler: F,
+            _config: notify::Config,
+        ) -> notify::Result<Self> {
+            Ok(Self::default())
+        }
+
+        fn watch(&mut self, path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+            self.direct += 1;
+            let edit = WatchEdit::Add(path.to_path_buf());
+            self.record(edit.clone())?;
+            self.apply(edit);
+            Ok(())
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.direct += 1;
+            let edit = WatchEdit::Remove(path.to_path_buf());
+            self.record(edit.clone())?;
+            self.apply(edit);
+            Ok(())
+        }
+
+        fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+            self.batches += 1;
+            Box::new(RecordingPaths {
+                watcher: self,
+                pending: Vec::new(),
+            })
+        }
+
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::NullWatcher
+        }
+    }
+
+    /// Select one retained, one added and one retired native parent.
+    fn recording_policy_update(
+        deferred: bool,
+    ) -> (PolicyWatchInputs, RecordingWatcher, BTreeSet<PathBuf>) {
+        let registered = BTreeSet::from([PathBuf::from("a-retained"), PathBuf::from("z-retired")]);
+        (
+            PolicyWatchInputs {
+                directories: BTreeSet::from([
+                    PathBuf::from("a-retained"),
+                    PathBuf::from("b-added"),
+                ]),
+                ..PolicyWatchInputs::default()
+            },
+            RecordingWatcher {
+                live: registered.clone(),
+                deferred,
+                ..RecordingWatcher::default()
+            },
+            registered,
+        )
+    }
+
+    #[test]
+    fn cold_policy_rebind_commits_one_batch_and_preserves_every_native_edit()
+    -> Result<(), Box<dyn Error>> {
+        for deferred in [false, true] {
+            let retained = PathBuf::from("a-retained");
+            let added = PathBuf::from("b-added");
+            let retired = PathBuf::from("z-retired");
+            let mut registered = BTreeSet::from([retained.clone(), retired.clone()]);
+            let inputs = PolicyWatchInputs {
+                directories: BTreeSet::from([retained.clone(), added.clone()]),
+                ..PolicyWatchInputs::default()
+            };
+            let mut watcher = RecordingWatcher {
+                live: registered.clone(),
+                deferred,
+                ..RecordingWatcher::default()
+            };
+            inputs.install(
+                &mut watcher,
+                &mut registered,
+                &super::super::standalone_index_work_control(),
+            )?;
+            require(
+                watcher.batches == 1 && watcher.commits == 1 && watcher.direct == 0,
+                "cold policy rebind restarted the backend separately for each parent",
+            )?;
+            require(
+                watcher.edits
+                    == vec![
+                        WatchEdit::Remove(retained.clone()),
+                        WatchEdit::Add(retained),
+                        WatchEdit::Add(added),
+                        WatchEdit::Remove(retired),
+                    ]
+                    && watcher.live == inputs.directories
+                    && registered == inputs.directories,
+                "batched policy update skipped a rebind, addition or retirement",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn policy_watch_batches_commit_partial_failures_and_repair_coverage()
+    -> Result<(), Box<dyn Error>> {
+        for deferred in [false, true] {
+            for fail_at in 1..=4 {
+                let (inputs, mut watcher, mut registered) = recording_policy_update(deferred);
+                watcher.fail_at = Some(fail_at);
+                let control = super::super::standalone_index_work_control();
+                let result = inputs.install(&mut watcher, &mut registered, &control);
+                require(
+                    matches!(result, Err(CliError::Watcher(_)))
+                        && watcher.batches == 1
+                        && watcher.commits == 1
+                        && watcher.direct == 0
+                        && watcher.attempts == fail_at
+                        && watcher.live == registered,
+                    "failed native edit left its batch stopped or lost acknowledged coverage",
+                )?;
+                watcher.fail_at = None;
+                inputs.install(&mut watcher, &mut registered, &control)?;
+                require(
+                    watcher.live == inputs.directories && registered == inputs.directories,
+                    "retry did not repair partially applied native coverage",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unacknowledged_policy_batches_retain_every_possible_namespace() -> Result<(), Box<dyn Error>>
+    {
+        for deferred in [false, true] {
+            for fail_at in [None, Some(2)] {
+                let (inputs, mut watcher, mut registered) = recording_policy_update(deferred);
+                let possible = registered.union(&inputs.directories).cloned().collect();
+                watcher.fail_commit = true;
+                watcher.fail_at = fail_at;
+                let control = super::super::standalone_index_work_control();
+                let error = inputs
+                    .install(&mut watcher, &mut registered, &control)
+                    .err()
+                    .ok_or("failed commit certified native coverage")?;
+                let expected = if fail_at.is_some() {
+                    "edit failure"
+                } else {
+                    "commit failure"
+                };
+                require(
+                    matches!(&error, CliError::Watcher(_))
+                        && error.to_string().contains(expected)
+                        && registered == possible
+                        && watcher.live.is_subset(&registered)
+                        && watcher.batches == 1
+                        && watcher.commits == 1,
+                    "unacknowledged batch lost its primary error or a possibly live namespace",
+                )?;
+                watcher.fail_at = None;
+                watcher.fail_commit = false;
+                inputs.install(&mut watcher, &mut registered, &control)?;
+                require(
+                    watcher.live == inputs.directories && registered == inputs.directories,
+                    "retry failed to repair unacknowledged native coverage",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn canceled_policy_batches_resume_backends_without_erasing_cancellation()
+    -> Result<(), Box<dyn Error>> {
+        for deferred in [false, true] {
+            for cancel_after in 1..=4 {
+                for fail_commit in [false, true] {
+                    let (inputs, mut watcher, mut registered) = recording_policy_update(deferred);
+                    let control = super::super::standalone_index_work_control();
+                    watcher.cancel_after = Some((cancel_after, control.clone()));
+                    watcher.fail_commit = fail_commit;
+                    let result = inputs.install(&mut watcher, &mut registered, &control);
+                    require(
+                        matches!(
+                            result,
+                            Err(CliError::IndexWork(
+                                projectatlas_core::IndexWorkFailure::Cancelled { .. }
+                            ))
+                        ) && watcher.batches == 1
+                            && watcher.commits == 1
+                            && watcher.attempts == cancel_after
+                            && watcher.live.is_subset(&registered),
+                        "cancellation skipped commit, continued native work or lost its typed refusal",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_and_refused_policy_updates_do_not_stop_native_observation()
+    -> Result<(), Box<dyn Error>> {
+        let mut watcher = RecordingWatcher::default();
+        let mut registered = BTreeSet::new();
+        let control = super::super::standalone_index_work_control();
+        PolicyWatchInputs::default().install(&mut watcher, &mut registered, &control)?;
+        let inputs = PolicyWatchInputs {
+            directories: (0..=MAX_POLICY_WATCH_DIRECTORIES)
+                .map(|i| PathBuf::from(format!("parent-{i}")))
+                .collect(),
+            ..PolicyWatchInputs::default()
+        };
+        require(
+            matches!(
+                inputs.install(&mut watcher, &mut registered, &control),
+                Err(CliError::Watcher(_))
+            ),
+            "oversized update bypassed the existing native capacity bound",
+        )?;
+        control.cancel();
+        require(
+            matches!(
+                PolicyWatchInputs::default().install(&mut watcher, &mut registered, &control),
+                Err(CliError::IndexWork(_))
+            ) && watcher.batches == 0
+                && watcher.commits == 0
+                && watcher.attempts == 0
+                && registered.is_empty(),
+            "empty or refused update stopped native observation before admission",
+        )?;
+        let (inputs, mut nonempty, mut registered) = recording_policy_update(false);
+        require(
+            matches!(
+                inputs.install(&mut nonempty, &mut registered, &control),
+                Err(CliError::IndexWork(_))
+            ) && nonempty.batches == 0
+                && nonempty.commits == 0
+                && nonempty.attempts == 0,
+            "nonempty pre-canceled update stopped native observation",
+        )
+    }
+
+    #[test]
+    fn policy_batch_commit_remains_inside_the_caller_cancellation_boundary()
+    -> Result<(), Box<dyn Error>> {
+        for deferred in [false, true] {
+            let (inputs, mut watcher, mut registered) = recording_policy_update(deferred);
+            let control = super::super::standalone_index_work_control();
+            watcher.cancel_commit = Some(control.clone());
+            require(
+                matches!(
+                    inputs.install(&mut watcher, &mut registered, &control),
+                    Err(CliError::IndexWork(
+                        projectatlas_core::IndexWorkFailure::Cancelled { .. }
+                    ))
+                ) && watcher.commits == 1
+                    && watcher.live == inputs.directories
+                    && registered == inputs.directories,
+                "commit-time cancellation certified a successful policy update",
+            )?;
+        }
+        Ok(())
     }
 
     /// Select fixture paths without mutating process-wide Git environment.
