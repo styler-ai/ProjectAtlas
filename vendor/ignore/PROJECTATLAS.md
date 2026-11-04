@@ -37,6 +37,9 @@ second complete source walk.
 Keep the patch auditable against the exact original archive. Its original-file
 changes are limited to `src/lib.rs`, `src/gitignore.rs`, `src/dir.rs` and
 `src/walk.rs`, plus an empty `Cargo.toml` workspace boundary for standalone
-upstream tests inside a worktree. `src/input.rs` is additive. Upgrade/removal requires an official
+upstream tests inside a worktree. Existing test-only path constants in
+`src/gitignore.rs` and `src/overrides.rs` have the repository's inline
+`projectatlas: path-fixture` annotation; their values and test behavior are
+unchanged. `src/input.rs` is additive. Upgrade/removal requires an official
 equivalent consumed-input API and passing canonical-library tests, ProjectAtlas
 policy/alias/resource regressions and all native release acceptance targets.

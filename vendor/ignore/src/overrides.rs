@@ -187,7 +187,7 @@ impl OverrideBuilder {
 mod tests {
     use super::{Override, OverrideBuilder};
 
-    const ROOT: &'static str = "/home/andrew/foo";
+    const ROOT: &'static str = "/home/andrew/foo"; // projectatlas: path-fixture
 
     fn ov(globs: &[&str]) -> Override {
         let mut builder = OverrideBuilder::new(ROOT);

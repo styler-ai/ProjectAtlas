@@ -765,7 +765,7 @@ mod tests {
         };
     }
 
-    const ROOT: &'static str = "/home/foobar/rust/rg";
+    const ROOT: &'static str = "/home/foobar/rust/rg"; // projectatlas: path-fixture
 
     ignored!(ig1, ROOT, "months", "months");
     ignored!(ig2, ROOT, "*.lock", "Cargo.lock");
