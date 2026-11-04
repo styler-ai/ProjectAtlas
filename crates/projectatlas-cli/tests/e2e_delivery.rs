@@ -27688,6 +27688,25 @@ fn assert_packaged_readme_command_order(readme: &str, package_version: &str) -> 
     }
     Ok(())
 }
+/// Exact canonical matcher attribution inputs and their release archive members.
+const MATCHER_PACKAGE_NOTICES: [(&str, &str); 2] = [
+    ("vendor/ignore/LICENSE-MIT", "IGNORE-LICENSE-MIT"),
+    ("vendor/ignore/PROJECTATLAS.md", "IGNORE-POLICY-INPUTS.md"),
+];
+
+/// Stage real upstream attribution for the actual release package producers.
+fn stage_matcher_package_notices(workspace: &Path, fixture: &Path) -> io::Result<()> {
+    for (input, _member) in MATCHER_PACKAGE_NOTICES {
+        let destination = fixture.join(input);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("package notice has no parent"))?;
+        fs::create_dir_all(parent)?;
+        fs::copy(workspace.join(input), destination)?;
+    }
+    Ok(())
+}
+
 /// Exercise the real package producer and pre-install digest consumer with substituted inputs.
 #[cfg(windows)]
 fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
@@ -27737,6 +27756,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         workspace.join(RELEASE_README_TEMPLATE),
         temp.path().join(RELEASE_README_TEMPLATE),
     )?;
+    stage_matcher_package_notices(&workspace, temp.path())?;
     let script = temp.path().join("digest-admission.ps1");
     fs::write(
         &script,
@@ -27782,6 +27802,16 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     archive_reader
         .by_name("README.md")?
         .read_to_string(&mut readme)?;
+    for (input, member) in MATCHER_PACKAGE_NOTICES {
+        let mut actual = Vec::new();
+        archive_reader.by_name(member)?.read_to_end(&mut actual)?;
+        if actual != fs::read(workspace.join(input))? {
+            return Err(io::Error::other(format!(
+                "Windows archive altered matcher attribution {member}"
+            ))
+            .into());
+        }
+    }
     let expected_guidance = [
         format!("ProjectAtlas {release_version}"),
         format!("projectatlas --require-version {package_version} --format json runtime-info"),
@@ -27923,6 +27953,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         workspace.join(RELEASE_README_TEMPLATE),
         temp.path().join(RELEASE_README_TEMPLATE),
     )?;
+    stage_matcher_package_notices(&workspace, temp.path())?;
     let script = temp.path().join("package.sh");
     fs::write(&script, format!("set -eu\n{producer}"))?;
     let package_version = "0.5.0-rc1";
@@ -27940,6 +27971,19 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     let archive = temp.path().join(format!(
         "release-assets/projectatlas-{release_version}-x86_64-unknown-linux-gnu.tar.gz"
     ));
+    for (input, member) in MATCHER_PACKAGE_NOTICES {
+        let output = StdCommand::new("tar")
+            .args(["-xOf"])
+            .arg(&archive)
+            .arg(format!("projectatlas/{member}"))
+            .output()?;
+        if !output.status.success() || output.stdout != fs::read(workspace.join(input))? {
+            return Err(io::Error::other(format!(
+                "Unix archive omitted or altered matcher attribution {member}"
+            ))
+            .into());
+        }
+    }
     let output = StdCommand::new("tar")
         .args(["-xOf"])
         .arg(&archive)
