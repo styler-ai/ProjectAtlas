@@ -7820,9 +7820,30 @@ fn complete_symbol_graphs<'a>(
     sources: &mut SourceBindingCache<'_>,
     control: &IndexWorkControl,
 ) -> Result<Vec<SourceGraph<'a>>, CliError> {
-    let paths = paths.iter().cloned().collect::<Vec<_>>();
+    // A staged mutation wholly owns this path's raw graph. Loading the previous
+    // rows first only allocates/validates facts that the overlay must discard.
+    // Keep unchanged context and incremental old-export reads at their owners.
+    let mut staged_paths = BTreeSet::new();
+    for (index, change) in symbols.changes.iter().enumerate() {
+        check_graph_work(control, index)?;
+        let path = match change {
+            SymbolProjectionChange::Parsed(parsed) => &parsed.path,
+            SymbolProjectionChange::Clear { path, .. } => path,
+        };
+        if paths.contains(path) {
+            staged_paths.insert(path.as_str());
+        }
+    }
+    let mut persisted_paths = Vec::with_capacity(paths.len().saturating_sub(staged_paths.len()));
+    for (index, path) in paths.iter().enumerate() {
+        check_graph_work(control, index)?;
+        if !staged_paths.contains(path.as_str()) {
+            persisted_paths.push(path.clone());
+        }
+    }
+    drop(staged_paths);
     let mut graphs = BTreeMap::new();
-    for chunk in paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
+    for chunk in persisted_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
         control.check(IndexWorkStage::SymbolParsing)?;
         for graph in store.load_symbol_graphs_for_paths(chunk)? {
             graphs.insert(graph.path.clone(), SourceGraph::Persisted(graph));
@@ -7831,7 +7852,7 @@ fn complete_symbol_graphs<'a>(
     for (index, change) in symbols.changes.iter().enumerate() {
         check_graph_work(control, index)?;
         match change {
-            SymbolProjectionChange::Parsed(parsed) if paths.binary_search(&parsed.path).is_ok() => {
+            SymbolProjectionChange::Parsed(parsed) if paths.contains(&parsed.path) => {
                 graphs.insert(
                     parsed.path.clone(),
                     SourceGraph::Staged {
@@ -7840,13 +7861,13 @@ fn complete_symbol_graphs<'a>(
                     },
                 );
             }
-            SymbolProjectionChange::Clear { path, .. } if paths.binary_search(path).is_ok() => {
+            SymbolProjectionChange::Clear { path, .. } if paths.contains(path) => {
                 graphs.remove(path);
             }
             SymbolProjectionChange::Parsed(_) | SymbolProjectionChange::Clear { .. } => {}
         }
     }
-    graphs.retain(|path, _graph| paths.binary_search(path).is_ok());
+    graphs.retain(|path, _graph| paths.contains(path));
     for (path, graph) in &mut graphs {
         control.check(IndexWorkStage::SymbolParsing)?;
         if matches!(graph, SourceGraph::Persisted(_))
@@ -20634,6 +20655,122 @@ function helper() {}
             &Some(base),
             "failed capture preserved publication",
         )?;
+        Ok(())
+    }
+
+    /// Wholly staged mutations own their raw graph; unchanged context still needs validation.
+    #[test]
+    fn staged_graphs_replace_or_clear_raw_rows_without_skipping_unchanged_context()
+    -> Result<(), Box<dyn Error>> {
+        for clear_last in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            let changed = "changed.rs";
+            let context = "context.py";
+            let changed_text = "pub fn replacement() {}\n";
+            let context_text = "import target\n\ndef caller():\n    target.run()\n";
+            fs::write(root.join(changed), changed_text)?;
+            fs::write(root.join(context), context_text)?;
+            let mut nodes = vec![
+                test_file_node(changed, "rust"),
+                test_file_node(context, "python"),
+            ];
+            capture_test_file_hashes(root, &mut nodes)?;
+            let database = root.join("atlas.db");
+            let mut store = AtlasStore::open_for_project(&database, root)?;
+            store.replace_scan(&nodes)?;
+            store.replace_symbol_graph(&function_graph(changed, 1))?;
+            store.replace_symbol_graph(&extract_symbol_graph(
+                context,
+                Some("python"),
+                context_text,
+            ))?;
+            // A count mismatch proves that discarded rows were not decoded,
+            // rather than merely omitted from the final result afterward.
+            let writer = Connection::open(&database)?;
+            writer.execute(
+                "UPDATE source_parse_metadata SET symbol_count = symbol_count + 1 WHERE path = ?1",
+                [changed],
+            )?;
+            drop(writer);
+            require(
+                matches!(
+                    store.load_symbol_graphs_for_paths(&[changed.to_string()]),
+                    Err(projectatlas_db::DbError::SymbolGraphRowShape { path, .. }) if path == changed
+                ),
+                "discarded-row control did not create an invalid persisted graph",
+            )?;
+            let paths = BTreeSet::from([changed.to_string(), context.to_string()]);
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let replacement = extract_symbol_graph(changed, Some("rust"), changed_text);
+            let mut symbols = symbol_build_stage_for_graphs(vec![replacement.clone()]);
+            let clear = SymbolProjectionChange::Clear {
+                path: changed.to_string(),
+                language: Some("rust".to_string()),
+            };
+            if clear_last {
+                symbols.changes.push(clear);
+            } else {
+                symbols.changes.insert(0, clear);
+            }
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            let graphs =
+                super::complete_symbol_graphs(&store, &paths, &symbols, &mut sources, &control)?;
+            require(
+                graphs
+                    .iter()
+                    .filter(|graph| graph.graph().path == changed)
+                    .count()
+                    == usize::from(!clear_last),
+                "staged parsed/clear mutations lost last-change-wins behavior",
+            )?;
+            if !clear_last {
+                require(
+                    graphs.iter().any(|graph| graph.graph() == &replacement),
+                    "replacement did not retain the exact staged parser graph",
+                )?;
+            }
+            require(
+                graphs.iter().any(|graph| {
+                    graph.graph().path == context
+                        && matches!(graph, SourceGraph::Captured(_))
+                        && graph
+                            .semantics()
+                            .is_some_and(|facts| !facts.imports().is_empty())
+                }) && sources.work.previously_unchanged == 1,
+                "unchanged import context was not recovered from verified source exactly once",
+            )?;
+            let writer = Connection::open(&database)?;
+            writer.execute(
+                "UPDATE source_parse_metadata SET symbol_count = symbol_count + 1 WHERE path = ?1",
+                [context],
+            )?;
+            drop(writer);
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            require(
+                matches!(
+                    super::complete_symbol_graphs(&store, &paths, &symbols, &mut sources, &control),
+                    Err(CliError::Db(projectatlas_db::DbError::SymbolGraphRowShape { path, .. })) if path == context
+                ),
+                "staged mutations bypassed validation of an unchanged persisted graph",
+            )?;
+            let cancelled = IndexCancellation::new();
+            cancelled.cancel();
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            require(
+                matches!(
+                    super::complete_symbol_graphs(
+                        &store,
+                        &BTreeSet::from([changed.to_string()]),
+                        &symbols,
+                        &mut sources,
+                        &IndexWorkControl::new(cancelled, None),
+                    ),
+                    Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+                ),
+                "fully staged selection ignored cancellation",
+            )?;
+        }
         Ok(())
     }
 

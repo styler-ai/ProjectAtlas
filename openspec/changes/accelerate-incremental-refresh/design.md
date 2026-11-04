@@ -122,6 +122,20 @@ selection remain conservative; the additional raw-graph reference owner is also
 accounted. This shortens coexistence rather than weakening proof, increasing
 limits, copying the corpus or adding persistent state.
 
+At the shared raw-graph loader, selected paths with staged `Parsed` or `Clear`
+mutations need no previous raw graph. Derive their borrowed path set under the
+existing control and path-inventory allowance, load only the remaining paths in
+the existing bounded chunks, then apply staged mutations in their original order.
+The temporary selection drops before graph loading. Unchanged graphs still receive
+persisted-row validation and any required source recovery; incremental old-export
+and affected-footprint reads remain at their existing owners. Fully replaced or
+cleared raw rows are deliberately not decoded or validated merely to discard
+them. This does not change validation of retained rows or promise recovery from
+unrelated database corruption. Causal coverage uses malformed old rows to prove
+the omission, preserves last-change-wins and unchanged import bindings, and checks
+cancellation even when every selected graph is staged. Measure the affected full
+and sparse paths before claiming latency or sampled-RSS acceptance.
+
 ### Apply the delta and avoid repeated whole-project work
 
 Convert discovered or observed changes into the existing incremental path. Use source/dependency invalidation rules to expand the affected set only when necessary. Relevant compiler, ignore, parser or publication-policy changes may legitimately invalidate a wider scope.
