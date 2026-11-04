@@ -76,6 +76,20 @@ schema, read indexes, durability, sparse affected-path replacement or authored
 state. Causal SQLite coverage checks remaining child work at parent deletion and
 late-publication rollback; the installed product targets remain independent proof.
 
+Full replacement captures the exact definitions of the existing non-unique graph
+read indexes, drops them before retiring the old rows, and restores them after
+the bulk write inside the same savepoint. Maintaining those indexes during mass
+deletion only to drop them afterward adds measured VM and journal work. Unique
+and primary-key constraints and foreign keys remain active. The normalized root
+path sentinel routes to the existing full replacement owner; ordinary affected
+paths retain their indexes and incremental behavior. Disposable staging already
+drops these read indexes before loading graph rows. Causal SQL admission observes
+the index lifecycle at row retirement; late source-constraint and cancellation
+failures restore exact index definitions, prior graph/text/generation state and
+reader snapshots. This changes neither the committed schema nor connection or
+cache settings; optimized product and installed-platform measurements still own
+the speed and resource claims.
+
 ### Reuse trustworthy observations; handle missing history honestly
 
 For explicit one-shot refresh, both long-lived MCP and fresh CLI reconcile source exactly. The existing observer may retain operation-local source evidence for the writer, but native callback delivery cannot establish a zero-work freshness witness. A read stamp alone is not permission to publish.

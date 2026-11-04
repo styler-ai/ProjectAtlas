@@ -4440,8 +4440,8 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
         let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
-        clear_repository_graph_content(&savepoint)?;
         drop_graph_rebuildable_indexes(&savepoint)?;
+        clear_repository_graph_content(&savepoint)?;
         for (table, columns) in GRAPH_STAGE_COPY_TABLES {
             copy_graph_stage_table(&staging.connection, &savepoint, table, columns, control)?;
         }
@@ -4514,8 +4514,8 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
         let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
-        clear_repository_graph_content(&savepoint)?;
         drop_graph_rebuildable_indexes(&savepoint)?;
+        clear_repository_graph_content(&savepoint)?;
         insert_graph_batch(
             &savepoint,
             project,
@@ -4597,29 +4597,19 @@ impl IndexPublicationGuard<'_> {
             .iter()
             .map(|path| RepositoryNodePath::new(Path::new(path)))
             .collect::<Result<Vec<_>, _>>()?;
-        let savepoint = self.store.connection.savepoint()?;
-        require_bound_project_identity(&savepoint, project)?;
         if affected_paths.iter().any(|path| path.as_str() == ".") {
-            prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
-            clear_repository_graph_content(&savepoint)?;
-            insert_graph_batch(
-                &savepoint,
+            return self.replace_repository_graph_with_resolution_keys(
                 project,
                 entities,
                 relations,
                 occurrences,
                 coverage,
-            )?;
-            insert_resolution_key_batch(
-                &savepoint,
-                project,
                 entity_exports,
                 relation_dependencies,
-            )?;
-            set_graph_generation(&savepoint, generation)?;
-            savepoint.commit()?;
-            return Ok(());
+            );
         }
+        let savepoint = self.store.connection.savepoint()?;
+        require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, Some(&affected_paths))?;
         let touched_keys = resolution_keys_for_owner_paths(
             &savepoint,
@@ -10506,6 +10496,7 @@ mod tests {
         let cancellation = projectatlas_core::IndexCancellation::new();
         cancellation.cancel();
         let canceled = IndexWorkControl::new(cancellation, None);
+        let original_indexes = graph_rebuildable_index_sql(&main.connection)?;
         let mut canceled_publication =
             main.begin_index_publication("canceled-staged-document-reasons")?;
         canceled_publication.begin_scan_replacement()?;
@@ -10529,6 +10520,11 @@ mod tests {
             "canceled stage copy returned the wrong error",
         )?;
         drop(canceled_publication);
+        require_eq(
+            &graph_rebuildable_index_sql(&main.connection)?,
+            &original_indexes,
+            "canceled stage copy restores exact read-index definitions",
+        )?;
         require(
             main.repository_graph_generation()?.is_none(),
             "canceled stage copy exposed a graph generation",
@@ -17271,6 +17267,261 @@ mod tests {
             &incoming,
             "rejection ceiling retry after affected replacement",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_graph_replacement_releases_read_indexes_before_retiring_rows()
+    -> Result<(), Box<dyn Error>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        require(
+            GRAPH_REBUILDABLE_INDEX_NAMES.len() < u64::BITS as usize,
+            "read-index observation exceeds its bitset",
+        )?;
+        let all_indexes = (1_u64 << GRAPH_REBUILDABLE_INDEX_NAMES.len()) - 1;
+        let mut observed_routes = Vec::new();
+        for route in ["memory", "staging", "root", "affected"] {
+            let temp = tempfile::tempdir()?;
+            let project_root = temp.path().join(route);
+            fs::create_dir(&project_root)?;
+            let mut writer =
+                AtlasStore::open_for_project(&project_root.join("projectatlas.db"), &project_root)?;
+            let original = publish_fixture(&mut writer, "bulk-graph-lifecycle")?;
+            let definitions = graph_rebuildable_index_sql(&writer.connection)?;
+            let incoming = graph_fixture(original.project, IndexGeneration::new(2))?;
+            let mut stage = AtlasStore::create_repository_graph_staging(
+                &project_root.join("staged.db"),
+                &project_root,
+                original.project,
+            )?;
+            stage.upsert_scan_nodes(&[
+                graph_node(".", NodeKind::Folder, None),
+                graph_node("src", NodeKind::Folder, Some(".")),
+                graph_node("src/Äuth.rs", NodeKind::File, Some("src")),
+                graph_node("Cargo.toml", NodeKind::File, Some(".")),
+            ])?;
+            {
+                let mut staged = stage
+                    .begin_repository_graph_staging(original.project, IndexGeneration::new(2))?;
+                staged.append_batch(
+                    &incoming.entities,
+                    &incoming.relations,
+                    &incoming.occurrences,
+                    &incoming.coverage,
+                    &[],
+                    &[],
+                )?;
+                staged.complete()?;
+            }
+            let dropped = Arc::new(AtomicU64::new(0));
+            let indexed_deletes = Arc::new(AtomicUsize::new(0));
+            let observed_drops = Arc::clone(&dropped);
+            let observed_deletes = Arc::clone(&indexed_deletes);
+            writer
+                .connection
+                .authorizer(Some(move |context: AuthContext<'_>| {
+                    match context.action {
+                        AuthAction::DropIndex { index_name, .. } => {
+                            if let Some(position) = GRAPH_REBUILDABLE_INDEX_NAMES
+                                .iter()
+                                .position(|name| *name == index_name)
+                            {
+                                observed_drops.fetch_or(1_u64 << position, Ordering::Relaxed);
+                            }
+                        }
+                        AuthAction::Delete {
+                            table_name:
+                                "graph_relation_dependencies"
+                                | "graph_entity_exports"
+                                | "graph_relation_occurrences"
+                                | "graph_coverage"
+                                | "graph_relations"
+                                | "graph_entities"
+                                | "graph_resolution_keys",
+                        } if observed_drops.load(Ordering::Relaxed) != all_indexes => {
+                            observed_deletes.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                    Authorization::Allow
+                }))?;
+            {
+                let mut publication = writer.begin_index_publication("bulk-graph-lifecycle")?;
+                match route {
+                    "staging" => publication.replace_repository_graph_from_staging(
+                        original.project,
+                        &stage,
+                        None,
+                    )?,
+                    "root" | "affected" => publication
+                        .replace_repository_graph_for_paths_with_resolution_keys(
+                            original.project,
+                            &[if route == "root" { "." } else { "src/Äuth.rs" }.to_string()],
+                            &incoming.entities,
+                            &incoming.relations,
+                            &incoming.occurrences,
+                            &incoming.coverage,
+                            &[],
+                            &[],
+                        )?,
+                    _ => publication.replace_repository_graph_with_resolution_keys(
+                        original.project,
+                        &incoming.entities,
+                        &incoming.relations,
+                        &incoming.occurrences,
+                        &incoming.coverage,
+                        &[],
+                        &[],
+                    )?,
+                }
+                publication.complete()?;
+            }
+            writer
+                .connection
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            require_eq(
+                &graph_rebuildable_index_sql(&writer.connection)?,
+                &definitions,
+                "replacement preserves exact read-index definitions",
+            )?;
+            require(
+                writer
+                    .connection
+                    .prepare("PRAGMA foreign_key_check")?
+                    .query([])?
+                    .next()?
+                    .is_none(),
+                "replacement leaves a foreign-key violation",
+            )?;
+            let observations = (
+                route,
+                dropped.load(Ordering::Relaxed),
+                indexed_deletes.load(Ordering::Relaxed),
+            );
+            if route == "affected" {
+                require_eq(
+                    &observations.1,
+                    &0,
+                    "sparse replacement retains read indexes",
+                )?;
+            } else {
+                observed_routes.push(observations);
+            }
+        }
+        require(
+            observed_routes.iter().all(|(_, dropped, indexed_deletes)| {
+                *dropped == all_indexes && *indexed_deletes == 0
+            }),
+            &format!(
+                "full replacement maintained read indexes during retirement: {observed_routes:?}"
+            ),
+        )
+    }
+
+    #[test]
+    fn staged_and_root_graph_failure_restore_indexes_and_reader_publication()
+    -> Result<(), Box<dyn Error>> {
+        for staged in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let project_root = temp.path().join("graph-retirement-rollback");
+            fs::create_dir(&project_root)?;
+            let database = project_root.join("projectatlas.db");
+            let mut writer = AtlasStore::open_for_project(&database, &project_root)?;
+            let original = publish_fixture(&mut writer, "graph-retirement-rollback")?;
+            let definitions = graph_rebuildable_index_sql(&writer.connection)?;
+            let reader = AtlasStore::open_read_only_for_project(&database, &project_root)?;
+            require_graph_projection(
+                &reader,
+                &original,
+                IndexGeneration::new(1),
+                "fn verifyToken()",
+            )?;
+            let missing = GraphEntity::new(
+                original.project,
+                EntitySelector::File {
+                    path: RepositoryFilePath::new(Path::new("src/missing.rs"))?,
+                },
+                IndexGeneration::new(2),
+            )?;
+            let mut stage = AtlasStore::create_repository_graph_staging(
+                &project_root.join("staged.db"),
+                &project_root,
+                original.project,
+            )?;
+            stage.upsert_scan_nodes(&[
+                graph_node(".", NodeKind::Folder, None),
+                graph_node("src", NodeKind::Folder, Some(".")),
+                graph_node("src/missing.rs", NodeKind::File, Some("src")),
+            ])?;
+            {
+                let mut staged_graph = stage
+                    .begin_repository_graph_staging(original.project, IndexGeneration::new(2))?;
+                staged_graph.append_batch(
+                    std::slice::from_ref(&missing),
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                )?;
+                staged_graph.complete()?;
+            }
+            {
+                let mut publication =
+                    writer.begin_index_publication("graph-retirement-rollback")?;
+                let replacement = if staged {
+                    publication.replace_repository_graph_from_staging(
+                        original.project,
+                        &stage,
+                        None,
+                    )
+                } else {
+                    publication.replace_repository_graph_for_paths_with_resolution_keys(
+                        original.project,
+                        &[".".to_string()],
+                        std::slice::from_ref(&missing),
+                        &[],
+                        &[],
+                        &[],
+                        &[],
+                        &[],
+                    )
+                };
+                let error =
+                    require_db_error(replacement, "graph without its source node committed")?;
+                require(
+                    matches!(error, DbError::Sqlite(_)),
+                    "late source constraint was not exercised",
+                )?;
+                require_eq(
+                    &graph_rebuildable_index_sql(&publication.store.connection)?,
+                    &definitions,
+                    "failed replacement restores indexes inside the publication",
+                )?;
+            }
+            require_graph_projection(
+                &writer,
+                &original,
+                IndexGeneration::new(1),
+                "fn verifyToken()",
+            )?;
+            require_graph_projection(
+                &reader,
+                &original,
+                IndexGeneration::new(1),
+                "fn verifyToken()",
+            )?;
+            let new_reader = AtlasStore::open_read_only_for_project(&database, &project_root)?;
+            require_graph_projection(
+                &new_reader,
+                &original,
+                IndexGeneration::new(1),
+                "fn verifyToken()",
+            )?;
+        }
         Ok(())
     }
 
