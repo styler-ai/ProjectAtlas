@@ -173,7 +173,7 @@ class DatabaseInspection(unittest.TestCase):
             self.assertFalse(details["files"]["database"]["exists"])
             self.assertFalse(details["files"]["parent"]["exists"])
 
-    def test_reader_observes_settled_and_live_wal_without_writing_database(self):
+    def test_reader_observes_settled_wal_without_writing_database(self):
         with tempfile.TemporaryDirectory() as task:
             root = Path(task)
             self.project(root)
@@ -183,12 +183,22 @@ class DatabaseInspection(unittest.TestCase):
                 self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
                 writer.execute("UPDATE purposes SET purpose='Settled WAL authority'")
                 writer.commit()
+                self.assertEqual(writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone(),
+                                 (0, 0, 0))
             finally:
                 writer.close()
             wal = Path(str(path) + "-wal")
             shm = Path(str(path) + "-shm")
-            self.assertFalse(wal.exists(), "closed writer left WAL; fixture is not settled")
-            self.assertFalse(shm.exists(), "closed writer left SHM; fixture is not settled")
+            # Some native SQLite builds retain sidecars after the last close.
+            # This fixture owns every connection: after a successful truncating
+            # checkpoint and close, only an empty WAL may be removed safely.
+            if wal.exists():
+                self.assertEqual(wal.stat().st_size, 0, "fixture WAL still contains frames")
+                wal.unlink()
+            shm.unlink(missing_ok=True)
+            self.assertEqual(path.read_bytes()[18:20], b"\x02\x02", "fixture left WAL mode")
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
             before = digest(path)
             with database_reader(root) as reader:
                 self.assertEqual(reader.execute("SELECT purpose FROM purposes").fetchone(),
@@ -197,8 +207,15 @@ class DatabaseInspection(unittest.TestCase):
                     reader.execute("UPDATE purposes SET purpose='Forbidden change'")
             self.assertEqual(digest(path), before)
 
+    def test_reader_observes_live_wal_without_writing_database(self):
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            self.project(root)
+            path = database(root)
+            wal = Path(str(path) + "-wal")
             writer = sqlite3.connect(path)
             try:
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
                 writer.execute("UPDATE purposes SET purpose='Committed live WAL authority'")
                 writer.commit()
                 self.assertTrue(wal.exists())

@@ -199,6 +199,17 @@ DML/DDL refusal and unchanged main-database/WAL contents. Coordination sidecar
 creation is permitted by SQLite's read-only contract. These tests isolate the
 host boundary; they do not waive the failed campaign or establish its cause.
 
+Keep the settled and live WAL cases independent. Native SQLite may retain
+sidecars after the last close, so closure alone cannot construct a sidecarless
+fixture. For the exclusively owned settled fixture, require a successful
+`wal_checkpoint(TRUNCATE)`, close its sole writer, and remove a retained WAL only
+after verifying it is empty; then remove its coordination SHM. Verify that the
+main file remains in WAL mode before exercising the unchanged read-only observer.
+This is fixture construction, not observer cleanup or a production database
+repair. The separate live case must retain and read committed WAL frames while
+its writer remains open. See SQLite's [WAL lifecycle](https://sqlite.org/wal.html#the_wal_file)
+and [checkpoint contract](https://sqlite.org/pragma.html#pragma_wal_checkpoint).
+
 Cold external-policy coverage uses the existing `notify::Watcher::paths_mut`
 batch API. Remove and re-add every selected parent, and retire removed parents,
 before explicitly committing once. This preserves same-path replacement handling
