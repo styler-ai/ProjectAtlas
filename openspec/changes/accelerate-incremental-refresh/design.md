@@ -698,6 +698,50 @@ objects. A different-directory/same-leaf control separately isolates identity
 comparison. Both inside/outside targets and ancestor levels, ordinary recovery,
 root swaps, native names, FIFO and handle pressure remain covered.
 
+On Linux, evaluate the existing locked `nix` crate's safe `openat2` wrapper
+before extending the userspace cursor. The [Linux kernel interface contract](https://man7.org/linux/man-pages/man2/openat2.2.html) distinguishes all-component resolution restrictions from leaf-only `O_NOFOLLOW`. A root-relative path made only of native
+normal components can be resolved with `RESOLVE_BENEATH` and
+`RESOLVE_NO_SYMLINKS` in one kernel operation. Keep the selected root capability,
+read-only/nonblocking/no-controlling-terminal/close-on-exec/no-follow flags,
+opened regular-file and device/inode checks, exact source bytes, work budgets
+and publication fences. Do not prohibit ordinary mount points. This route holds
+no ancestor cache: the kernel freshly authorizes every component for that open,
+so the cursor's stale-handle identity check is unnecessary on that route.
+Ordinary direct-directory replacement can therefore succeed when the current
+source object matches admission; stale opened bytes and descendant aliases
+remain forbidden. The existing single-target component walk remains unchanged. Explicitly select
+that component route in `uncached()`; availability of kernel resolution is
+independent of the retained-directory quota, including when that quota is zero.
+Each worker positively probes the optional syscall once against `.` relative
+to the already-open root, with the same resolve policy and
+`O_PATH | O_DIRECTORY | O_CLOEXEC`. Drop this one transient descriptor before
+opening a source. Success selects kernel resolution. Only `ENOSYS`, `EPERM`,
+`EACCES` or `ENOENT` at this content-free probe selects the existing secure
+component cursor for the rest of that discovery; do not infer availability from
+an expected error that a syscall filter could synthesize. Other probe errors
+are refusals. Once admitted, real-source permission, alias, path and race errors
+stay strict; a real-path `ENOSYS` may still select the secure fallback. This
+preserves syscall-filtered hosts without confusing source-specific permission
+denial with backend unavailability. Keep only a closed, per-worker
+unchecked/kernel/component state, with no global source witness. Prove selection
+and fallback before implementation acceptance. All other alias, identity, path,
+I/O and control failures remain strict. Require causal all-component no-follow
+and source-identity controls, supported native paths/hardlinks/saves, root swaps,
+nonregular files and cancellation, followed by the same shipping-profile
+four-CPU comparison and installed-platform targets. No new dependency, unsafe
+code, worker, schema or persisted state is needed. This is an experiment until
+the measurements establish a benefit; other platforms retain the verified
+component opener.
+
+Kernel resolution checks cooperative control before and after the complete
+path-resolution syscall; the component backend checks between ancestor opens.
+A deep path or slow mounted filesystem can therefore defer stop observation
+across that one call. As with other filesystem operations this is not a hard
+wall-clock deadline. The post-open check must discard the returned descriptor
+and refuse before hashing or publication if work stopped during resolution.
+Prove this with a real owned-descriptor return from the source-open seam, not
+only pre-cancelled input or a stopped availability probe.
+
 For a held Windows ancestor, query fresh attributes with the already locked
 canonical `winx` backend. An ordinary non-reparse directory needs no full
 `cap-std` metadata construction or duplicate identity query. Every reparse point

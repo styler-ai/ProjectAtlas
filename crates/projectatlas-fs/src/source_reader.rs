@@ -15,7 +15,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Maximum retained ancestor depth; deeper sources use the ordinary secure walk.
+/// Maximum component-cursor depth; deeper component paths use the secure walk.
 const DIRECTORY_CURSOR_MAX_DEPTH: usize = 8;
 /// Maximum extra retained directory handles across concurrent discoveries.
 const DIRECTORY_HANDLE_CEILING: usize = 64;
@@ -45,13 +45,15 @@ impl SourceRootReader {
         })
     }
 
-    /// Borrow a sibling-source cursor for one existing parallel walk visitor.
+    /// Borrow one worker-local direct-source opener for an existing walk visitor.
     pub(crate) fn reader(&self) -> SourceFileReader<'_> {
         SourceFileReader {
             root: self,
             cursor: None,
             occupied: &DIRECTORY_HANDLES,
             limit: self.directory_handle_limit,
+            #[cfg(target_os = "linux")]
+            resolver: SourceResolver::Unchecked,
             #[cfg(test)]
             hits: 0,
         }
@@ -61,6 +63,8 @@ impl SourceRootReader {
     pub(crate) fn uncached(&self) -> SourceFileReader<'_> {
         SourceFileReader {
             limit: 0,
+            #[cfg(target_os = "linux")]
+            resolver: SourceResolver::Components,
             ..self.reader()
         }
     }
@@ -113,7 +117,7 @@ impl SourceRootReader {
     }
 }
 
-/// One worker's optional last-parent capability chain; never shared or persisted.
+/// One worker's direct-source opener and optional bounded component cursor.
 #[derive(Debug)]
 pub(crate) struct SourceFileReader<'root> {
     /// Selected root capability borrowed for this discovery only.
@@ -122,11 +126,26 @@ pub(crate) struct SourceFileReader<'root> {
     cursor: Option<SourceDirectoryCursor>,
     /// Process occupancy (or an isolated test counter), not a path registry.
     occupied: &'static AtomicUsize,
-    /// Extra handle limit; zero selects the unchanged secure walk.
+    /// Extra component-cursor handle limit; zero disables retained ancestors.
     limit: usize,
+    /// Optional all-component kernel resolution, selected only for this worker.
+    #[cfg(target_os = "linux")]
+    resolver: SourceResolver,
     /// Causal coverage distinguishes actual reuse from the uncached fallback.
     #[cfg(test)]
     hits: usize,
+}
+
+/// Closed backend selection; neither variant retains a source freshness witness.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceResolver {
+    /// No optional-syscall availability check has run in this discovery.
+    Unchecked,
+    /// The kernel accepted the content-free root capability probe.
+    Kernel,
+    /// Use the existing bounded no-follow component cursor.
+    Components,
 }
 
 impl SourceFileReader<'_> {
@@ -152,7 +171,7 @@ impl SourceFileReader<'_> {
         }
     }
 
-    /// Reuse a verified sibling parent, or use the ordinary secure component walk.
+    /// Resolve a direct source or reuse freshly verified parent capabilities.
     fn open_source(
         &mut self,
         path: &Path,
@@ -163,6 +182,16 @@ impl SourceFileReader<'_> {
         let relative = path.strip_prefix(&self.root.root).map_err(|source| {
             source_error(path, io::Error::new(io::ErrorKind::InvalidInput, source))
         })?;
+        #[cfg(target_os = "linux")]
+        if let Some(opened) = self.try_kernel_open(
+            relative,
+            path,
+            admitted_metadata,
+            control,
+            kernel_source_open,
+        )? {
+            return Ok(opened);
+        }
         let parent = relative.parent().unwrap_or(Path::new(""));
         let hit = self
             .cursor
@@ -210,6 +239,95 @@ impl SourceFileReader<'_> {
         }
         open_source_leaf(directory, Path::new(name), path, admitted_metadata)
     }
+
+    /// Probe the optional syscall without confusing source permissions with
+    /// syscall filtering, then resolve every source component in one operation.
+    #[cfg(target_os = "linux")]
+    fn try_kernel_open(
+        &mut self,
+        relative: &Path,
+        path: &Path,
+        admitted_metadata: &std::fs::Metadata,
+        control: &IndexWorkControl,
+        mut open: impl FnMut(&Dir, &Path, nix::fcntl::OFlag) -> nix::Result<std::os::fd::OwnedFd>,
+    ) -> FsResult<Option<(File, std::fs::Metadata)>> {
+        use nix::errno::Errno;
+        use nix::fcntl::OFlag;
+
+        if self.resolver == SourceResolver::Components {
+            return Ok(None);
+        }
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(source_error(
+                path,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "source path must contain only direct descendant components",
+                ),
+            ));
+        }
+        control.check(IndexWorkStage::SourceHash)?;
+        if self.resolver == SourceResolver::Unchecked {
+            // A positive, content-free root probe distinguishes an available
+            // syscall from filters that synthesize an errno, including ENOENT.
+            // Drop its one descriptor before attempting any source open.
+            match open(
+                &self.root.directory,
+                Path::new("."),
+                OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            ) {
+                Ok(probe) => {
+                    drop(probe);
+                    self.resolver = SourceResolver::Kernel;
+                }
+                Err(Errno::ENOSYS | Errno::EPERM | Errno::EACCES | Errno::ENOENT) => {
+                    self.resolver = SourceResolver::Components;
+                    return Ok(None);
+                }
+                Err(source) => return Err(source_error(path, source.into())),
+            }
+        }
+        control.check(IndexWorkStage::SourceHash)?;
+        let descriptor = match open(&self.root.directory, relative, source_open_flags()) {
+            Ok(descriptor) => descriptor,
+            Err(Errno::ENOSYS) => {
+                self.resolver = SourceResolver::Components;
+                return Ok(None);
+            }
+            Err(source) => return Err(source_error(path, source.into())),
+        };
+        control.check(IndexWorkStage::SourceHash)?;
+        validate_source_file(File::from(descriptor), path, admitted_metadata).map(Some)
+    }
+}
+
+/// Ask the kernel to enforce the complete descendant boundary without a cache.
+#[cfg(target_os = "linux")]
+fn kernel_source_open(
+    root: &Dir,
+    relative: &Path,
+    flags: nix::fcntl::OFlag,
+) -> nix::Result<std::os::fd::OwnedFd> {
+    use nix::fcntl::{OpenHow, ResolveFlag, openat2};
+
+    openat2(
+        root,
+        relative,
+        OpenHow::new()
+            .flags(flags)
+            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+    )
+}
+
+/// Shared source-only flags preserve nonblocking refusal and descriptor lifetime.
+#[cfg(unix)]
+fn source_open_flags() -> nix::fcntl::OFlag {
+    use nix::fcntl::OFlag;
+    OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_NOCTTY | OFlag::O_CLOEXEC
 }
 
 /// Complete retained chain: close frames BEFORE returning their occupancy permit.
@@ -453,23 +571,14 @@ fn open_source_leaf(
     }
     #[cfg(unix)]
     let file = {
-        use nix::fcntl::{OFlag, openat};
+        use nix::fcntl::openat;
         use nix::sys::stat::Mode;
 
         // The parent is already an admitted capability; the basename needs no
         // general multi-component resolver. Keep no-follow, nonblocking special
         // file refusal and close-on-exec, with ownership transferred safely.
-        let descriptor = openat(
-            parent,
-            name,
-            OFlag::O_RDONLY
-                | OFlag::O_NOFOLLOW
-                | OFlag::O_NONBLOCK
-                | OFlag::O_NOCTTY
-                | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|source| source_error(path, source.into()))?;
+        let descriptor = openat(parent, name, source_open_flags(), Mode::empty())
+            .map_err(|source| source_error(path, source.into()))?;
         File::from(descriptor)
     };
     #[cfg(not(unix))]
@@ -481,6 +590,15 @@ fn open_source_leaf(
             .map_err(|source| source_error(path, source))?
             .into_std()
     };
+    validate_source_file(file, path, admitted_metadata)
+}
+
+/// Bind either safe opener's file to the same regular-source admission evidence.
+fn validate_source_file(
+    file: File,
+    path: &Path,
+    admitted_metadata: &std::fs::Metadata,
+) -> FsResult<(File, std::fs::Metadata)> {
     let opened_metadata = file
         .metadata()
         .map_err(|source| source_error(path, source))?;
@@ -777,6 +895,10 @@ mod tests {
 #[cfg(test)]
 #[path = "source_cursor_tests.rs"]
 mod cursor_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "source_kernel_tests.rs"]
+mod kernel_tests;
 
 // Only the isolated native fixture calls Windows Cloud Files APIs directly.
 #[cfg(all(test, windows))]
