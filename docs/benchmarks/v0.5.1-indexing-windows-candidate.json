@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "passed": false,
+  "candidate_origin": "installed release workflow",
+  "source_revision": "b1a641113e1c3f55949d744c5feb55971bf72584",
+  "source_dirty": true,
+  "workflow_run_id": "41884937011",
+  "platform": "Windows-2025Server-10.0.26100-SP0",
+  "machine": "AMD64",
+  "python": "3.12.10",
+  "sqlite_version": "3.49.1",
+  "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+  "telemetry": "enabled",
+  "runtimes": {
+    "baseline": {
+      "version": "0.5.0",
+      "sha256": "87ae41df90b35770841ae6ca7e3d88c25ab99f0e0f83c3e3c85a235a63f30ebc"
+    },
+    "candidate": {
+      "version": "0.5.0",
+      "sha256": "54a2bd2a38ac4f321f1c374438708881875188fece9db2041b6818c01f530c5c"
+    }
+  },
+  "candidate_archive": {
+    "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+    "sha256": "7461316e632718231b641ac9a6f28e5f5d4b0b7f0ba1def4228482502568e5d0"
+  },
+  "baseline_archive": {
+    "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+    "sha256": "b2fddfa71f7ad73a816fbeb3111101c1a20b25f2286bd418fdbda73448f127c4"
+  },
+  "summary": {
+    "initial": {
+      "baseline": {
+        "median_seconds": 9.316402799999992,
+        "maximum_sampled_rss_bytes": 166080512,
+        "median_source_bytes_per_second": 81789.07850570831
+      },
+      "candidate": {
+        "median_seconds": 6.7931581999999935,
+        "maximum_sampled_rss_bytes": 174141440,
+        "median_source_bytes_per_second": 112154.60873559528
+      }
+    },
+    "full": {
+      "baseline": {
+        "median_seconds": 12.928443600000037,
+        "maximum_sampled_rss_bytes": 168562688,
+        "median_source_bytes_per_second": 58933.31197267998
+      },
+      "candidate": {
+        "median_seconds": 8.201694599999996,
+        "maximum_sampled_rss_bytes": 174948352,
+        "median_source_bytes_per_second": 92897.38732773595
+      }
+    },
+    "rebuild": {
+      "baseline": {
+        "median_seconds": 12.429753000000005,
+        "maximum_sampled_rss_bytes": 166744064,
+        "median_source_bytes_per_second": 61295.18422449744
+      },
+      "candidate": {
+        "median_seconds": 7.877173599999992,
+        "maximum_sampled_rss_bytes": 172720128,
+        "median_source_bytes_per_second": 96724.5408937034
+      }
+    },
+    "cold_noop": {
+      "baseline": {
+        "median_seconds": 0.12334250000003522,
+        "maximum_sampled_rss_bytes": 11657216,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.1268943999999692,
+        "maximum_sampled_rss_bytes": 12197888,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "sparse": {
+      "baseline": {
+        "median_seconds": 12.692557299999976,
+        "maximum_sampled_rss_bytes": 164040704,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.3362352000000328,
+        "maximum_sampled_rss_bytes": 18477056,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "summary": {
+      "baseline": {
+        "median_seconds": 0.13465469999994184,
+        "maximum_sampled_rss_bytes": 12603392,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.14127149999990252,
+        "maximum_sampled_rss_bytes": 13869056,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "detailed": {
+      "baseline": {
+        "median_seconds": 0.12604899999996633,
+        "maximum_sampled_rss_bytes": 12705792,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.12361870000006547,
+        "maximum_sampled_rss_bytes": 13307904,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "compatible_open": {
+      "baseline": {
+        "median_seconds": 0.1257252000000335,
+        "maximum_sampled_rss_bytes": 11923456,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.12622380000004796,
+        "maximum_sampled_rss_bytes": 11915264,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "large_sparse": {
+      "baseline": {
+        "median_seconds": 36.23561790000008,
+        "maximum_sampled_rss_bytes": 339214336,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.4496727999999166,
+        "maximum_sampled_rss_bytes": 19009536,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "dense_sparse": {
+      "baseline": {
+        "median_seconds": 17.583143300000074,
+        "maximum_sampled_rss_bytes": 237576192,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 10.48289469999986,
+        "maximum_sampled_rss_bytes": 250343424,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "semantic_upgrade": {
+      "baseline": {
+        "median_seconds": 13.200599300000022,
+        "maximum_sampled_rss_bytes": 166100992,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 8.334295300000122,
+        "maximum_sampled_rss_bytes": 175484928,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "warm_mcp": {
+      "median_seconds": {
+        "baseline": 0.05317249999984597,
+        "candidate": 0.06788140000003295
+      },
+      "rss": "not measured by public MCP route"
+    }
+  },
+  "failure": "AssertionError: summary sampled RSS target; warm MCP exact reconciliation latency target",
+  "scope": "Historical installed Windows development candidate measurement; complete campaign acceptance failed and this is not a published RC1 result.",
+  "raw_sha256": "807cab4ebf57085daaf1ef851541b181bbce7cfaf46d10977f9180868ac5750e",
+  "source_artifact": {
+    "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/41884937011",
+    "artifact_id": 13356405539,
+    "name": "indexing-performance-windows-x64",
+    "zip_sha256": "797e7b4525bf9d64244540d9b2d4868ca1fcf29a7824452c219778f82e15f580"
+  },
+  "reference_edit": {
+    "rust_files": 1024,
+    "changed_rust_files": 1,
+    "edit": "Append one exported function to src/group_0/module_0.rs",
+    "cli": [
+      "atlas",
+      "watch",
+      "--once"
+    ],
+    "parsed_files_each_runtime": 1,
+    "samples_each_runtime": 3,
+    "speed_ratio": 37.74904382408129,
+    "speed_increase_percent": 3674.904382408129,
+    "elapsed_time_reduction_percent": 97.35092627866227,
+    "markdown_files": 1
+  },
+  "failed_checks": [
+    {
+      "name": "summary sampled RSS target",
+      "passed": false
+    },
+    {
+      "name": "warm MCP exact reconciliation latency target",
+      "passed": false
+    }
+  ]
+}
