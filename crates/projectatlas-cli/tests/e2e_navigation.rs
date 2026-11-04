@@ -13933,25 +13933,46 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         let syscall = process.join("syscall");
         let status = process.join("status");
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if child.try_wait()?.is_some() || Instant::now() >= deadline {
-                return Err(io::Error::other("watch did not reach its required idle phase").into());
-            }
-            let is_wait = |channel: &str| {
-                if polling {
-                    channel.trim() == "hrtimer_nanosleep"
-                } else {
-                    channel.trim().starts_with("futex")
-                }
+        let mut observed_wait = None;
+        // Kernel wait-channel symbols can be unavailable or change spelling.
+        // Match the actual target ABI call; keep wchan only as diagnostics.
+        let is_wait = |snapshot: &str| {
+            let Some(number) = snapshot
+                .split_whitespace()
+                .next()
+                .and_then(|number| number.parse::<nix::libc::c_long>().ok())
+            else {
+                return false;
             };
-            if has_inotify(&descriptors)? == polling
-                || !is_wait(&fs::read_to_string(&wait_channel)?)
-            {
+            if polling {
+                let sleeping = number == nix::libc::SYS_clock_nanosleep;
+                // The x86 ABIs also expose nanosleep directly;
+                // aarch64 instead provides clock_nanosleep as its sleep ABI.
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                let sleeping = sleeping || number == nix::libc::SYS_nanosleep;
+                sleeping
+            } else {
+                number == nix::libc::SYS_futex
+            }
+        };
+        loop {
+            let exit = child.try_wait()?;
+            if exit.is_some() || Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "watch did not reach its required idle phase: polling={polling}, exit={exit:?}, last_wait={observed_wait:?}"
+                )).into());
+            }
+            let inotify = has_inotify(&descriptors)?;
+            let channel = fs::read_to_string(&wait_channel)
+                .unwrap_or_else(|error| format!("unavailable: {error}"));
+            let sampled_syscall = fs::read_to_string(&syscall)?;
+            let waiting = is_wait(&sampled_syscall);
+            observed_wait = Some((inotify, channel, sampled_syscall.clone()));
+            if inotify == polling || !waiting {
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            let sampled_syscall = fs::read_to_string(&syscall)?;
-            if !is_wait(&fs::read_to_string(&wait_channel)?) {
+            if fs::read_to_string(&syscall)? != sampled_syscall {
                 continue;
             }
             signal(child, "-STOP", signal_program)?;
@@ -14167,9 +14188,25 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             }
             None => None,
         };
-        operation?;
+        if let Err(source) = operation {
+            return Err(WatchFixtureCommandError {
+                operation: if later_handoff {
+                    "continuous watch later policy-flood handoff"
+                } else {
+                    "continuous watch initial policy-flood handoff"
+                },
+                source,
+                stdout: output.as_ref().map_or_else(String::new, |output| {
+                    String::from_utf8_lossy(&output.stdout).into_owned()
+                }),
+                stderr: output.as_ref().map_or_else(String::new, |output| {
+                    String::from_utf8_lossy(&output.stderr).into_owned()
+                }),
+            }
+            .into());
+        }
         let output = output.ok_or_else(|| io::Error::other("watch output missing"))?;
-        rust_binding_require(writes? > 0, "native policy flood produced no callbacks")?;
+        rust_binding_require(writes? > 0, "policy flood actor produced no sibling writes")?;
         rust_binding_require(
             output.status.success(),
             &format!("watch failed: {}", String::from_utf8_lossy(&output.stderr)),

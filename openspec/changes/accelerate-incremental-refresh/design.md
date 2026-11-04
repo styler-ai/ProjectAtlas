@@ -190,6 +190,24 @@ and committed WAL backup. This repairs a confirmed lifecycle defect; it does not
 establish the cause of the observed Apple Silicon baseline query failure, which
 requires replay through the corrected native campaign.
 
+The Linux continuous-watch flood fixture identifies native receive and polling
+sleep through `/proc/<pid>/syscall` and the target ABI's `futex` and sleep syscall
+constants. Kernel `wchan` symbols are diagnostic hints, not the phase contract.
+Retain the native inotify-presence check, repeated syscall snapshot, exact
+post-stop equality, owned-child signal guard and cleanup. Both initial and later
+handoffs still require four polling cycles, the bounded-native-refresh fallback
+reason, actual later edits and preserved authored state. Sibling writes alone
+do not prove callback delivery. Preserve phase, exit status, observed wait state
+and child stdout/stderr on failure without replacing the original error chain.
+An actual healthy four-cycle watch was rejected by the previous observer when
+its wait symbol was unavailable (`0`); the corrected observer accepts that same
+workflow. The original hosted failure omitted phase/output evidence, so its
+specific cause remains unproven until a diagnostic replay. No production
+watcher behavior, retry count, deadline or acceptance threshold changes.
+The Linux [syscall](https://man7.org/linux/man-pages/man5/proc_pid_syscall.5.html)
+and [wchan](https://man7.org/linux/man-pages/man5/proc_pid_wchan.5.html) interfaces
+define the distinction between the actual call and its symbolic kernel location.
+
 Choose the smallest causal checks for each implementation slice and a focused before/after comparison for its performance claim. Reuse existing fixtures and counters. Run the complete installed/platform matrix at release acceptance; repeat a passing check only for changed inputs, failures, an uncovered behavior or a mandatory gate. Measurement confirms the architecture; it does not replace the architectural work.
 
 The RC1 work-count target for unchanged current-contract source is one exact detection discovery/comparison with no full-node decode, parse work or new publication. Zero-source-work admission is deferred to #725. Delta processing must avoid unrelated parsing/publication. Cold discovery, initial indexing, full reindexing, symbol rebuilding and recovery each have separate targets. Report each result independently so a warm-path gain cannot conceal another slow path. Normal cases must finish within their selected budgets; injected deadlines still prove safe refusal. A larger budget alone is never a performance result. Unaffected navigation and supported upgrades must not regress beyond preregistered noise/resource limits.

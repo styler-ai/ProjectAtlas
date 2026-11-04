@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "8c4bbdc2acdc5611cc80e7451bd0166984000ab671182ce213a81b8d7cae3ddf",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "6c0c1dc753d92d90c1ed48e5c851a0163d8962ccc09e4b25f6c307d6cb477a4d",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "c95e655208c97b7d3e504b4abaaba958f732bc3be54b113690f0a2d50df85c21",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "b30efeb42fb39ea9ff6cc06d47a1673d6c25bccd78282472bc0dfde17bfbd4c0",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "083abd5025c4a11a0f66336a8278319b786efb774a880110dd4e92e7fa178eb4",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "ebb8c769da7d018645761bfcc4de3cda47fda0721de7c16ef1c46df413201c9a"
     }
   },
