@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ TARGET_TRIPLE_RE = re.compile(
 RELEASE_RE = re.compile(r"(?:^|\n)release:\s*(\d+\.\d+\.\d+)")
 COMMIT_RE = re.compile(r"\(([0-9a-f]{10,40})\s")
 PROXY_DIGEST_CHUNK_SIZE = 1024 * 1024
+COMMAND_FAILURE_STREAM_MAX_CHARS = 4096
 
 
 class PreflightError(RuntimeError):
@@ -222,6 +224,21 @@ def evaluate(
     return errors
 
 
+def command_failure_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    """Retain bounded tails from both failed command streams, including timeout bytes."""
+
+    parts = []
+    for name, output in (("stdout", stdout), ("stderr", stderr)):
+        if not output:
+            continue
+        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
+        text = text.strip()
+        if len(text) > COMMAND_FAILURE_STREAM_MAX_CHARS:
+            text = "[truncated to final characters]\n" + text[-COMMAND_FAILURE_STREAM_MAX_CHARS:]
+        parts.append(f"{name}: {text}")
+    return "\n".join(parts)
+
+
 def run(
     command: list[str], root: Path, *, timeout: int = 20
 ) -> subprocess.CompletedProcess[str] | None:
@@ -236,7 +253,12 @@ def run(
             text=True,
             timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Rust toolchain command {command!r} failed: {error}", file=sys.stderr)
+        if isinstance(error, subprocess.TimeoutExpired):
+            detail = command_failure_output(error.stdout, error.stderr)
+            if detail:
+                print(detail, file=sys.stderr)
         return None
 
 
@@ -390,6 +412,11 @@ def preflight(root: Path, *, install: bool) -> int:
             )
             if result is None or result.returncode != 0:
                 install_error = "rustup toolchain install failed"
+                if result is not None:
+                    install_error += f" (exit {result.returncode})"
+                    detail = command_failure_output(result.stdout, result.stderr)
+                    if detail:
+                        install_error += ":\n" + detail
             else:
                 inventory_result = run([rustup_path, "toolchain", "list"], root)
                 inventory_output = output_of(inventory_result)
@@ -578,7 +605,7 @@ def package_native_self_test() -> None:
         manager = native / "rustup"
         manager.write_text("native rustup executable\n")
         for name in names[1:]:
-            (native / name).hardlink_to(manager)
+            os.link(manager, native / name)
         command_paths = root / "outer-paths"
         command_env = root / "outer-env"
         command_paths.write_text("existing-path\n")
@@ -607,7 +634,10 @@ def package_native_self_test() -> None:
             name = Path(command[0]).name
             if name == "rustup":
                 if command[1:3] == ["toolchain", "install"]:
-                    return subprocess.CompletedProcess(command, state["install_code"], "", "")
+                    return subprocess.CompletedProcess(
+                        command, state["install_code"],
+                        "rustup install stdout marker\n", "rustup install stderr marker\n",
+                    )
                 text = expected + "-aarch64-apple-darwin (default)\n"
             elif name == "rustc":
                 text = f"rustc {expected}\nrelease: {expected}\ncommit-hash: abcdef123456\n"
@@ -647,7 +677,12 @@ def package_native_self_test() -> None:
             for invalid_kind in ("bad_prefix", "install_code"):
                 state[invalid_kind] = True if invalid_kind == "bad_prefix" else 1
                 calls.clear()
-                assert verify_toolchain(root, install=True, persist_ci=True) == 1
+                with patch(f"{__name__}.sys.stderr", new_callable=io.StringIO) as diagnostic:
+                    assert verify_toolchain(root, install=True, persist_ci=True) == 1
+                if invalid_kind == "install_code":
+                    assert "exit 1" in diagnostic.getvalue()
+                    assert "rustup install stdout marker" in diagnostic.getvalue()
+                    assert "rustup install stderr marker" in diagnostic.getvalue()
                 assert (command_paths.read_bytes(), command_env.read_bytes()) == original
                 state[invalid_kind] = False if invalid_kind == "bad_prefix" else 0
             broken = native / "cargo"
@@ -660,7 +695,7 @@ def package_native_self_test() -> None:
             assert verify_toolchain(root, install=True, persist_ci=True) == 1
             assert all(call[0] == str(root / "brew") for call in calls)
             broken.unlink()
-            broken.hardlink_to(manager)
+            os.link(manager, broken)
             assert (command_paths.read_bytes(), command_env.read_bytes()) == original
             with patch.dict(os.environ, {"RUSTUP_TOOLCHAIN": "1.93.1"}):
                 calls.clear()
@@ -683,6 +718,30 @@ def package_native_self_test() -> None:
             )
             assert not any(call == [str(root / "brew"), "--prefix"] for call in calls)
         print("Package-native Rustup environment self-test passed")
+
+
+def command_failure_self_test() -> None:
+    """Keep bounded failure evidence without executing an external command."""
+
+    command = ["rustup", "toolchain", "install", "1.98.0"]
+    for error in (
+        OSError("native spawn failure marker"),
+        subprocess.TimeoutExpired(
+            command, 120, output=b"partial download marker\n",
+            stderr=b"transport " * 2_000 + b"timeout stderr marker\n",
+        ),
+    ):
+        with patch(f"{__name__}.subprocess.run", side_effect=error), patch(
+            f"{__name__}.sys.stderr", new_callable=io.StringIO
+        ) as diagnostic:
+            assert run(command, Path.cwd(), timeout=120) is None
+        detail = diagnostic.getvalue()
+        if isinstance(error, OSError):
+            assert "native spawn failure marker" in detail
+        else:
+            assert "120" in detail and "timeout stderr marker" in detail
+            assert "partial download marker" in detail
+            assert len(detail) < 9_000, "timeout diagnostics retained unbounded output"
 
 
 def self_test() -> None:
@@ -881,7 +940,7 @@ def self_test() -> None:
             except (OSError, NotImplementedError):
                 if path.exists() or path.is_symlink():
                     path.unlink()
-                path.hardlink_to(rustup_target)
+                os.link(rustup_target, path)
                 return False
 
         proxy_links = [
@@ -1366,6 +1425,7 @@ def self_test() -> None:
         assert set(requested) == set(executable_names)
         assert not calls, "missing rustup was probed"
     package_native_self_test()
+    command_failure_self_test()
     print("Rust toolchain preflight self-test passed")
 
 

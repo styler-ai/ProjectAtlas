@@ -210,6 +210,30 @@ repair. The separate live case must retain and read committed WAL frames while
 its writer remains open. See SQLite's [WAL lifecycle](https://sqlite.org/wal.html#the_wal_file)
 and [checkpoint contract](https://sqlite.org/pragma.html#pragma_wal_checkpoint).
 
+The corrected native fixture isolates a host-library limitation: Apple Python
+3.9.6 / SQLite 3.43.2 cannot read the settled WAL database with absent sidecars,
+despite a writable parent; its live-WAL case passes, as do all five cases under
+the runner's Homebrew Python. ARM release isolation changes PATH before later
+measurement setup, so rediscovering `python3` there selects a different interpreter
+from the validated bootstrap. Capture its resolved executable before isolation
+and use that absolute path to create the existing hash-locked measurement venv
+afterward. Keep the complete HOME/PATH isolation and packaged-runtime proof.
+Both performance lanes must run all five observer tests through their exact venv
+under the final environment before timing either runtime, and log its Python and
+SQLite versions. No interpreter-version pin, read-write/immutable observer or
+performance exception is introduced. Python 3.9 syntax compatibility remains
+distinct from this vendor SQLite behavior. The corrected native campaign still
+must prove that the original benchmark failure is resolved.
+
+Native toolchain admission retains the declared version, executable provenance,
+failure status and existing install timeout. Failed Rustup installation must
+report its exit status and bounded tails from both output streams; spawn and
+timeout failures retain the original diagnostic and any partial output. Offline
+controls cover those failure paths without executing a toolchain install. Their
+hardlink fixtures use `os.link`, preserving the same inode evidence on Python 3.9.
+This improves failure evidence; it does not identify the cause of an earlier
+installation failure whose command output was discarded.
+
 Cold external-policy coverage uses the existing `notify::Watcher::paths_mut`
 batch API. Remove and re-add every selected parent, and retire removed parents,
 before explicitly committing once. This preserves same-path replacement handling
@@ -477,6 +501,13 @@ admission and fresh ancestor identity validation are unchanged. This uses no
 ambient path, raw descriptor ownership or application unsafe code. Causal tests
 retain ordinary saves, native names and hardlinks, reject same-object aliases,
 FIFOs and directories, and check descriptor flags and the single-child boundary.
+
+Fresh ancestor identity validation remains required before each cached source
+open. A same-directory-object alias control isolates no-follow enforcement from
+identity comparison: the alias resolves to the exact retained directory and file
+objects. A different-directory/same-leaf control separately isolates identity
+comparison. Both inside/outside targets and ancestor levels, ordinary recovery,
+root swaps, native names, FIFO and handle pressure remain covered.
 
 For a held Windows ancestor, query fresh attributes with the already locked
 canonical `winx` backend. An ordinary non-reparse directory needs no full

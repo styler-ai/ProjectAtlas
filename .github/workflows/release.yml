@@ -641,6 +641,22 @@ jobs:
             echo "PROJECTATLAS_CODEX_VERSION=0.162.1"
           } >> "$GITHUB_ENV"
 
+      - name: Capture indexing measurement interpreter
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json, os, sqlite3, sys
+          from pathlib import Path
+          command = Path(sys.executable).resolve(strict=True)
+          if not command.is_file() or not os.access(command, os.X_OK) or any(c in str(command) for c in "\r\n"):
+              raise SystemExit("measurement interpreter must be an executable absolute path")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              output.write(f"PROJECTATLAS_INDEX_BASE_PYTHON={command}\n")
+          print(json.dumps({"executable": str(command), "python": sys.version, "sqlite": sqlite3.sqlite_version}))
+          PYTHON
+
       - name: Prepare isolated macOS arm64 host state
         if: matrix.label == 'macos-arm64-posix'
         run: |
@@ -964,7 +980,7 @@ jobs:
           BASELINE_SUFFIX: ${{ matrix.suffix }}
         run: |
           set -euo pipefail
-          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          python_command="${PROJECTATLAS_INDEX_BASE_PYTHON:?measurement interpreter was not captured before isolation}"
           "$python_command" .github/scripts/prepare-indexing-baseline.py \
             --suffix "$BASELINE_SUFFIX" --destination "$RUNNER_TEMP/projectatlas-indexing-baseline"
           "$python_command" -m venv "$RUNNER_TEMP/projectatlas-indexing-python"
@@ -985,6 +1001,8 @@ jobs:
           CANDIDATE_SUFFIX: ${{ matrix.suffix }}
         run: |
           set -euo pipefail
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
+          PYTHONPATH=docs/benchmarks/harness "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -m unittest test_indexing_acceptance.DatabaseInspection
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
             archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"
@@ -1347,6 +1365,8 @@ jobs:
           CANDIDATE_SUFFIX: x86_64-pc-windows-msvc
         run: |
           set -euo pipefail
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
+          PYTHONPATH=docs/benchmarks/harness "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -m unittest test_indexing_acceptance.DatabaseInspection
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
             archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"

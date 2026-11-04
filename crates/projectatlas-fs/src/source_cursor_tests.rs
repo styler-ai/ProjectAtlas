@@ -506,6 +506,76 @@ fn cached_source_refuses_leaf_and_each_ancestor_alias_even_for_the_same_inode()
 
 #[cfg(unix)]
 #[test]
+fn cached_source_refuses_an_alias_to_its_retained_ancestor() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::MetadataExt;
+
+    static OCCUPIED: AtomicUsize = AtomicUsize::new(0);
+    for replace_outer in [false, true] {
+        for target_in_root in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            let directory = root.join("src/group");
+            fs::create_dir_all(&directory)?;
+            let path = directory.join("source.rs");
+            fs::write(&path, b"retained source")?;
+            let admitted = fs::symlink_metadata(&path)?;
+            let source_root = SourceRootReader::open(&root)?;
+            let mut reader = reader_with_budget(&source_root, &OCCUPIED, 4);
+            read(&mut reader, &path)?;
+            read(&mut reader, &path)?;
+            require(
+                reader.hits == 1,
+                "alias control did not establish cursor reuse",
+            )?;
+            let replaced = if replace_outer {
+                root.join("src")
+            } else {
+                directory
+            };
+            let retained = if target_in_root {
+                replaced
+                    .parent()
+                    .ok_or("ancestor has no parent")?
+                    .join("retained")
+            } else {
+                temp.path().join("retained")
+            };
+            fs::rename(&replaced, &retained)?;
+            // The relative sibling stays beneath the held parent capability,
+            // so general sandbox confinement cannot hide a no-follow failure.
+            let link_target = if target_in_root {
+                Path::new("retained")
+            } else {
+                &retained
+            };
+            std::os::unix::fs::symlink(link_target, &replaced)?;
+            let direct = fs::metadata(&retained)?;
+            let followed = fs::metadata(&replaced)?;
+            require(
+                (direct.dev(), direct.ino()) == (followed.dev(), followed.ino())
+                    && fs::read(&path)? == b"retained source",
+                "alias control did not retain the original directory and source objects",
+            )?;
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            require(
+                reader.open_file(&path, &admitted, &control).is_err()
+                    && reader.cursor.is_none()
+                    && OCCUPIED.load(Ordering::Relaxed) == 0,
+                "matching directory identity hid a cached ancestor alias",
+            )?;
+            fs::remove_file(&replaced)?;
+            fs::rename(&retained, &replaced)?;
+            require(
+                read(&mut reader, &path)? == b"retained source",
+                "restored ancestor did not recover",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn cached_source_refuses_a_different_direct_parent_with_the_same_leaf_inode()
 -> Result<(), Box<dyn Error>> {
     static OCCUPIED: AtomicUsize = AtomicUsize::new(0);
