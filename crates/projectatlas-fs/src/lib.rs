@@ -872,12 +872,18 @@ mod walk_entry_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         for temporary_file in [false, true] {
             let temp = tempfile::tempdir()?;
-            let root = temp.path().join("selected");
+            let physical = temp.path().join("physical");
+            let selected = temp.path().join("alias");
+            fs::create_dir(&physical)?;
+            std::os::unix::fs::symlink(&physical, &selected)?;
+            let root = selected.join("selected");
             let retired = temp.path().join("retired");
             fs::create_dir(&root)?;
             fs::write(root.join("source.rs"), "pub fn retained() {}")?;
             let control = IndexWorkControl::new(IndexCancellation::new(), None);
             let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+            // Match the scan owner's canonical root, including aliased temporary parents.
+            let root = policy.root.clone();
             let source_root = SourceRootReader::open(&root)?;
             fs::rename(&root, &retired)?;
             if temporary_file {
