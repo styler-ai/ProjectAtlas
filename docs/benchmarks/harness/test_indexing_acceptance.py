@@ -4,13 +4,19 @@ from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
+import sqlite3
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
-from indexing_acceptance import Campaign, DENSE_MODULES, archive_runtime_digest, digest, _stream_digest
+from indexing_acceptance import (
+    Campaign, DENSE_MODULES, SOURCE_FILE, archive_runtime_digest, copy_database,
+    database, database_reader, digest, state, _stream_digest,
+)
 
 
 @contextmanager
@@ -85,6 +91,128 @@ class ArchiveIdentity(unittest.TestCase):
         payload = bytes(range(256)) * 9000
         with ShortReads(payload) as source, legacy_hashlib():
             self.assertEqual(_stream_digest(source), hashlib.sha256(payload).hexdigest())
+
+
+class DatabaseInspection(unittest.TestCase):
+    def project(self, root):
+        database(root).parent.mkdir()
+        connection = sqlite3.connect(database(root))
+        try:
+            connection.executescript("""
+                CREATE TABLE project_identity(project_instance_id BLOB, active_generation INTEGER);
+                INSERT INTO project_identity VALUES(zeroblob(16),1);
+                CREATE TABLE metadata(key TEXT,value TEXT);
+                INSERT INTO metadata VALUES('index_publication_state','complete');
+                INSERT INTO metadata VALUES('index_publication_generation','1');
+                CREATE TABLE nodes(id INTEGER,path TEXT);
+                CREATE TABLE purposes(node_id INTEGER,purpose TEXT,status TEXT);
+                CREATE TABLE symbols(id INTEGER);
+                CREATE TABLE symbol_relations(id INTEGER);
+                CREATE TABLE graph_entities(id INTEGER);
+                CREATE TABLE graph_relations(id INTEGER);
+            """)
+            connection.execute("INSERT INTO nodes VALUES(1,?)", (SOURCE_FILE,))
+            connection.execute("INSERT INTO purposes VALUES(1,'Keep source authority','approved')")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_state_reader_closes_on_success_and_query_failure(self):
+        original_connect = sqlite3.connect
+        for fail_query in (False, True):
+            with self.subTest(fail_query=fail_query), tempfile.TemporaryDirectory() as task:
+                root = Path(task)
+                self.project(root)
+                if fail_query:
+                    connection = original_connect(database(root))
+                    try:
+                        connection.execute("DROP TABLE graph_relations")
+                        connection.commit()
+                    finally:
+                        connection.close()
+                opened = []
+
+                def observe_connection(*args, **kwargs):
+                    connection = original_connect(*args, **kwargs)
+                    opened.append(connection)
+                    with self.assertRaises(sqlite3.OperationalError):
+                        connection.execute("DELETE FROM metadata")
+                    return connection
+
+                try:
+                    with patch("indexing_acceptance.sqlite3.connect", side_effect=observe_connection), \
+                            patch("sys.stderr", new_callable=io.StringIO) as diagnostics:
+                        if fail_query:
+                            with self.assertRaises(sqlite3.OperationalError):
+                                state(root)
+                            details = json.loads(diagnostics.getvalue())["sqlite_inspection"]
+                            self.assertEqual(details["stage"], "query")
+                            self.assertTrue(details["files"]["database"]["exists"])
+                        else:
+                            result = state(root)
+                            self.assertEqual(result["generation"], 1)
+                            self.assertEqual(result["approved_purposes"], [(SOURCE_FILE, "Keep source authority", "approved")])
+                    self.assertEqual(len(opened), 1)
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        opened[0].execute("SELECT 1")
+                finally:
+                    for connection in opened:
+                        connection.close()
+
+    def test_missing_database_is_not_created_and_reports_connect_stage(self):
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            with patch("sys.stderr", new_callable=io.StringIO) as diagnostics:
+                with self.assertRaises(sqlite3.OperationalError):
+                    with database_reader(root):
+                        self.fail("missing database was opened")
+            self.assertFalse(database(root).exists())
+            details = json.loads(diagnostics.getvalue())["sqlite_inspection"]
+            self.assertEqual(details["stage"], "connect")
+            self.assertEqual(details["sqlite_version"], sqlite3.sqlite_version)
+            self.assertFalse(details["files"]["database"]["exists"])
+            self.assertFalse(details["files"]["parent"]["exists"])
+
+    def test_backup_closes_handles_and_preserves_committed_wal_content(self):
+        original_connect = sqlite3.connect
+        for fail_target in (False, True):
+            with self.subTest(fail_target=fail_target), tempfile.TemporaryDirectory() as task:
+                root = Path(task)
+                self.project(root)
+                source = original_connect(database(root))
+                opened = []
+                try:
+                    source.execute("PRAGMA journal_mode=WAL")
+                    source.execute("UPDATE purposes SET purpose='Committed WAL authority'")
+                    source.commit()
+                    target = root / ("missing/backup.db" if fail_target else "backup.db")
+
+                    def observe_connection(*args, **kwargs):
+                        connection = original_connect(*args, **kwargs)
+                        opened.append(connection)
+                        return connection
+
+                    with patch("indexing_acceptance.sqlite3.connect", side_effect=observe_connection):
+                        if fail_target:
+                            with self.assertRaises(sqlite3.OperationalError):
+                                copy_database(database(root), target)
+                        else:
+                            copy_database(database(root), target)
+                    self.assertEqual(len(opened), 1 if fail_target else 2)
+                    for connection in opened:
+                        with self.assertRaises(sqlite3.ProgrammingError):
+                            connection.execute("SELECT 1")
+                    if not fail_target:
+                        check = original_connect(target)
+                        try:
+                            self.assertEqual(check.execute("SELECT purpose FROM purposes").fetchone(),
+                                             ("Committed WAL authority",))
+                        finally:
+                            check.close()
+                finally:
+                    for connection in opened:
+                        connection.close()
+                    source.close()
 
 
 class AcceptanceTargets(unittest.TestCase):

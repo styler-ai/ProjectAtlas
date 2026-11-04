@@ -8,6 +8,7 @@ retain failures and sampled RSS; they do not claim allocation or physical I/O.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import platform
 import sqlite3
 import statistics
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -76,8 +78,47 @@ def database(root: Path) -> Path:
     return root / ".projectatlas/projectatlas.db"
 
 
+def database_file_state(path: Path) -> dict:
+    """Describe only fixture database/sidecar state when SQLite inspection fails."""
+    try:
+        metadata = path.stat()
+        return {"path": str(path), "exists": True, "mode": oct(metadata.st_mode),
+                "size_bytes": metadata.st_size}
+    except FileNotFoundError:
+        return {"path": str(path), "exists": False}
+    except OSError as error:
+        return {"path": str(path), "error": str(error)}
+
+
+@contextmanager
+def database_reader(root: Path):
+    """Close every read-only observer deterministically, including failed queries."""
+    path = database(root).resolve()
+    stage = "connect"
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+            stage = "query"
+            yield connection
+    except sqlite3.Error as error:
+        print(json.dumps({"sqlite_inspection": {
+            "stage": stage, "sqlite_version": sqlite3.sqlite_version,
+            "error_code": getattr(error, "sqlite_errorcode", None),
+            "files": {name: database_file_state(candidate) for name, candidate in (
+                ("database", path), ("parent", path.parent),
+                ("wal", Path(str(path) + "-wal")), ("shm", Path(str(path) + "-shm")))},
+        }}), file=sys.stderr, flush=True)
+        raise
+
+
+def copy_database(source: Path, target: Path) -> None:
+    """Finish backup transactions and close both handles before the next runtime."""
+    with closing(sqlite3.connect(source)) as reader, closing(sqlite3.connect(target)) as writer:
+        with reader, writer:
+            reader.backup(writer)
+
+
 def state(root: Path) -> dict:
-    with sqlite3.connect(database(root).resolve().as_uri() + "?mode=ro", uri=True) as connection:
+    with database_reader(root) as connection:
         identity = connection.execute(
             "SELECT hex(project_instance_id), active_generation FROM project_identity"
         ).fetchone()
@@ -125,6 +166,7 @@ class Campaign:
             "candidate_origin": "installed release workflow" if os.environ.get("GITHUB_ACTIONS") == "true" else "local draft; not installed release acceptance",
             "platform": platform.platform(), "machine": platform.machine(),
             "python": platform.python_version(),
+            "sqlite_version": sqlite3.sqlite_version,
             "automatic_budget_observation": "omitted timeout uses native selected deadline; exact selection is covered by owning causal Rust tests",
             "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
             "runtimes": {name: {"version": self.versions[name], "sha256": digest(path)}
@@ -204,7 +246,7 @@ class Campaign:
         report = payload.get("scan", {}).get("report", payload)
         symbols = symbol_report(payload)
         if case:
-            with sqlite3.connect(database(root).resolve().as_uri() + "?mode=ro", uri=True) as connection:
+            with database_reader(root) as connection:
                 source_bytes = connection.execute(
                     "SELECT SUM(size_bytes) FROM nodes WHERE exists_now=1 AND kind='file'"
                 ).fetchone()[0]
@@ -361,12 +403,10 @@ class Campaign:
         verify_python("baseline")
         before = state(upgrade)
         backup = root / "prior-contract.db"
-        with sqlite3.connect(database(upgrade)) as source, sqlite3.connect(backup) as target:
-            source.backup(target)
+        copy_database(database(upgrade), backup)
         for iteration in range(3):
             for runtime in (("baseline", "candidate") if iteration % 2 == 0 else ("candidate", "baseline")):
-                with sqlite3.connect(backup) as source, sqlite3.connect(database(upgrade)) as target:
-                    source.backup(target)
+                copy_database(backup, database(upgrade))
                 arguments = ["scan"] if runtime == "baseline" else ["watch", "--once"]
                 payload = self.run(runtime, upgrade, arguments, "semantic_upgrade")
                 after = state(upgrade)
@@ -486,7 +526,7 @@ class Campaign:
             path.write_bytes(changed)
             os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
             self.run(runtime, current, ["watch", "--once"], "offline_same_metadata")
-            with sqlite3.connect(database(current)) as connection:
+            with database_reader(current) as connection:
                 content = connection.execute("SELECT content FROM file_texts WHERE path=?", (SOURCE_FILE,)).fetchone()
             self.check(content is not None and "saturating_sub" in content[0],
                        runtime + " offline same-metadata edit is published completely")

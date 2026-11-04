@@ -1,8 +1,12 @@
 //! Direct source reads anchored to one discovery-owned directory capability.
 
 use crate::{FsError, FsResult};
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
+use cap_fs_ext::DirExt;
+#[cfg(not(unix))]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::Dir;
+#[cfg(not(unix))]
+use cap_std::fs::OpenOptions;
 use projectatlas_core::{IndexWorkControl, IndexWorkStage};
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -303,11 +307,9 @@ impl SourceDirectoryCursor {
                 // still permits setting a junction in place on an empty directory.
                 // Query the held object freshly, without following a new pathname
                 // or treating ordinary Cloud Files tags as source indirection.
-                let metadata = frame
-                    .directory
-                    .dir_metadata()
-                    .map_err(|source| source_error(path, source))?;
-                if !metadata.is_dir() || metadata.is_symlink() {
+                if !direct_directory(&frame.directory)
+                    .map_err(|source| source_error(path, source))?
+                {
                     return Err(source_error(
                         path,
                         io::Error::other("source parent became indirect after directory admission"),
@@ -318,6 +320,22 @@ impl SourceDirectoryCursor {
         }
         Ok(parent)
     }
+}
+
+/// Query only fresh attributes for ordinary held directories; reparse points
+/// retain the canonical backend's full classification, including Cloud Files.
+#[cfg(windows)]
+fn direct_directory(directory: &Dir) -> io::Result<bool> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    let attributes = winx::winapi_util::file::information(directory)?.file_attributes();
+    if attributes & u64::from(FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        let metadata = directory.dir_metadata()?;
+        return Ok(metadata.is_dir() && !metadata.is_symlink());
+    }
+    Ok(attributes & u64::from(FILE_ATTRIBUTE_DIRECTORY) != 0)
 }
 
 /// One directly opened ancestor, plus Unix identity for fresh name revalidation.
@@ -418,17 +436,51 @@ fn open_source_leaf(
     path: &Path,
     admitted_metadata: &std::fs::Metadata,
 ) -> FsResult<(File, std::fs::Metadata)> {
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    {
-        use cap_fs_ext::OpenOptionsExt;
-        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
+    // This boundary accepts exactly one child. Native openat's no-follow flag
+    // protects the leaf, so an intermediate component must never reach it.
+    let mut components = name.components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(component)), None) if name.as_os_str() == component
+    ) {
+        return Err(source_error(
+            path,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source leaf must be one direct child",
+            ),
+        ));
     }
-    let file = parent
-        .open_with(name, &options)
-        .map_err(|source| source_error(path, source))?
-        .into_std();
+    #[cfg(unix)]
+    let file = {
+        use nix::fcntl::{OFlag, openat};
+        use nix::sys::stat::Mode;
+
+        // The parent is already an admitted capability; the basename needs no
+        // general multi-component resolver. Keep no-follow, nonblocking special
+        // file refusal and close-on-exec, with ownership transferred safely.
+        let descriptor = openat(
+            parent,
+            name,
+            OFlag::O_RDONLY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_NONBLOCK
+                | OFlag::O_NOCTTY
+                | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|source| source_error(path, source.into()))?;
+        File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        parent
+            .open_with(name, &options)
+            .map_err(|source| source_error(path, source))?
+            .into_std()
+    };
     let opened_metadata = file
         .metadata()
         .map_err(|source| source_error(path, source))?;
@@ -580,6 +632,69 @@ mod tests {
         }
         if read_source(&reader, &path)? != b"native source bytes" {
             return Err("source reader replaced native path components".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_leaf_preserves_native_open_flags_and_refuses_indirect_or_nonregular_children()
+    -> Result<(), Box<dyn Error>> {
+        use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = root.join("source.rs");
+        fs::write(&path, b"direct source")?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let reader = SourceRootReader::open(root)?;
+        let (mut file, _) =
+            open_source_leaf(&reader.directory, Path::new("source.rs"), &path, &metadata)?;
+        let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
+        let descriptor_flags = FdFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFD)?);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if bytes != b"direct source"
+            || !flags.contains(OFlag::O_NONBLOCK)
+            || !descriptor_flags.contains(FdFlag::FD_CLOEXEC)
+        {
+            return Err("direct source open changed bytes or native descriptor flags".into());
+        }
+        std::os::unix::fs::symlink(&path, root.join("alias.rs"))?;
+        fs::create_dir(root.join("directory"))?;
+        mkfifo(&root.join("pipe.rs"), Mode::S_IRUSR | Mode::S_IWUSR)?;
+        for name in ["alias.rs", "directory", "pipe.rs"] {
+            if open_source_leaf(
+                &reader.directory,
+                Path::new(name),
+                &root.join(name),
+                &metadata,
+            )
+            .is_ok()
+            {
+                return Err(
+                    "source leaf followed indirection or admitted a nonregular file".into(),
+                );
+            }
+        }
+        fs::create_dir(root.join("nested"))?;
+        fs::hard_link(&path, root.join("nested/source.rs"))?;
+        for name in [
+            Path::new("nested/source.rs"),
+            Path::new("../source.rs"),
+            Path::new("source.rs/"),
+            Path::new("."),
+            &path,
+        ] {
+            if !matches!(open_source_leaf(&reader.directory, name, &path, &metadata),
+                Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput)
+            {
+                return Err(
+                    "native leaf boundary accepted a selector beyond one direct child".into(),
+                );
+            }
         }
         Ok(())
     }

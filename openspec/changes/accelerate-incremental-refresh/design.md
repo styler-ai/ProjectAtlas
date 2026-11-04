@@ -177,6 +177,19 @@ Retain the preregistered archive identities, published-checksum checks, regular
 archive-member checks and exact runtime binding. These untimed input checks do not
 change fixtures, measured operations, telemetry, sample counts or performance targets.
 
+The Python observer owns a short-lived, read-only SQLite connection for each
+inspection and closes it on success or failure. A connection transaction context
+alone does not close its handle. Backup/restore retains its transaction contexts
+inside explicit close scopes, releasing both handles before invoking a runtime.
+Preserve the backup API's committed WAL contents and the observer's `mode=ro`;
+do not use immutable or read-write inspection to bypass a failure. Reports record
+the SQLite library version. On inspection failure, retain the original exception
+and report connect-versus-query stage plus database, parent, WAL and SHM file
+state. Causal real-SQLite tests cover closure, read-only refusal, missing paths
+and committed WAL backup. This repairs a confirmed lifecycle defect; it does not
+establish the cause of the observed Apple Silicon baseline query failure, which
+requires replay through the corrected native campaign.
+
 Choose the smallest causal checks for each implementation slice and a focused before/after comparison for its performance claim. Reuse existing fixtures and counters. Run the complete installed/platform matrix at release acceptance; repeat a passing check only for changed inputs, failures, an uncovered behavior or a mandatory gate. Measurement confirms the architecture; it does not replace the architectural work.
 
 The RC1 work-count target for unchanged current-contract source is one exact detection discovery/comparison with no full-node decode, parse work or new publication. Zero-source-work admission is deferred to #725. Delta processing must avoid unrelated parsing/publication. Cold discovery, initial indexing, full reindexing, symbol rebuilding and recovery each have separate targets. Report each result independently so a warm-path gain cannot conceal another slow path. Normal cases must finish within their selected budgets; injected deadlines still prove safe refusal. A larger budget alone is never a performance result. Unaffected navigation and supported upgrades must not regress beyond preregistered noise/resource limits.
@@ -382,6 +395,26 @@ must cover in-discovery parent rename exclusion, ordinary file saves and rename
 after cursor release. Actual optimized latency, syscall and resource measurements
 must establish the benefit under real parallel-walker ordering; reuse alone does
 not satisfy the unchanged targets.
+
+Keep the capability chain but avoid a general path resolver at its already
+admitted leaf. On supported Unix hosts, the leaf owner first requires exactly
+one native normal component, then uses the existing locked `nix` crate's safe
+`openat` with no-follow, nonblocking, no-controlling-terminal and close-on-exec
+flags. Its owned descriptor becomes a `File`; the existing opened regular-file,
+device/inode, exact-byte and publication checks remain authoritative. Parent
+admission and fresh ancestor identity validation are unchanged. This uses no
+ambient path, raw descriptor ownership or application unsafe code. Causal tests
+retain ordinary saves, native names and hardlinks, reject same-object aliases,
+FIFOs and directories, and check descriptor flags and the single-child boundary.
+
+For a held Windows ancestor, query fresh attributes with the already locked
+canonical `winx` backend. An ordinary non-reparse directory needs no full
+`cap-std` metadata construction or duplicate identity query. Every reparse point
+still receives the original full `dir_metadata` classification: this preserves
+Cloud Files and rejects in-place junction conversion without interpreting tags
+locally. Errors remain strict; no-delete sharing, leaf admission and all resource
+bounds remain unchanged. Repeat the real native junction and Cloud positive
+controls and the installed latency/RSS measurements before accepting the change.
 
 The upstream `fs-set-times` dependency retains `io-lifetimes` 2 while
 `cap-*` uses 3. On Windows, the canonical `winx` backend retains the 0.52
