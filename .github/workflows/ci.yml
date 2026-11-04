@@ -527,6 +527,16 @@ jobs:
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::polling_handoff_preserves_active_control_and_authored_state -- --exact
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::native_policy_overlap_hands_off_initial_and_later_work_through_real_polling -- --exact
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::graph_projection::tests::document_verification_charges_rows_before_all_shortcuts_across_pages -- --exact
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-current-read-attribution.log"
+
+      - name: Upload native current-read stage attribution
+        if: contains(matrix.contracts, 'compile')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-current-read-attribution-${{ matrix.label }}
+          path: ${{ runner.temp }}/native-current-read-attribution.log
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Managed project-state ownership platform regressions
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')

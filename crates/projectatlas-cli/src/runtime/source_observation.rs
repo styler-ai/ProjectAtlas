@@ -1,5 +1,11 @@
 //! Process-local source observation for long-lived verified index reads.
 
+#[cfg(test)]
+pub(super) mod read_timing;
+
+#[cfg(test)]
+use read_timing::Stage as ReadStage;
+
 use super::{
     ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
@@ -102,8 +108,12 @@ impl SourceRepairPolicy {
             )
             .map(SourceReadAdmission::Current),
             Self::RequireCurrent => {
+                #[cfg(test)]
+                let store_timing = ReadStage::StoreOpen.start();
                 let store =
                     open_atlas_store_read_only_for_project(&binding.database, &binding.root)?;
+                #[cfg(test)]
+                drop(store_timing);
                 let fresh_plan;
                 let plan = if let Some(plan) = before_plan {
                     plan
@@ -1412,8 +1422,17 @@ impl SourceObservationRegistry {
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
+        #[cfg(test)]
+        let binding_timing = ReadStage::Binding.start();
         let binding = SourceBinding::new(database, root, config)?;
-        let Some(entry) = self.entry(binding.clone(), control)? else {
+        #[cfg(test)]
+        drop(binding_timing);
+        #[cfg(test)]
+        let registry_timing = ReadStage::Registry.start();
+        let entry = self.entry(binding.clone(), control)?;
+        #[cfg(test)]
+        drop(registry_timing);
+        let Some(entry) = entry else {
             return self.with_exact_fallback(&binding, control, repair, query);
         };
         match self.with_observed_read(&entry, control, repair, &mut query) {
@@ -1736,7 +1755,13 @@ impl SourceObservationRegistry {
             }
 
             for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+                #[cfg(test)]
+                let clear_timing = ReadStage::Clear.start();
                 entry.clear_before_exact_verification(control)?;
+                #[cfg(test)]
+                drop(clear_timing);
+                #[cfg(test)]
+                let before_timing = ReadStage::BeforePolicy.start();
                 let before_plan = ScanRuntimePlan::for_path_controlled(
                     entry.binding.config.as_deref(),
                     &entry.binding.root,
@@ -1746,17 +1771,27 @@ impl SourceObservationRegistry {
                 .map_err(|source| publication_input_error(&entry.binding.root, source))?;
                 let before_contract = before_plan.publication_contract_fingerprint();
                 let before_policy = source_policy_witness(&before_plan, control)?;
+                #[cfg(test)]
+                drop(before_timing);
+                #[cfg(test)]
+                let exact_timing = ReadStage::ExactRead.start();
                 let admission = repair.open_exact(&entry.binding, Some(&before_plan), control)?;
+                #[cfg(test)]
+                drop(exact_timing);
                 if let SourceReadAdmission::Current(exact) = &admission {
                     work.add_exact(exact.work);
                 }
-                let Some(after_plan) = source_policy_plan_matching(
+                #[cfg(test)]
+                let after_timing = ReadStage::AfterPolicy.start();
+                let after_plan = source_policy_plan_matching(
                     &entry.binding,
                     &before_contract,
                     &before_policy,
                     control,
-                )?
-                else {
+                )?;
+                #[cfg(test)]
+                drop(after_timing);
+                let Some(after_plan) = after_plan else {
                     if let SourceReadAdmission::Current(exact) = admission {
                         drop(exact.store.finish_index_read_snapshot());
                     }
@@ -1829,6 +1864,8 @@ impl SourceObservationRegistry {
         store: &AtlasStore,
         control: &IndexWorkControl,
     ) -> Result<ObservedAcceptance, CliError> {
+        #[cfg(test)]
+        let _timing = ReadStage::Acceptance.start();
         for _attempt in 0..VERIFIED_READ_ATTEMPTS {
             control.check(IndexWorkStage::Publication)?;
             let Some(sampled) = entry.current_epoch()? else {
@@ -3663,6 +3700,87 @@ mod tests {
 
         assert_eq!(sequence.load(Ordering::Acquire), 0);
         assert!(!lost.load(Ordering::Acquire));
+    }
+
+    /// Attribute native warm admission without changing the shipping measurement path.
+    #[test]
+    fn native_current_read_preserves_publication_with_stage_attribution()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        // Match the acceptance fixture's file/directory shape. Parsing is setup,
+        // outside attribution; these timings are diagnostic, never acceptance.
+        for index in 0..1_024 {
+            let directory = root.join(format!("src/group_{}", index / 64));
+            fs::create_dir_all(&directory)?;
+            fs::write(
+                directory.join(format!("module_{index}.rs")),
+                format!("pub fn item_{index}(n: u64) -> u64 {{ n.saturating_add(1) }}\n"),
+            )?;
+        }
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let binding = SourceBinding::new(&database, &root, None)?;
+        let entry = registry
+            .entry(binding, &control)?
+            .ok_or("native observer is required for stage attribution")?;
+        let first = registry
+            .with_verified_current_read(&database, &root, None, &control, |store, _stamp| {
+                Ok(store.index_publication()?)
+            })?
+            .require_current()?;
+        for sample in 0..5 {
+            let capture = read_timing::Capture::start()?;
+            let started = Instant::now();
+            let admitted = registry
+                .with_verified_current_read(&database, &root, None, &test_control(), |store, _| {
+                    Ok(store.index_publication()?)
+                })
+                .and_then(SourceReadAdmission::require_current);
+            let elapsed = started.elapsed();
+            let timings = capture.finish();
+            report_observation_test_diagnostic(format_args!(
+                "native current-read sample={sample} platform={} arch={} total={elapsed:?} admission={:?}; inclusive nested stage times are not additive: {timings:?}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                admitted.as_ref().map(|outcome| outcome.work),
+            ));
+            let admitted = admitted?;
+            require(
+                admitted.value == first.value
+                    && admitted.stamp.generation == first.stamp.generation
+                    && admitted.work.exact_verifications > 0
+                    && admitted.work.filesystem_entries >= 1_024
+                    && admitted.work.filesystem_bytes > 0
+                    && admitted.work.decoded_nodes >= 1_024,
+                "native current-read attribution bypassed exact verification or changed publication",
+            )?;
+            require(
+                entry.current_stamp()?.as_ref() == Some(&admitted.stamp),
+                "attribution used an exact fallback instead of the native observer",
+            )?;
+            for stage in [
+                ReadStage::Binding,
+                ReadStage::Registry,
+                ReadStage::Clear,
+                ReadStage::PolicyDiscovery,
+                ReadStage::PolicyInstall,
+                ReadStage::BeforePolicy,
+                ReadStage::ExactRead,
+                ReadStage::StoreOpen,
+                ReadStage::SourceWalk,
+                ReadStage::SQLiteCompare,
+                ReadStage::AfterPolicy,
+                ReadStage::Acceptance,
+            ] {
+                require(
+                    timings.get(&stage).is_some_and(|(calls, _)| *calls > 0),
+                    "native attribution missed a required owner boundary",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[test]

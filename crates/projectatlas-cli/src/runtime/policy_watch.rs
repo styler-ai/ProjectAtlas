@@ -1,5 +1,7 @@
 //! Selected external policy inputs and their non-recursive native watch coverage.
 
+#[cfg(test)]
+use super::source_observation::read_timing::Stage as ReadStage;
 use super::{CliError, IndexWorkControl, IndexWorkStage};
 #[cfg(any(windows, test))]
 use notify::RecommendedWatcher;
@@ -151,6 +153,8 @@ impl PolicyWatchInputs {
         config: Option<&Path>,
         control: &IndexWorkControl,
     ) -> Result<Self, CliError> {
+        #[cfg(test)]
+        let _timing = ReadStage::PolicyDiscovery.start();
         let mut selected = projectatlas_fs::source_selection_policy_paths_controlled(root, control)
             .map_err(|error| super::source_inspection_error(root, error))?;
         if let Some(config) = config {
@@ -646,6 +650,8 @@ impl PolicyWatchInputs {
         registered: &mut BTreeSet<PathBuf>,
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
+        #[cfg(test)]
+        let _timing = ReadStage::PolicyInstall.start();
         control.check(IndexWorkStage::RepositoryTraversal)?;
         if self
             .directories
@@ -938,6 +944,8 @@ impl PolicyWatchSelection {
         if !self.recursive_rebind_required.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
+        #[cfg(test)]
+        let _timing = ReadStage::RecursiveRebind.start();
         let result = (|| {
             control.check(IndexWorkStage::RepositoryTraversal)?;
             if let Err(error) = watcher.unwatch(&self.root)

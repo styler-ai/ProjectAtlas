@@ -9,6 +9,9 @@ mod optional_parser_runtime;
 mod policy_watch;
 mod source_observation;
 
+#[cfg(test)]
+use source_observation::read_timing::Stage as ReadStage;
+
 pub(crate) use source_observation::{
     SourceObservationRegistry, SourceReadAdmission, VerifiedReadOutcome, VerifiedReadStamp,
 };
@@ -1289,8 +1292,14 @@ fn assess_source_against_publication(
     generation: IndexGeneration,
     mut work: SourceVerificationWork,
 ) -> Result<IndexFreshnessAssessment, CliError> {
+    #[cfg(test)]
+    let walk_timing = ReadStage::SourceWalk.start();
     let scan = scan_repo_controlled_with_work(&plan.root, &plan.scan_options, scan_limits, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
+    #[cfg(test)]
+    drop(walk_timing);
+    #[cfg(test)]
+    let _comparison_timing = ReadStage::SQLiteCompare.start();
     work.filesystem_entries = scan.work.entries;
     work.filesystem_bytes = scan.work.source_bytes;
     let current_nodes = scan.nodes;
