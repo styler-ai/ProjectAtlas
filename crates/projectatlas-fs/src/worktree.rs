@@ -223,9 +223,7 @@ pub fn discover_repository_structure_controlled(
     control: &IndexWorkControl,
 ) -> FsResult<RepositoryStructure> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
-    if !path.is_dir() {
-        return Err(FsError::RootNotDirectory(path.to_path_buf()));
-    }
+    super::validate_source_root_metadata(path, fs::metadata(path))?;
     let selected_root = canonicalize(path, path)?;
 
     for ancestor in selected_root.ancestors() {
@@ -1834,6 +1832,34 @@ mod tests {
     use std::error::Error;
     use std::ffi::OsStr;
     use std::process::Command;
+
+    #[test]
+    fn root_canonicalization_retains_absence_after_directory_metadata() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let retired = temp.path().join("retired");
+        fs::create_dir(&root)?;
+        let root = root.canonicalize()?;
+        let metadata = fs::metadata(&root)?;
+        fs::rename(&root, &retired)?;
+        super::super::validate_source_root_metadata(&root, Ok(metadata))?;
+        match canonicalize(&root, &root) {
+            Err(FsError::RepositoryBoundary { path, source })
+                if path == root && source.kind() == io::ErrorKind::NotFound => {}
+            other => {
+                return Err(io::Error::other(format!(
+                    "root canonicalization lost absence: {other:?}"
+                ))
+                .into());
+            }
+        }
+        fs::rename(&retired, &root)?;
+        if canonicalize(&root, &root)? != root {
+            return Err(io::Error::other("restored root canonicalization changed identity").into());
+        }
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

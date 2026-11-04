@@ -421,6 +421,20 @@ currently erases typed root absence into its public diagnostic. Preserve a priva
 nonserialized selected-root absence witness through that adapter; do not parse
 diagnostic strings or retry all source-inspection or `NotFound` errors.
 
+The same typed cause must survive current project-identity admission, including
+absence after plan reload and a temporary non-directory at the selected name.
+Preserve the existing public diagnostic and strict project-mismatch behavior.
+At filesystem and worktree root admission, consume `fs::metadata` through one
+small private validator instead of `Path::is_dir`, which turns permission and
+other metadata errors into `false`. Preserve those original I/O errors; reserve
+the non-directory result for an existing non-directory and the explicitly
+unsupported empty-root spelling. Test permission failure through that actual
+metadata-result boundary, without depending on the test process's privileges.
+Worktree canonicalization can retain the same selected-root absence as a typed
+repository-boundary error. Admit that cause only when its native path is exactly
+the selected root and its I/O kind is absence/non-directory; Git-control, child
+and permission failures remain strict. Preserve the public boundary diagnostic.
+
 Use one private closure-based continuous-watch reconciliation helper, bounded to
 three attempts. Only absence/non-directory errors naming the already selected
 canonical root or its retained configured spelling permit a wait and retry; the

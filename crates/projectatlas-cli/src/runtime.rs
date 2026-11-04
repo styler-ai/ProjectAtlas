@@ -1754,11 +1754,27 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
         ));
     };
     let selected_root = CanonicalProjectRoot::from_path(selected_root).map_err(|source| {
-        verification_incomplete(
+        let unavailable = match &source {
+            projectatlas_core::CoreError::CanonicalProjectRootIo { path, source } => {
+                path == selected_root && root_absence_kind(source.kind())
+            }
+            // Every caller supplies a previously accepted absolute plan root.
+            // The other InvalidCanonicalProjectRoot case rejects relative paths;
+            // native codec failures have their own distinct error variant.
+            projectatlas_core::CoreError::InvalidCanonicalProjectRoot { path, .. } => {
+                path == selected_root && path.is_absolute()
+            }
+            _ => false,
+        };
+        let mut error = verification_incomplete(
             selected_root,
             IndexVerificationReason::SourceInspectionFailed,
             &CliError::InvalidInput(source.to_string()),
-        )
+        );
+        if let CliError::VerificationIncomplete(report) = &mut error {
+            report.unavailable_source_root = unavailable.then(|| selected_root.to_path_buf());
+        }
+        error
     })?;
     if !store.project_root_identity_matches(&selected_root) {
         return Err(CliError::ProjectMismatch(Box::new(
@@ -8520,7 +8536,9 @@ const MAX_WATCH_ROOT_ATTEMPTS: usize = 3;
 fn fs_error_is_root_unavailable(error: &FsError, root: &Path) -> bool {
     match error {
         FsError::RootNotDirectory(path) => path == root,
-        FsError::Io { path, source } => path == root && root_absence_kind(source.kind()),
+        FsError::Io { path, source } | FsError::RepositoryBoundary { path, source } => {
+            path == root && root_absence_kind(source.kind())
+        }
         _ => false,
     }
 }
@@ -15816,7 +15834,8 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                         &ScanOptions::default(),
                         &standalone_index_work_control(),
                     ),
-                    Err(FsError::RootNotDirectory(_))
+                    Err(FsError::Io { path, source })
+                        if path == root && source.kind() == io::ErrorKind::NotFound
                 ),
                 &true,
                 "persistent root absence is still refused by reconciliation policy",
@@ -16718,11 +16737,115 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
+    fn watch_root_recovery_retains_identity_admission_failures() -> Result<(), Box<dyn Error>> {
+        for temporary_file in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            let retired = temp.path().join("retired");
+            let replacement = temp.path().join("replacement");
+            fs::create_dir(&root)?;
+            fs::create_dir(&replacement)?;
+            fs::write(root.join("source.rs"), "pub fn initial() {}\n")?;
+            fs::write(
+                replacement.join("source.rs"),
+                "pub fn replacement_target() {}\n",
+            )?;
+            let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+            let database = temp.path().join("external.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), Some(10));
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "source.rs",
+                "Retain identity admission responsibility",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let revision = store.authored_purpose_revision()?;
+            let publication = store.index_publication()?;
+            let control = index_work_control(&options);
+            let mut waits = 0;
+            reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    let sampled = AtlasStore::open_read_only(&database)?;
+                    if sampled.index_publication()? != publication {
+                        return Err(CliError::InvalidInput(
+                            "identity gap changed publication".to_string(),
+                        ));
+                    }
+                    if temporary_file {
+                        fs::remove_file(&root).map_err(|source| CliError::Io {
+                            path: root.clone(),
+                            source,
+                        })?;
+                    }
+                    fs::rename(&replacement, &root).map_err(|source| CliError::Io {
+                        path: root.clone(),
+                        source,
+                    })?;
+                    Ok(())
+                },
+                |retry| {
+                    let current_plan = plan.reload_controlled(&control)?;
+                    if !retry {
+                        fs::rename(&root, &retired).map_err(|source| CliError::Io {
+                            path: root.clone(),
+                            source,
+                        })?;
+                        if temporary_file {
+                            fs::write(&root, "transient non-directory").map_err(|source| {
+                                CliError::Io {
+                                    path: root.clone(),
+                                    source,
+                                }
+                            })?;
+                        }
+                    }
+                    // A matching publication enters the real freshness owner,
+                    // whose first source check revalidates the selected identity.
+                    refresh_index_controlled(&mut store, &current_plan, &options, &control)
+                },
+            )?;
+            require_eq(&waits, &1, "identity admission root recovery")?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "identity admission project",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "identity admission authored state",
+            )?;
+            require_eq(
+                &store
+                    .load_node_by_path("source.rs")?
+                    .and_then(|node| node.purpose.purpose),
+                &Some("Retain identity admission responsibility".to_string()),
+                "identity admission purpose",
+            )?;
+            require_eq(
+                &store
+                    .load_symbols(Some("source.rs"), None, 10)?
+                    .iter()
+                    .any(|symbol| symbol.name == "replacement_target"),
+                &true,
+                "identity admission replacement",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn watch_root_recovery_preserves_causes_and_strict_errors() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
         let control = standalone_index_work_control();
-        for adapted in [false, true] {
+        for case in 0..7 {
             let mut attempts = 0;
             let mut waits = 0;
             reconcile_watch_root_controlled(
@@ -16739,14 +16862,41 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                         return Ok(());
                     }
                     // Already restored roots must retain the cause actually observed.
-                    let source = FsError::Io {
-                        path: plan.root.clone(),
-                        source: io::ErrorKind::NotFound.into(),
-                    };
-                    let error = if adapted {
-                        source_inspection_error(&plan.root, source)
-                    } else {
-                        CliError::Fs(source)
+                    let error = match case {
+                        0 => CliError::Fs(FsError::Io {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotFound.into(),
+                        }),
+                        1 => source_inspection_error(
+                            &plan.root,
+                            FsError::Io {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotFound.into(),
+                            },
+                        ),
+                        2 => CliError::Fs(FsError::RootNotDirectory(plan.root.clone())),
+                        3 => source_inspection_error(
+                            &plan.root,
+                            FsError::Io {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotADirectory.into(),
+                            },
+                        ),
+                        4 => CliError::Io {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotADirectory.into(),
+                        },
+                        5 => CliError::Fs(FsError::RepositoryBoundary {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotFound.into(),
+                        }),
+                        _ => source_inspection_error(
+                            &plan.root,
+                            FsError::RepositoryBoundary {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotADirectory.into(),
+                            },
+                        ),
                     };
                     Err(verification_incomplete(
                         &plan.root,
@@ -16798,6 +16948,20 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         fs::create_dir(&other)?;
         let indexed = CanonicalProjectRoot::from_path(&other)?;
         for error in [
+            source_inspection_error(
+                &plan.root,
+                FsError::RepositoryBoundary {
+                    path: child.clone(),
+                    source: io::ErrorKind::NotFound.into(),
+                },
+            ),
+            source_inspection_error(
+                &plan.root,
+                FsError::RepositoryBoundary {
+                    path: plan.root.clone(),
+                    source: io::ErrorKind::PermissionDenied.into(),
+                },
+            ),
             CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
                 &selected, &indexed,
             ))),

@@ -93,6 +93,82 @@ pub enum FsError {
 /// Convenient result alias for scanner operations.
 pub type FsResult<T> = Result<T, FsError>;
 
+/// Validate the selected root using the metadata result from its native spelling.
+fn validate_source_root_metadata(root: &Path, metadata: io::Result<fs::Metadata>) -> FsResult<()> {
+    if root.as_os_str().is_empty() {
+        return Err(FsError::RootNotDirectory(root.to_path_buf()));
+    }
+    match metadata {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(FsError::RootNotDirectory(root.to_path_buf())),
+        Err(source) => Err(FsError::Io {
+            path: root.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod root_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn source_root_metadata_preserves_permission_and_io_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        validate_source_root_metadata(root, fs::metadata(root))?;
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::NotADirectory,
+        ] {
+            match validate_source_root_metadata(root, Err(kind.into())) {
+                Err(FsError::Io { path, source }) if path == root && source.kind() == kind => {}
+                other => {
+                    return Err(io::Error::other(format!(
+                        "root metadata cause lost: {kind:?}: {other:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_root_admission_distinguishes_absence_from_non_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let file = temp.path().join("file");
+        let absent = temp.path().join("absent");
+        fs::write(&file, "ordinary file")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        for root in [temp.path(), &file, &absent] {
+            for result in [
+                RootScanPolicy::discover(root, &ScanOptions::default(), &control).map(|_| ()),
+                worktree::discover_repository_structure_controlled(root, &control).map(|_| ()),
+            ] {
+                let valid = if root == temp.path() {
+                    result.is_ok()
+                } else if root == file {
+                    matches!(result, Err(FsError::RootNotDirectory(path)) if path == root)
+                } else {
+                    matches!(result, Err(FsError::Io { path, source }) if path == root && source.kind() == io::ErrorKind::NotFound)
+                };
+                if !valid {
+                    return Err(io::Error::other(
+                        "root admission lost directory/absence distinction",
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Repository scanner configuration.
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -206,9 +282,7 @@ impl RootScanPolicy {
                 source,
             })?,
         );
-        if !selected_root.is_dir() {
-            return Err(FsError::RootNotDirectory(root.to_path_buf()));
-        }
+        validate_source_root_metadata(root, fs::metadata(selected_root.as_ref()))?;
         let canonical_root = selected_root.canonicalize().map_err(|source| FsError::Io {
             path: root.to_path_buf(),
             source,
