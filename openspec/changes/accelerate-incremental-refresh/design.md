@@ -435,6 +435,19 @@ repository-boundary error. Admit that cause only when its native path is exactly
 the selected root and its I/O kind is absence/non-directory; Git-control, child
 and permission failures remain strict. Preserve the public boundary diagnostic.
 
+The parallel walker can observe a root gap after the source capability has
+already opened. Preserve the native I/O kind and innermost named path through
+single walk-error context wrappers, retaining the original structured error.
+Composite, non-I/O and pathless errors remain generic failures: they cannot
+attest selected-root absence. Use the same adapter for Windows entry-metadata
+errors. If the walk instead admits a non-directory at its depth-zero root,
+reject it as a non-directory root before either platform's file-admission path.
+A retained source capability must not turn that temporary file into an ordinary
+descendant source. Real parallel-walker tests remove or temporarily replace the
+root after admission and verify both causes and successful scanning after
+restoration. Child-path and permission controls remain strict; no new retry
+owner, filesystem polling or I/O is added to the successful walk.
+
 Use one private closure-based continuous-watch reconciliation helper, bounded to
 three attempts. Only absence/non-directory errors naming the already selected
 canonical root or its retained configured spelling permit a wait and retry; the
@@ -855,3 +868,38 @@ directory and targeted-path handling remain unchanged. No entry metadata survive
 the discovery or becomes a content cache. Native producer tests cover ordinary
 saves and stale-entry deletion/alias substitution; native installed measurements
 must establish the actual latency effect before accepting this optimization.
+
+
+## Policy directory canonicalization within a selection pass
+
+Test-only native-call attribution on the actual repeated current-read owner
+shows two fresh discovery passes per refresh. In each pass, 27 selected-binding
+resolutions remain distinct and fresh; ordinary directory ancestors perform 81
+canonicalizations for 10 exact native paths. These diagnostic counts identify
+eligible repeated work, not shipping performance acceptance.
+
+Use one small standard-library directory resolver while constructing one
+`PolicyWatchInputs::discover` namespace. Reuse only successful canonical results
+for ancestors freshly classified as ordinary directories. Keep selected-input
+and alias-control bindings, alias-parent and alias-directory canonicalization,
+metadata/readlink classification, policy bytes, configuration/Git discovery and
+control checks fresh. Key by `OsString`, preserving exact native selector bytes
+or units; `PathBuf` equality can normalize separators or a trailing slash.
+
+Bound scratch to 64 entries and 64 KiB of total encoded key/value lengths, plus
+bounded container overhead. A full or byte-limited memo performs the ordinary
+resolution without caching or refusing the input. Never cache failures. Drop
+scratch after namespace construction, before fresh policy-content hashing;
+it is absent from the immutable selection, equality, observer and database.
+Every discovery creates new scratch, including the mandatory post-install pass.
+Do not reuse it for event drains, `bindings_changed`, source-policy witnesses,
+other selected-root spellings or later MCP calls. Same-path directory watch
+rebinds and all before/after acceptance fences remain unchanged.
+
+Causal proof must distinguish actual native ordinary-directory calls from the
+uncached binding/alias calls. Compare stable selections against zero-budget
+resolution, exercise entry/byte-cap fallback, raw selector distinctions,
+absence-to-presence and errors, and prove fresh root/external alias retargets
+and policy bytes across independent discoveries and registration. Shipping
+reference/shallow/deep timing and memory results, followed by the registered
+installed matrix, determine whether this bounded reuse is retained.

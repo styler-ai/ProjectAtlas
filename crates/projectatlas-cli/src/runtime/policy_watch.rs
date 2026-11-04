@@ -24,6 +24,10 @@ const MAX_POLICY_WATCH_DIRECTORIES: usize = 256;
 const MAX_POLICY_WATCH_ATTEMPTS: usize = 3;
 /// Bound full reconciliation while uncertain ingress prevents a native refresh fence.
 const MAX_POLICY_FENCE_ATTEMPTS: usize = 3;
+/// Maximum successful ordinary-directory results held by one discovery only.
+const MAX_POLICY_DIRECTORY_MEMO_ENTRIES: usize = 64;
+/// Bound native key/value lengths as well as scratch cardinality.
+const MAX_POLICY_DIRECTORY_MEMO_BYTES: usize = 64 * 1024;
 /// Git's directory whose children change the registered worktree inventory.
 const REGISTRATIONS_DIRECTORY: &str = "worktrees";
 /// One uncertain event is queued until its controlled recheck consumes the wake.
@@ -50,8 +54,16 @@ enum PolicyEventInterest {
 thread_local! {
     /// Namespace resolver work performed by this test thread, independent of wall-clock noise.
     static POLICY_BINDING_RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Actual native canonicalization calls, including ordinary parent namespaces.
+    static POLICY_NATIVE_RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Replace one empty fixture directory between metadata and namespace checks.
     static POLICY_BINDING_TRANSITION: std::cell::RefCell<Option<(PathBuf, Option<PathBuf>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Count actual native policy canonicalization without attributing elapsed time.
+#[cfg(test)]
+fn record_policy_resolution() {
+    POLICY_NATIVE_RESOLUTIONS.set(POLICY_NATIVE_RESOLUTIONS.get().saturating_add(1));
 }
 
 /// Identify events that can replace a directory registration or its pathname.
@@ -96,6 +108,8 @@ fn canonical_policy_binding(path: &Path) -> Result<Option<PathBuf>, CliError> {
             })?;
         }
     }
+    #[cfg(test)]
+    record_policy_resolution();
     match path.canonicalize() {
         Ok(canonical) => Ok(Some(canonical)),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -125,6 +139,47 @@ fn policy_event_namespace(path: &Path) -> Result<Option<PathBuf>, CliError> {
         })?
         .unwrap_or_else(|| leaf.to_os_string());
     Ok(Some(parent.join(leaf)))
+}
+
+/// Ordinary-directory namespace scratch; never part of a policy snapshot.
+#[derive(Debug)]
+struct PolicyDirectoryResolver {
+    /// Raw native selectors avoid Path equality's component normalization.
+    canonical: BTreeMap<OsString, PathBuf>,
+    /// Remaining encoded key/value budget; zero keeps ordinary resolution.
+    remaining_bytes: usize,
+}
+
+impl Default for PolicyDirectoryResolver {
+    fn default() -> Self {
+        Self {
+            canonical: BTreeMap::new(),
+            remaining_bytes: MAX_POLICY_DIRECTORY_MEMO_BYTES,
+        }
+    }
+}
+
+impl PolicyDirectoryResolver {
+    /// Resolve one freshly classified ordinary directory in this selection.
+    fn resolve(&mut self, path: &Path) -> std::io::Result<PathBuf> {
+        if let Some(canonical) = self.canonical.get(path.as_os_str()) {
+            return Ok(canonical.clone());
+        }
+        #[cfg(test)]
+        record_policy_resolution();
+        let canonical = path.canonicalize()?;
+        let bytes = path
+            .as_os_str()
+            .len()
+            .saturating_add(canonical.as_os_str().len());
+        if self.canonical.len() < MAX_POLICY_DIRECTORY_MEMO_ENTRIES && bytes <= self.remaining_bytes
+        {
+            self.remaining_bytes -= bytes;
+            self.canonical
+                .insert(path.as_os_str().to_os_string(), canonical.clone());
+        }
+        Ok(canonical)
+    }
 }
 
 /// An immutable selection snapshot, independent of indexed source node identity.
@@ -164,6 +219,7 @@ impl PolicyWatchInputs {
             selected.push(root.join("projectatlas.toml"));
         }
         let mut result = Self::default();
+        let mut directories = PolicyDirectoryResolver::default();
         for path in selected {
             control.check(IndexWorkStage::RepositoryTraversal)?;
             let path = if path.is_absolute() {
@@ -171,8 +227,9 @@ impl PolicyWatchInputs {
             } else {
                 root.join(path)
             };
-            result.add_path(root, &path, control)?;
+            result.add_path(root, &path, control, &mut directories)?;
         }
+        drop(directories);
         result.retain_alias_children(control)?;
         result.content_witness = Some(result.current_content_witness(control)?);
         Ok(result)
@@ -184,6 +241,7 @@ impl PolicyWatchInputs {
         root: &Path,
         path: &Path,
         control: &IndexWorkControl,
+        directories: &mut PolicyDirectoryResolver,
     ) -> Result<(), CliError> {
         let mut pending = vec![path.to_path_buf()];
         let mut expanded = BTreeSet::new();
@@ -231,6 +289,7 @@ impl PolicyWatchInputs {
             // descendant. Retain its immediate-child namespace as well as links.
             for ancestor in path.ancestors() {
                 control.check(IndexWorkStage::RepositoryTraversal)?;
+                let mut ordinary_directory = false;
                 let is_directory = match fs::symlink_metadata(ancestor) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         // The alias entry itself is a control. Its target directory's
@@ -260,6 +319,8 @@ impl PolicyWatchInputs {
                             });
                         }
                         if let Some(parent) = ancestor.parent() {
+                            #[cfg(test)]
+                            record_policy_resolution();
                             let canonical =
                                 parent.canonicalize().map_err(|source| CliError::Io {
                                     path: parent.to_path_buf(),
@@ -295,7 +356,10 @@ impl PolicyWatchInputs {
                             ),
                         });
                     }
-                    Ok(metadata) => metadata.is_dir(),
+                    Ok(metadata) => {
+                        ordinary_directory = metadata.is_dir();
+                        metadata.is_dir()
+                    }
                     Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
                     Err(source) => {
                         return Err(CliError::Io {
@@ -305,7 +369,14 @@ impl PolicyWatchInputs {
                     }
                 };
                 if (!nearest_directory_found || external_namespace) && is_directory {
-                    let canonical = ancestor.canonicalize().map_err(|source| CliError::Io {
+                    let canonical = if ordinary_directory {
+                        directories.resolve(ancestor)
+                    } else {
+                        #[cfg(test)]
+                        record_policy_resolution();
+                        ancestor.canonicalize()
+                    }
+                    .map_err(|source| CliError::Io {
                         path: ancestor.to_path_buf(),
                         source,
                     })?;
@@ -1393,14 +1464,241 @@ mod tests {
 
     /// Select fixture paths without mutating process-wide Git environment.
     fn selected(root: &Path, paths: &[PathBuf]) -> Result<PolicyWatchInputs, CliError> {
+        selected_with_resolver(root, paths, PolicyDirectoryResolver::default())
+    }
+
+    /// Exercise the same namespace construction with a bounded or disabled memo.
+    fn selected_with_resolver(
+        root: &Path,
+        paths: &[PathBuf],
+        mut directories: PolicyDirectoryResolver,
+    ) -> Result<PolicyWatchInputs, CliError> {
         let control = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(5)));
         let mut inputs = PolicyWatchInputs::default();
         for path in paths {
-            inputs.add_path(root, path, &control)?;
+            inputs.add_path(root, path, &control, &mut directories)?;
         }
+        drop(directories);
         inputs.retain_alias_children(&control)?;
         inputs.content_witness = Some(inputs.current_content_witness(&control)?);
         Ok(inputs)
+    }
+
+    #[test]
+    fn shared_ordinary_policy_directories_resolve_once_per_selection() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        let paths: Vec<_> = (0..8)
+            .map(|n| settings.join(format!("rules-{n}")))
+            .collect();
+        POLICY_BINDING_RESOLUTIONS.set(0);
+        POLICY_NATIVE_RESOLUTIONS.set(0);
+        let inputs = selected(&root, &paths)?;
+        let bindings = POLICY_BINDING_RESOLUTIONS.get();
+        let operations = POLICY_NATIVE_RESOLUTIONS.get();
+        require(
+            paths.iter().all(|path| inputs.paths.contains(path)),
+            "shared-parent selection lost a distinct absent policy input",
+        )?;
+        require(
+            bindings >= paths.len() as u64,
+            "shared-parent selection skipped fresh selected-input bindings",
+        )?;
+        require(
+            operations <= bindings + settings.ancestors().count() as u64,
+            "shared ordinary policy directories repeated native canonicalization within one selection",
+        )
+    }
+
+    #[test]
+    fn directory_resolution_bounds_fall_back_without_changing_selection()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let settings = base.join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&settings)?;
+        let paths: Vec<_> = (0..8)
+            .map(|n| settings.join(format!("rules-{n}")))
+            .collect();
+        fs::write(&paths[0], "ignored.rs\n")?;
+        let cached = selected(&root, &paths)?;
+        let uncached = selected_with_resolver(
+            &root,
+            &paths,
+            PolicyDirectoryResolver {
+                remaining_bytes: 0,
+                ..PolicyDirectoryResolver::default()
+            },
+        )?;
+        require(
+            cached == uncached,
+            "directory scratch changed policy bytes or namespaces",
+        )?;
+        let mut resolver = PolicyDirectoryResolver::default();
+        for n in 0..MAX_POLICY_DIRECTORY_MEMO_ENTRIES {
+            let directory = base.join(format!("directory-{n}"));
+            fs::create_dir(&directory)?;
+            require(
+                resolver.resolve(&directory)? == directory.canonicalize()?,
+                "bounded directory resolution changed a native target",
+            )?;
+        }
+        let cached_entries = resolver.canonical.len();
+        require(
+            cached_entries <= MAX_POLICY_DIRECTORY_MEMO_ENTRIES,
+            "directory scratch exceeded its entry budget",
+        )?;
+        let overflow = base.join("overflow-directory-over-the-entry-cap");
+        fs::create_dir(&overflow)?;
+        let expected = overflow.canonicalize()?;
+        let before = POLICY_NATIVE_RESOLUTIONS.get();
+        let remaining = resolver.remaining_bytes;
+        for _ in 0..2 {
+            require(
+                resolver.resolve(&overflow)? == expected,
+                "entry-cap fallback refused a valid directory",
+            )?;
+        }
+        require(
+            POLICY_NATIVE_RESOLUTIONS.get() == before + 2
+                && resolver.canonical.len() == cached_entries
+                && resolver.remaining_bytes == remaining,
+            "entry-cap overflow grew scratch or reused an uncached result",
+        )?;
+        let bytes = overflow.as_os_str().len() + expected.as_os_str().len();
+        let mut limited = PolicyDirectoryResolver {
+            remaining_bytes: bytes - 1,
+            ..PolicyDirectoryResolver::default()
+        };
+        let before = POLICY_NATIVE_RESOLUTIONS.get();
+        for _ in 0..2 {
+            require(
+                limited.resolve(&overflow)? == expected,
+                "byte-cap fallback refused a valid directory",
+            )?;
+        }
+        require(
+            limited.canonical.is_empty()
+                && limited.remaining_bytes == bytes - 1
+                && POLICY_NATIVE_RESOLUTIONS.get() == before + 2,
+            "byte-cap overflow retained a target beyond its budget",
+        )?;
+        let mut exact = PolicyDirectoryResolver {
+            remaining_bytes: bytes,
+            ..PolicyDirectoryResolver::default()
+        };
+        exact.resolve(&overflow)?;
+        let before = POLICY_NATIVE_RESOLUTIONS.get();
+        require(
+            exact.resolve(&overflow)? == expected
+                && exact.remaining_bytes == 0
+                && exact.canonical.len() == 1
+                && POLICY_NATIVE_RESOLUTIONS.get() == before,
+            "an exact-budget hit repeated I/O or exceeded its scratch allowance",
+        )
+    }
+
+    #[test]
+    fn directory_resolution_keeps_native_selectors_and_does_not_cache_failures()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let file = base.join("ordinary-file");
+        fs::write(&file, "policy bytes")?;
+        let mut resolver = PolicyDirectoryResolver::default();
+        // A directory may become a file between classification and resolution.
+        resolver.resolve(&file)?;
+        let separated = file.join("");
+        require(
+            file.as_os_str() != separated.as_os_str(),
+            "fixture lost its raw trailing separator",
+        )?;
+        match (separated.canonicalize(), resolver.resolve(&separated)) {
+            (Ok(expected), Ok(actual)) => require(
+                expected == actual,
+                "raw native selector changed its canonical target",
+            )?,
+            (Err(expected), Err(actual)) => require(
+                expected.kind() == actual.kind()
+                    && expected.raw_os_error() == actual.raw_os_error(),
+                "raw native selector changed its canonicalization error",
+            )?,
+            _ => {
+                return Err("directory memo normalized a native selector before resolution".into());
+            }
+        }
+        let missing = base.join("missing");
+        let before = POLICY_NATIVE_RESOLUTIONS.get();
+        for _ in 0..2 {
+            require(
+                matches!(resolver.resolve(&missing), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                "missing-directory lookup changed its failure",
+            )?;
+        }
+        require(
+            POLICY_NATIVE_RESOLUTIONS.get() == before + 2
+                && !resolver.canonical.contains_key(missing.as_os_str()),
+            "directory resolution retained an absence or failed native operation",
+        )?;
+        fs::create_dir(&missing)?;
+        require(
+            resolver.resolve(&missing)? == missing.canonicalize()?,
+            "a prior failed lookup hid a newly created directory",
+        )
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn independent_discoveries_refresh_alias_targets_absence_and_policy_bytes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        let first = base.join("first");
+        let second = base.join("second");
+        for directory in [&root, &first, &second] {
+            fs::create_dir(directory)?;
+        }
+        let alias = base.join("selected");
+        create_policy_directory_alias(&first, &alias)?;
+        let config = alias.join("projectatlas.toml");
+        let control = super::super::standalone_index_work_control();
+        let absent = PolicyWatchInputs::discover(&root, Some(&config), &control)?;
+        fs::write(first.join("projectatlas.toml"), "# First configuration\n")?;
+        let present = PolicyWatchInputs::discover(&root, Some(&config), &control)?;
+        require(
+            absent.bindings.get(&config) != present.bindings.get(&config)
+                && absent.content_witness != present.content_witness,
+            "independent discovery reused an absent binding or policy bytes",
+        )?;
+        fs::write(first.join("projectatlas.toml"), "# Revised configuration\n")?;
+        let revised = PolicyWatchInputs::discover(&root, Some(&config), &control)?;
+        require(
+            present.bindings == revised.bindings
+                && present.content_witness != revised.content_witness,
+            "directory memo hid a policy-byte change beneath a stable target",
+        )?;
+        fs::write(second.join("projectatlas.toml"), "# Second configuration\n")?;
+        #[cfg(unix)]
+        fs::remove_file(&alias)?;
+        #[cfg(windows)]
+        fs::remove_dir(&alias)?;
+        create_policy_directory_alias(&second, &alias)?;
+        let retargeted = PolicyWatchInputs::discover(&root, Some(&config), &control)?;
+        require(
+            revised.bindings.get(&config) != retargeted.bindings.get(&config)
+                && revised.content_witness != retargeted.content_witness
+                && retargeted.directories.contains(&second)
+                && !retargeted.directories.contains(&first),
+            "independent discovery retained an earlier external alias namespace",
+        )
     }
 
     #[test]
@@ -2800,7 +3098,12 @@ mod tests {
         let control = super::super::standalone_index_work_control();
         require(
             matches!(
-                inputs.add_path(&root, &parent.join("rules"), &control),
+                inputs.add_path(
+                    &root,
+                    &parent.join("rules"),
+                    &control,
+                    &mut PolicyDirectoryResolver::default()
+                ),
                 Err(CliError::Watcher(_))
             ),
             "deep external policy coverage did not retain its bounded fallback",

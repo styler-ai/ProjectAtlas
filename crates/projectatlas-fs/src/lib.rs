@@ -709,13 +709,7 @@ fn scan_repo_with_policy(
             let entry = match result {
                 Ok(entry) => entry,
                 Err(error) => {
-                    push_error(
-                        &errors,
-                        FsError::Io {
-                            path: root.clone(),
-                            source: io::Error::other(error.to_string()),
-                        },
-                    );
+                    push_error(&errors, walk_entry_error(&root, error));
                     return WalkState::Quit;
                 }
             };
@@ -769,6 +763,179 @@ fn scan_repo_with_policy(
         nodes,
         work: budget.work(),
     })
+}
+
+/// Adapt a failed walk without inventing an I/O cause at the selected root.
+fn walk_entry_error(root: &Path, error: ignore::Error) -> FsError {
+    let mut context = &error;
+    let mut native_path = None;
+    let kind = loop {
+        match context {
+            ignore::Error::WithPath { path, err } => {
+                native_path = Some(path.as_path());
+                context = err;
+            }
+            ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+                context = err;
+            }
+            ignore::Error::Io(source) if native_path.is_some() => break source.kind(),
+            // A composite or pathless error cannot attest selected-root absence.
+            _ => break io::ErrorKind::Other,
+        }
+    };
+    FsError::Io {
+        path: native_path.unwrap_or(root).to_path_buf(),
+        source: io::Error::new(kind, error),
+    }
+}
+
+#[cfg(test)]
+mod walk_entry_tests {
+    use super::*;
+
+    fn require_cause(error: FsError, expected_path: &Path, kind: io::ErrorKind) -> FsResult<()> {
+        match error {
+            FsError::Io { path, source }
+                if path == expected_path
+                    && source.kind() == kind
+                    && source.get_ref().is_some_and(
+                        <dyn std::error::Error + Send + Sync>::is::<ignore::Error>,
+                    ) =>
+            {
+                Ok(())
+            }
+            error => Err(state_error(
+                expected_path,
+                &format!("walk cause lost: {error:?}"),
+            )),
+        }
+    }
+
+    fn named_error(path: &Path, kind: io::ErrorKind) -> ignore::Error {
+        ignore::Error::WithPath {
+            path: path.to_path_buf(),
+            err: Box::new(ignore::Error::WithDepth {
+                depth: 0,
+                err: Box::new(ignore::Error::Io(kind.into())),
+            }),
+        }
+    }
+
+    #[test]
+    fn walk_errors_preserve_native_paths_and_keep_ambiguous_failures_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let child = root.join("child");
+        for path in [root, child.as_path()] {
+            for kind in [
+                io::ErrorKind::NotFound,
+                io::ErrorKind::NotADirectory,
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::Other,
+            ] {
+                require_cause(walk_entry_error(root, named_error(path, kind)), path, kind)?;
+            }
+        }
+        let nested = ignore::Error::WithPath {
+            path: root.to_path_buf(),
+            err: Box::new(ignore::Error::WithLineNumber {
+                line: 2,
+                err: Box::new(named_error(&child, io::ErrorKind::NotFound)),
+            }),
+        };
+        require_cause(
+            walk_entry_error(root, nested),
+            &child,
+            io::ErrorKind::NotFound,
+        )?;
+        for error in [
+            ignore::Error::Io(io::ErrorKind::NotFound.into()),
+            ignore::Error::Partial(vec![named_error(root, io::ErrorKind::NotFound)]),
+            ignore::Error::Partial(vec![
+                named_error(root, io::ErrorKind::NotFound),
+                named_error(&child, io::ErrorKind::PermissionDenied),
+            ]),
+            ignore::Error::WithPath {
+                path: root.to_path_buf(),
+                err: Box::new(ignore::Error::InvalidDefinition),
+            },
+        ] {
+            require_cause(walk_entry_error(root, error), root, io::ErrorKind::Other)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_walk_retains_root_replacement_causes_after_source_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for temporary_file in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("selected");
+            let retired = temp.path().join("retired");
+            fs::create_dir(&root)?;
+            fs::write(root.join("source.rs"), "pub fn retained() {}")?;
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+            let source_root = SourceRootReader::open(&root)?;
+            fs::rename(&root, &retired)?;
+            if temporary_file {
+                fs::write(&root, "temporary non-directory")?;
+            }
+            let failures = Arc::new(Mutex::new(Vec::new()));
+            let budget = ScanBudget::new(ScanLimits::default(), control.clone());
+            policy.walker.build_parallel().run(|| {
+                let failures = Arc::clone(&failures);
+                let mut reader = source_root.reader();
+                let root = &root;
+                let budget = &budget;
+                let options = &policy.options;
+                Box::new(move |result| {
+                    let failure = match result {
+                        Err(error) => Some(walk_entry_error(root, error)),
+                        Ok(entry) => {
+                            scanned_walk_entry(root, &entry, options, budget, &mut reader).err()
+                        }
+                    };
+                    if let Some(failure) = failure {
+                        push_error(&failures, failure);
+                    }
+                    WalkState::Continue
+                })
+            });
+            let mut failures = failures
+                .lock()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if failures.len() != 1 {
+                return Err(
+                    io::Error::other(format!("expected one root failure: {failures:?}")).into(),
+                );
+            }
+            let error = failures.pop().ok_or("missing traversal failure")?;
+            if temporary_file {
+                if !matches!(error, FsError::RootNotDirectory(ref path) if path == &root) {
+                    return Err(
+                        io::Error::other(format!("lost non-directory root: {error:?}")).into(),
+                    );
+                }
+                fs::remove_file(&root)?;
+            } else {
+                require_cause(error, &root, io::ErrorKind::NotFound)?;
+            }
+            fs::rename(&retired, &root)?;
+            let nodes = scan_repo_controlled(
+                &root,
+                &ScanOptions::default(),
+                ScanLimits::default(),
+                &control,
+            )?;
+            if !nodes.iter().any(|node| node.path == "source.rs") {
+                return Err(io::Error::other("restored root lost its source").into());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Scan one path into a `ProjectAtlas` node when it is indexable.
@@ -1464,13 +1631,18 @@ fn scanned_walk_entry(
     budget: &ScanBudget,
     source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<Option<Node>> {
+    if entry.depth() == 0
+        && entry.path() == root
+        && entry.file_type().is_some_and(|kind| !kind.is_dir())
+    {
+        return Err(FsError::RootNotDirectory(root.to_path_buf()));
+    }
     #[cfg(windows)]
     if !entry.path_is_symlink() && entry.file_type().is_some_and(|kind| kind.is_file()) {
         budget.control.check(IndexWorkStage::SourceMetadata)?;
-        let metadata = entry.metadata().map_err(|source| FsError::Io {
-            path: entry.path().to_path_buf(),
-            source: io::Error::other(source),
-        })?;
+        let metadata = entry
+            .metadata()
+            .map_err(|source| walk_entry_error(entry.path(), source))?;
         return file_node(
             root,
             entry.path(),
