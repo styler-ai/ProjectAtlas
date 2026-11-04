@@ -49,6 +49,11 @@ For 0.5.1, CLI and MCP one-shot refresh SHALL perform exact source discovery and
 - **WHEN** a saved edit has not reached a watcher callback, or preserves size and modification time
 - **THEN** exact comparison detects it and the existing affected-work owner repairs it or refuses unsafe publication
 
+#### Scenario: Policy restored after selecting a different source set
+- **WHEN** Git configuration, global/repository excludes, root/nested `.gitignore`/`.ignore` inputs, `.git`/`commondir` selectors or registered-worktree inventory temporarily change during discovery and are restored before admission finishes, with watcher delivery delayed
+- **THEN** admission binds its source assessment to the policy inputs actually consumed and reconciles or returns typed refresh guidance instead of declaring a stale publication current
+- **AND** this includes restoration of the original policy file object and policy files excluded by their own rules, while unchanged policy and supported local exceptions retain their normal behavior
+
 ### Requirement: Standalone CLI has its own performance gate
 Before production changes, the plan SHALL fix and evaluate a cold-CLI latency target. If exact cold discovery cannot meet it, a trustworthy cross-invocation evidence design SHALL be published and reviewed before that implementation proceeds. A fast MCP path alone SHALL not satisfy this capability.
 

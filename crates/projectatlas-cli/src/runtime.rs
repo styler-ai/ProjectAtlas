@@ -84,7 +84,7 @@ use projectatlas_fs::worktree::{
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, scan_path_with_policy_controlled, scan_repo,
-    scan_repo_controlled, scan_repo_controlled_with_work,
+    scan_repo_controlled, scan_repo_controlled_with_policy_evidence,
 };
 use projectatlas_service::{
     ClassifiedRankedNode, CoverageDiscoveryReport, FederatedInputWork, FederatedStore,
@@ -363,6 +363,45 @@ struct CapturedSourceState {
     nodes: Vec<Node>,
     /// A non-indexed document state requires graph publication even with identical nodes.
     document_projection_changed: bool,
+    /// Consumed policy retained through this operation's handoff and publication checks.
+    policies: Arc<VerifiedPolicyInputs>,
+}
+
+/// Policy consumed by exact source and document verification in one operation.
+struct VerifiedPolicyInputs {
+    /// Selection and rule inputs actually consumed by source discovery.
+    source: projectatlas_fs::ScanPolicyEvidence,
+    /// Additional inputs consumed while resolving nonindexed document targets.
+    documents: Option<projectatlas_fs::ScanPolicyEvidence>,
+}
+
+impl VerifiedPolicyInputs {
+    /// Compare consumed policy with current state without losing typed inspection failures.
+    fn is_current(&self, root: &Path, control: &IndexWorkControl) -> Result<bool, CliError> {
+        if !self
+            .source
+            .is_current(control)
+            .map_err(|source| source_inspection_error(root, source))?
+        {
+            return Ok(false);
+        }
+        if let Some(documents) = &self.documents
+            && !documents
+                .is_current(control)
+                .map_err(|source| source_inspection_error(root, source))?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Refuse a read whose consumed policy no longer matches the admission boundary.
+    fn verify(&self, root: &Path, control: &IndexWorkControl) -> Result<(), CliError> {
+        if !self.is_current(root, control)? {
+            return Err(source_changed_during_derivation(root, "."));
+        }
+        Ok(())
+    }
 }
 
 /// Current read snapshot established through exact source verification.
@@ -371,6 +410,22 @@ pub(crate) struct ExactFreshIndexRead {
     pub(crate) store: AtlasStore,
     /// Work consumed before this snapshot could be called current.
     pub(crate) work: SourceVerificationWork,
+    /// Shared only with this operation's source handoff, never a cached observer epoch.
+    policies: Arc<VerifiedPolicyInputs>,
+}
+
+/// A participant held privately until every federated snapshot reaches admission.
+struct FederatedReadAdmission {
+    /// Exact snapshot and consumed policy, retained together until final validation.
+    exact: ExactFreshIndexRead,
+    /// Selected database spelling for the service's later generation checks.
+    database: PathBuf,
+    /// Canonical source root for the independent admission plan.
+    root: PathBuf,
+    /// Optional adapter-owned alias for typed participant errors.
+    worktree: Option<String>,
+    /// Work already spent opening this participant, excluding time holding it idle.
+    input_work: FederatedInputWork,
 }
 
 /// Closed reason why current local source could not be verified.
@@ -654,10 +709,44 @@ pub(crate) fn open_fresh_atlas_store_for_project_controlled(
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<AtlasStore, CliError> {
-    Ok(
-        open_exact_fresh_atlas_store_for_project_controlled(db_path, root, config_path, control)?
-            .store,
-    )
+    let mut exact =
+        open_exact_fresh_atlas_store_for_project_controlled(db_path, root, config_path, control)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
+    if let Err(error) = verify_exact_snapshot_policy(&mut exact, root, config_path, control) {
+        drop(exact.store.finish_index_read_snapshot());
+        return Err(error);
+    }
+    Ok(exact.store)
+}
+
+/// Admit a pinned snapshot against a fresh plan and its actually consumed policy.
+fn verify_exact_snapshot_policy(
+    exact: &mut ExactFreshIndexRead,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
+        .map_err(|source| publication_input_error(root, source))?;
+    exact.work.sqlite_read_statements = exact.work.sqlite_read_statements.saturating_add(1);
+    verify_index_project_root(&exact.store, &plan.root)?;
+    exact.work.sqlite_read_statements = exact.work.sqlite_read_statements.saturating_add(1);
+    match verify_index_publication(&exact.store, &plan) {
+        Err(CliError::VerificationIncomplete(report))
+            if report.reason == IndexVerificationReason::PublicationContractMismatch =>
+        {
+            return Err(CliError::RefreshRequired(Box::new(
+                index_policy_refresh_required(root),
+            )));
+        }
+        result => {
+            result?;
+        }
+    }
+    exact.policies.verify(root, control)
 }
 
 /// Open a current snapshot and retain exact freshness work for epoch accounting.
@@ -678,16 +767,32 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
 }
 
 /// Verify exact saved source against the index without publishing a repair.
+#[cfg(test)]
 pub(crate) fn verify_saved_source_matches_index_controlled(
     db_path: &Path,
     root: &Path,
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
+    verify_saved_source_policy_controlled(db_path, root, config_path, control).map(|_policies| ())
+}
+
+/// Retain the policy consumed by a mutation's fresh saved-source verification.
+fn verify_saved_source_policy_controlled(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<Arc<VerifiedPolicyInputs>, CliError> {
     let exact =
         open_exact_saved_source_matches_index_controlled(db_path, root, config_path, control)?;
+    exact.policies.verify(root, control)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_SAVED_SOURCE_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
     exact.store.finish_index_read_snapshot()?;
-    Ok(())
+    Ok(exact.policies)
 }
 
 /// Open an exact current snapshot without publishing a source repair.
@@ -722,7 +827,11 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
         open_exact_index_assessment(db_path, root, config_path, scan_limits, control)?;
     let mut work = assessment.work;
     let Some(delta) = assessment.delta else {
-        return Ok(ExactFreshIndexRead { store, work });
+        return Ok(ExactFreshIndexRead {
+            store,
+            work,
+            policies: assessment.source.policies,
+        });
     };
     if !repair_safe_delta {
         return Err(CliError::RefreshRequired(Box::new(delta.report)));
@@ -732,6 +841,7 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
     }
 
     let refresh_required = delta.report.clone();
+    let policies = Arc::clone(&assessment.source.policies);
     drop(store);
     let repair = (|| {
         let mut writer = open_atlas_store_for_project(db_path, &plan.root)?;
@@ -761,7 +871,11 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     verify_index_publication(&store, &plan)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    Ok(ExactFreshIndexRead { store, work })
+    Ok(ExactFreshIndexRead {
+        store,
+        work,
+        policies,
+    })
 }
 
 /// Capture an exact read snapshot and its reusable source assessment without publication.
@@ -882,7 +996,7 @@ pub(crate) fn open_federated_atlas_stores_for_project(
 
     let default_scan_limits = ScanLimits::default();
     let mut remaining_input_bytes = MAX_FEDERATED_INPUT_BYTES;
-    let mut stores: Vec<FederatedStore> = Vec::with_capacity(canonical_roots.len());
+    let mut admissions: Vec<FederatedReadAdmission> = Vec::with_capacity(canonical_roots.len());
     for (order, (root, database)) in canonical_roots.into_iter().zip(databases).enumerate() {
         let started = Instant::now();
         let config = (order == 0).then_some(selected_config).flatten();
@@ -900,8 +1014,8 @@ pub(crate) fn open_federated_atlas_stores_for_project(
         ) {
             Ok(exact) => exact,
             Err(error) => {
-                for store in stores {
-                    drop(store.finish());
+                for admission in admissions {
+                    drop(admission.exact.store.finish_index_read_snapshot());
                 }
                 let error =
                     if let Some(worktree) = worktrees.and_then(|worktrees| worktrees.get(order)) {
@@ -921,11 +1035,60 @@ pub(crate) fn open_federated_atlas_stores_for_project(
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
         let worktree = worktrees.map(|worktrees| worktrees[order].clone());
-        match FederatedStore::new_with_worktree(exact.store, database, root, input_work, worktree) {
+        admissions.push(FederatedReadAdmission {
+            exact,
+            database,
+            root,
+            worktree,
+            input_work,
+        });
+    }
+    #[cfg(test)]
+    if let Some(after) = AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
+    let validation = admissions
+        .iter_mut()
+        .enumerate()
+        .try_for_each(|(order, admission)| {
+            let started = Instant::now();
+            let config = (order == 0).then_some(selected_config).flatten();
+            verify_exact_snapshot_policy(&mut admission.exact, &admission.root, config, control)
+                .map_err(|error| match admission.worktree.as_deref() {
+                    Some(worktree) => federated_worktree_error(error, worktree),
+                    None => error,
+                })?;
+            admission.input_work.sqlite_read_statements =
+                admission.exact.work.sqlite_read_statements;
+            admission.input_work.elapsed_ms = admission
+                .input_work
+                .elapsed_ms
+                .saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            Ok::<(), CliError>(())
+        });
+    if let Err(error) = validation {
+        for admission in admissions {
+            drop(admission.exact.store.finish_index_read_snapshot());
+        }
+        return Err(error);
+    }
+    let mut stores: Vec<FederatedStore> = Vec::with_capacity(admissions.len());
+    let mut admissions = admissions.into_iter();
+    while let Some(admission) = admissions.next() {
+        match FederatedStore::new_with_worktree(
+            admission.exact.store,
+            admission.database,
+            admission.root,
+            admission.input_work,
+            admission.worktree,
+        ) {
             Ok(store) => stores.push(store),
             Err(error) => {
                 for store in stores {
                     drop(store.finish());
+                }
+                for admission in admissions {
+                    drop(admission.exact.store.finish_index_read_snapshot());
                 }
                 return Err(CliError::Service(error));
             }
@@ -1283,6 +1446,26 @@ fn detect_index_freshness_controlled(
     assess_source_against_publication(store, plan, scan_limits, control, generation, work)
 }
 
+/// One owning-test transition around real source discovery.
+#[cfg(test)]
+type PolicyTransitionTestHook = Box<dyn FnOnce() -> Result<(), CliError>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Isolate policy transitions around the real source walk on the owning test thread.
+    static SOURCE_WALK_TEST_HOOKS: std::cell::RefCell<Option<(PolicyTransitionTestHook, PolicyTransitionTestHook)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Isolate a policy transition around the actual nonindexed document verifier.
+    static DOCUMENT_POLICY_TEST_HOOKS: std::cell::RefCell<Option<(PolicyTransitionTestHook, PolicyTransitionTestHook)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Restore policy after inner evidence validation, before outer admission checks.
+    static AFTER_EXACT_POLICY_TEST_HOOK: std::cell::RefCell<Option<PolicyTransitionTestHook>> =
+        const { std::cell::RefCell::new(None) };
+    /// Restore policy after a mutation's exact saved-source check, before its final fence.
+    static AFTER_SAVED_SOURCE_TEST_HOOK: std::cell::RefCell<Option<PolicyTransitionTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Compare source with the generation whose complete publication contract was verified.
 fn assess_source_against_publication(
     store: &AtlasStore,
@@ -1294,8 +1477,30 @@ fn assess_source_against_publication(
 ) -> Result<IndexFreshnessAssessment, CliError> {
     #[cfg(test)]
     let walk_timing = ReadStage::SourceWalk.start();
-    let scan = scan_repo_controlled_with_work(&plan.root, &plan.scan_options, scan_limits, control)
-        .map_err(|source| source_inspection_error(&plan.root, source))?;
+    #[cfg(test)]
+    let after_walk = SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+        hooks
+            .take()
+            .map(|(before, after)| before().map(|()| after))
+            .transpose()
+    })?;
+    let scan = scan_repo_controlled_with_policy_evidence(
+        &plan.root,
+        &plan.scan_options,
+        scan_limits,
+        control,
+    );
+    #[cfg(test)]
+    if let Some(after) = after_walk {
+        after()?;
+    }
+    let (scan, policy) = scan.map_err(|source| source_inspection_error(&plan.root, source))?;
+    if !policy
+        .is_current(control)
+        .map_err(|source| source_inspection_error(&plan.root, source))?
+    {
+        return Err(source_changed_during_derivation(&plan.root, "."));
+    }
     #[cfg(test)]
     drop(walk_timing);
     #[cfg(test)]
@@ -1314,14 +1519,32 @@ fn assess_source_against_publication(
         delta.record(Some(node), None);
     }
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    let (document_projection_changed, document_statements) =
-        graph_projection::nonindexed_document_projection_changed(
-            store,
-            &plan.root,
-            &current_nodes,
-            &plan.scan_options,
-            control,
-        )?;
+    #[cfg(test)]
+    let after_documents = DOCUMENT_POLICY_TEST_HOOKS.with_borrow_mut(|hooks| {
+        hooks
+            .take()
+            .map(|(before, after)| before().map(|()| after))
+            .transpose()
+    })?;
+    let documents = graph_projection::nonindexed_document_projection_changed_recorded(
+        store,
+        &plan.root,
+        &current_nodes,
+        &plan.scan_options,
+        control,
+    );
+    #[cfg(test)]
+    if let Some(after) = after_documents {
+        after()?;
+    }
+    let (document_projection_changed, document_statements, document_policy) = documents?;
+    if let Some(policy) = &document_policy
+        && !policy
+            .is_current(control)
+            .map_err(|source| source_inspection_error(&plan.root, source))?
+    {
+        return Err(source_changed_during_derivation(&plan.root, "."));
+    }
     work.sqlite_read_statements = work
         .sqlite_read_statements
         .saturating_add(document_statements);
@@ -1355,6 +1578,10 @@ fn assess_source_against_publication(
             generation,
             nodes: current_nodes,
             document_projection_changed,
+            policies: Arc::new(VerifiedPolicyInputs {
+                source: policy,
+                documents: document_policy,
+            }),
         },
     })
 }
@@ -3219,6 +3446,13 @@ fn stage_full_index_publication_from_source(
         .into());
     }
     let contract_fingerprint = plan.publication_contract_fingerprint();
+    // Policy changes invalidate captured selection, not the supported full
+    // reconciliation operation. Keep the original identity/generation fence,
+    // then discover current nodes through the ordinary full owner.
+    let captured = match captured {
+        Some(source) if source.policies.is_current(&plan.root, control)? => Some(source),
+        _ => None,
+    };
     let (previous_hashes, previous_work) = if reuse_unchanged_symbols {
         let (hashes, work) = indexed_file_hashes(store, control)?;
         (Some(hashes), work)
@@ -8894,6 +9128,10 @@ pub(crate) fn refresh_index_from_assessment_controlled(
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
     verify_captured_source_identity(store, plan, &assessment.source)?;
+    if !assessment.source.policies.is_current(&plan.root, control)? {
+        let reuse = publication_contract_matches(store, plan)?;
+        return refresh_full_index_controlled(store, plan, symbol_options, reuse, control);
+    }
     match assessment.delta {
         None => {
             let work_control = index_budget::unchanged_control(
@@ -9182,6 +9420,9 @@ fn attempt_incremental_refresh_controlled(
     let base_generation = publication_base_generation(store)?;
     if let Some(source) = &captured {
         verify_captured_source_identity(store, plan, source)?;
+        if !source.policies.is_current(root, control)? {
+            return Ok(None);
+        }
     }
     let mut baseline_nodes = Vec::new();
     if captured.is_none() {

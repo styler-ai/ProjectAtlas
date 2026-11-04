@@ -3,10 +3,12 @@
 pub mod worktree;
 
 mod git_config;
+mod policy_evidence;
 mod policy_match;
 mod regular_file;
 mod source_reader;
 
+pub use policy_evidence::{ObservedRootScanPolicy, ScanPolicyEvidence};
 pub use policy_match::{PolicyMatchError, PolicyMatchLimits, PolicyMatchResource, RootScanMatcher};
 pub use regular_file::open_regular_file;
 
@@ -164,6 +166,16 @@ impl RootScanPolicy {
         options: &ScanOptions,
         control: &IndexWorkControl,
     ) -> FsResult<Self> {
+        Self::discover_recorded(root, options, control, None)
+    }
+
+    /// Discover policy with optional operation-owned consumed-input evidence.
+    fn discover_recorded(
+        root: &Path,
+        options: &ScanOptions,
+        control: &IndexWorkControl,
+        capture: Option<&Arc<policy_evidence::PolicyCapture>>,
+    ) -> FsResult<Self> {
         control.check(IndexWorkStage::RepositoryTraversal)?;
         if root.as_os_str().is_empty() {
             return Err(FsError::RootNotDirectory(root.to_path_buf()));
@@ -217,7 +229,16 @@ impl RootScanPolicy {
             .git_global(false)
             .require_git(false)
             .current_dir(root.clone());
-        let external = git_config::ExternalGitConfig::discover(&root, control)?;
+        if let Some(capture) = capture {
+            walker.ignore_file_source(Arc::new(policy_evidence::PolicyFileSource(Arc::clone(
+                capture,
+            ))));
+        }
+        let external = git_config::ExternalGitConfig::discover_recorded(
+            &root,
+            control,
+            capture.map(Arc::as_ref),
+        )?;
         if let Some(path) = external.excludes {
             match fs::metadata(&path) {
                 Ok(metadata) => {
@@ -229,7 +250,19 @@ impl RootScanPolicy {
                         });
                     }
                 }
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    if let Some(capture) = capture {
+                        ignore::IgnoreFileSource::absent(
+                            &policy_evidence::PolicyFileSource(Arc::clone(capture)),
+                            &path,
+                            ignore::IgnoreFileKind::Rules,
+                        )
+                        .map_err(|source| FsError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    }
+                }
                 Err(source) => return Err(FsError::Io { path, source }),
             }
         }
@@ -496,6 +529,42 @@ pub fn scan_repo_controlled_with_work(
     control: &IndexWorkControl,
 ) -> FsResult<ScanOutcome> {
     let policy = RootScanPolicy::discover(root, options, control)?;
+    scan_repo_with_policy(policy, limits, control)
+}
+
+/// Scan once and return transient evidence of the policy inputs actually consumed.
+///
+/// Call [`ScanPolicyEvidence::is_current`] at the enclosing admission/publication
+/// boundary before treating this result as current source under a policy witness.
+/// Existing [`ScanOutcome`] construction and compatibility remain unchanged.
+///
+/// # Errors
+/// Returns the scanner's existing filesystem, resource and cooperative-work errors.
+pub fn scan_repo_controlled_with_policy_evidence(
+    root: &Path,
+    options: &ScanOptions,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<(ScanOutcome, ScanPolicyEvidence)> {
+    let ObservedRootScanPolicy {
+        policy,
+        capture,
+        worktree_prefixes,
+    } = ObservedRootScanPolicy::discover(root, options, limits, control)?;
+    let root = policy.root.clone();
+    let scan = scan_repo_with_policy(policy, limits, control);
+    capture.check_failure()?;
+    let scan = scan?;
+    let evidence = policy_evidence::PolicyCapture::finish(capture, root, worktree_prefixes)?;
+    Ok((scan, evidence))
+}
+
+/// Run the canonical parallel walker using its already compiled root policy.
+fn scan_repo_with_policy(
+    policy: RootScanPolicy,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<ScanOutcome> {
     let root = policy.root;
     let source_reader = SourceRootReader::open(&root)?;
     let options = policy.options;

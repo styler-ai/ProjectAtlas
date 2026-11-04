@@ -9,6 +9,11 @@ members = [
     "crates/projectatlas-symbols",
 ]
 resolver = "3"
+exclude = ["vendor/ignore"]
+
+[patch.crates-io]
+# Preserve canonical matching while exposing operation-owned policy input reads.
+ignore = { path = "vendor/ignore" }
 
 [workspace.package]
 version = "0.5.0"

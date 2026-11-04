@@ -23,8 +23,8 @@ const NO_SYSTEM_CONFIG_ENV: &str = "GIT_CONFIG_NOSYSTEM";
 const XDG_CONFIG_ENV: &str = "XDG_CONFIG_HOME";
 
 /// Captured native environment values; construction never changes process state.
-#[derive(Default)]
-struct ConfigEnvironment {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ConfigEnvironment {
     /// Existing host home-directory context.
     home: Option<PathBuf>,
     /// Nonempty XDG directory, or the home fallback when absent.
@@ -39,7 +39,7 @@ struct ConfigEnvironment {
 
 impl ConfigEnvironment {
     /// Capture only the supported direct-source selectors.
-    fn capture() -> Self {
+    pub(super) fn capture() -> Self {
         Self {
             home: home_directory(),
             xdg: std::env::var_os(XDG_CONFIG_ENV).filter(|value| !value.is_empty()),
@@ -65,13 +65,40 @@ impl ExternalGitConfig {
         Self::from_environment(root, &ConfigEnvironment::capture(), control)
     }
 
+    /// Retain exactly the bytes supplied to parsing, without another config read.
+    pub(super) fn discover_recorded(
+        root: &Path,
+        control: &IndexWorkControl,
+        capture: Option<&super::policy_evidence::PolicyCapture>,
+    ) -> FsResult<Self> {
+        Self::from_environment_recorded(root, &ConfigEnvironment::capture(), control, capture)
+    }
+
     /// Resolve a captured environment without adding mutable global test state.
     fn from_environment(
         root: &Path,
         environment: &ConfigEnvironment,
         control: &IndexWorkControl,
     ) -> FsResult<Self> {
+        Self::from_environment_recorded(root, environment, control, None)
+    }
+
+    /// Parse direct sources while optionally recording their consumed contents.
+    fn from_environment_recorded(
+        root: &Path,
+        environment: &ConfigEnvironment,
+        control: &IndexWorkControl,
+        capture: Option<&super::policy_evidence::PolicyCapture>,
+    ) -> FsResult<Self> {
         control.check(IndexWorkStage::RepositoryTraversal)?;
+        if let Some(capture) = capture {
+            capture
+                .environment(environment)
+                .map_err(|source| FsError::Io {
+                    path: root.to_path_buf(),
+                    source,
+                })?;
+        }
         let xdg = environment
             .xdg
             .as_ref()
@@ -116,7 +143,16 @@ impl ExternalGitConfig {
         let mut configured = None;
         let mut total = 0_u64;
         for source in &sources {
-            let Some(bytes) = read_config(source, &mut total, control)? else {
+            let bytes = read_config(source, &mut total, control)?;
+            if let Some(capture) = capture {
+                capture
+                    .config(source, bytes.as_deref())
+                    .map_err(|error| FsError::Io {
+                        path: source.clone(),
+                        source: error,
+                    })?;
+            }
+            let Some(bytes) = bytes else {
                 continue;
             };
             let config = gix_config::File::from_bytes_no_includes(

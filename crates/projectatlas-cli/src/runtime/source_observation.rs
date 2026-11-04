@@ -6,13 +6,14 @@ pub(super) mod read_timing;
 #[cfg(test)]
 use read_timing::Stage as ReadStage;
 
+#[cfg(test)]
+use super::verify_saved_source_matches_index_controlled;
 use super::{
     ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
     open_exact_saved_source_matches_index_controlled,
     policy_watch::{PolicyWatchInputs, PolicyWatchSelection},
     publication_input_error, source_changed_during_derivation, source_inspection_error,
-    verify_saved_source_matches_index_controlled,
 };
 use crate::CliError;
 use blake3::Hasher;
@@ -140,6 +141,7 @@ impl SourceRepairPolicy {
                     Ok(SourceReadAdmission::Current(super::ExactFreshIndexRead {
                         store,
                         work: assessment.work,
+                        policies: assessment.source.policies,
                     }))
                 }
             }
@@ -245,6 +247,8 @@ pub(crate) struct VerifiedMutationAdmission {
     witness: MutationSourceWitness,
     /// Cooperative cancellation and work budget shared through commit admission.
     control: IndexWorkControl,
+    /// Consumed input proof owned by this mutation, never by a retained epoch.
+    policies: Arc<super::VerifiedPolicyInputs>,
 }
 
 impl VerifiedMutationAdmission {
@@ -252,14 +256,26 @@ impl VerifiedMutationAdmission {
     pub(crate) fn verify(&self, store: &AtlasStore) -> Result<(), CliError> {
         match &self.witness {
             MutationSourceWitness::Observed { entry, epoch } => {
-                Self::verify_observed(entry, epoch, store, &self.control, || {
-                    verify_saved_source_matches_index_controlled(
+                let verified = Self::verify_observed(entry, epoch, store, &self.control, || {
+                    super::verify_saved_source_policy_controlled(
                         &entry.binding.database,
                         &entry.binding.root,
                         entry.binding.config.as_deref(),
                         &self.control,
                     )
-                })
+                })?;
+                match SourceObservationRegistry::accepts_observed_result_with_policy(
+                    entry,
+                    epoch,
+                    store,
+                    &self.control,
+                    &[self.policies.as_ref(), verified.as_ref()],
+                )? {
+                    ObservedAcceptance::Accepted => Ok(()),
+                    ObservedAcceptance::Invalidated | ObservedAcceptance::Superseded => {
+                        Err(source_changed_during_derivation(&entry.binding.root, "."))
+                    }
+                }
             }
             MutationSourceWitness::Exact {
                 binding,
@@ -267,26 +283,33 @@ impl VerifiedMutationAdmission {
                 contract_fingerprint,
                 policy_witness,
                 database_identity,
-            } => Self::verify_exact(
-                binding,
-                stamp,
-                contract_fingerprint,
-                policy_witness,
-                database_identity.as_ref(),
-                store,
-                &self.control,
-            ),
+            } => {
+                Self::verify_exact(
+                    binding,
+                    stamp,
+                    contract_fingerprint,
+                    policy_witness,
+                    database_identity.as_ref(),
+                    store,
+                    &self.control,
+                )?;
+                self.policies.verify(&binding.root, &self.control)?;
+                if !binding.matches_database_store(database_identity.as_ref(), store) {
+                    return Err(source_changed_during_derivation(&binding.root, "."));
+                }
+                Ok(())
+            }
         }
     }
 
     /// Revalidate an observer-backed mutation witness around exact saved source.
-    fn verify_observed(
+    fn verify_observed<T>(
         entry: &SourceObservationEntry,
         epoch: &VerifiedSourceEpoch,
         store: &AtlasStore,
         control: &IndexWorkControl,
-        verify_source: impl FnOnce() -> Result<(), CliError>,
-    ) -> Result<(), CliError> {
+        verify_source: impl FnOnce() -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
         if let Err(error) = Self::verify_observation(entry, epoch, store, control) {
             #[cfg(test)]
             report_observation_test_diagnostic(format_args!(
@@ -295,18 +318,21 @@ impl VerifiedMutationAdmission {
             entry.invalidate_epoch(epoch);
             return Err(error);
         }
-        if let Err(error) = verify_source() {
-            #[cfg(test)]
-            report_observation_test_diagnostic(format_args!(
-                "mutation exact-source comparison rejected: error={error}, entry={entry:?}"
-            ));
-            if matches!(error, CliError::RefreshRequired(_)) {
-                entry.invalidate_after_proven_source_mismatch()?;
-            } else {
-                entry.invalidate_epoch(epoch);
+        let verified = match verify_source() {
+            Ok(verified) => verified,
+            Err(error) => {
+                #[cfg(test)]
+                report_observation_test_diagnostic(format_args!(
+                    "mutation exact-source comparison rejected: error={error}, entry={entry:?}"
+                ));
+                if matches!(error, CliError::RefreshRequired(_)) {
+                    entry.invalidate_after_proven_source_mismatch()?;
+                } else {
+                    entry.invalidate_epoch(epoch);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         if let Err(error) = Self::verify_observation(entry, epoch, store, control) {
             #[cfg(test)]
             report_observation_test_diagnostic(format_args!(
@@ -315,7 +341,7 @@ impl VerifiedMutationAdmission {
             entry.invalidate_epoch(epoch);
             return Err(error);
         }
-        Ok(())
+        Ok(verified)
     }
 
     /// Require the retained observer epoch to remain current.
@@ -358,6 +384,11 @@ impl VerifiedMutationAdmission {
             binding.config.as_deref(),
             control,
         )?;
+        exact.policies.verify(&binding.root, control)?;
+        #[cfg(test)]
+        if let Some(after) = super::AFTER_SAVED_SOURCE_TEST_HOOK.with_borrow_mut(Option::take) {
+            after()?;
+        }
         let verification = (|| {
             let publication = exact
                 .store
@@ -365,6 +396,7 @@ impl VerifiedMutationAdmission {
                 .ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
             let captured = exact.store.captured_project_binding()?;
             let after = exact_source_policy(binding, control)?;
+            exact.policies.verify(&binding.root, control)?;
             let database_matches = binding.matches_database_store(database_identity, &exact.store)
                 && binding.matches_database_store(database_identity, mutation_store);
             Ok::<_, CliError>((publication, captured, after, database_matches))
@@ -1456,7 +1488,7 @@ impl SourceObservationRegistry {
             return self.admit_exact_mutation(binding, control);
         };
         let mut work = VerifiedReadWork::default();
-        for attempt in 0..VERIFIED_READ_ATTEMPTS {
+        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
             let previous = entry.current_stamp()?;
             if let Err(error) = control.check(IndexWorkStage::Publication) {
                 if let Some(stamp) = previous {
@@ -1464,17 +1496,25 @@ impl SourceObservationRegistry {
                 }
                 return Err(error.into());
             }
-            let (store, epoch) =
-                match self.prepare_observed_store(&entry, control, &mut work, attempt == 0) {
-                    Ok(Some(prepared)) => prepared,
-                    Ok(None) => {
-                        return self.admit_exact_mutation(binding, control);
-                    }
-                    Err(CliError::Watcher(_unavailable)) => {
-                        return self.admit_exact_mutation(binding, control);
-                    }
-                    Err(error) => return Err(error),
-                };
+            let (store, epoch, policies) = match self
+                .prepare_observed_store_with_policy(
+                    &entry,
+                    control,
+                    &mut work,
+                    true,
+                    SourceRepairPolicy::Incremental,
+                )
+                .and_then(SourceReadAdmission::require_current)
+            {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    return self.admit_exact_mutation(binding, control);
+                }
+                Err(CliError::Watcher(_unavailable)) => {
+                    return self.admit_exact_mutation(binding, control);
+                }
+                Err(error) => return Err(error),
+            };
             #[cfg(test)]
             if self
                 .mutation_acceptance_invalidations
@@ -1485,7 +1525,15 @@ impl SourceObservationRegistry {
             {
                 entry.continuity_lost.store(true, Ordering::Release);
             }
-            match Self::accepts_observed_result(&entry, &epoch, &store, control) {
+            let policies =
+                policies.ok_or_else(|| source_changed_during_derivation(&binding.root, "."))?;
+            match Self::accepts_observed_result_with_policy(
+                &entry,
+                &epoch,
+                &store,
+                control,
+                &[policies.as_ref()],
+            ) {
                 Ok(ObservedAcceptance::Accepted) => {
                     if let Err(error) = store.finish_index_read_snapshot() {
                         entry.invalidate_epoch(&epoch);
@@ -1494,6 +1542,7 @@ impl SourceObservationRegistry {
                     return Ok(VerifiedMutationAdmission {
                         witness: MutationSourceWitness::Observed { entry, epoch },
                         control: control.clone(),
+                        policies,
                     });
                 }
                 Ok(ObservedAcceptance::Superseded | ObservedAcceptance::Invalidated) => {}
@@ -1534,6 +1583,7 @@ impl SourceObservationRegistry {
                 drop(exact.store.finish_index_read_snapshot());
                 continue;
             }
+            exact.policies.verify(&binding.root, control)?;
             let stamp = match self.exact_stamp(&exact.store, &binding.root) {
                 Ok(stamp) => stamp,
                 Err(error) => {
@@ -1552,6 +1602,7 @@ impl SourceObservationRegistry {
                     database_identity,
                 },
                 control: control.clone(),
+                policies: exact.policies,
             });
         }
         Err(source_changed_during_derivation(&binding.root, "."))
@@ -1628,7 +1679,7 @@ impl SourceObservationRegistry {
                 }
                 return Err(error.into());
             }
-            let (store, epoch) = match self
+            let (store, epoch, policies) = match self
                 .prepare_observed_store_with_policy(entry, control, &mut work, false, repair)
             {
                 Ok(SourceReadAdmission::Current(Some(prepared))) => prepared,
@@ -1650,7 +1701,13 @@ impl SourceObservationRegistry {
                     return Err(error);
                 }
             };
-            match Self::accepts_observed_result(entry, &epoch, &store, control) {
+            match Self::accepts_observed_result_with_policy(
+                entry,
+                &epoch,
+                &store,
+                control,
+                policies.as_deref().as_slice(),
+            ) {
                 Ok(ObservedAcceptance::Accepted) => {
                     store.finish_index_read_snapshot()?;
                     work.elapsed = started.elapsed();
@@ -1676,6 +1733,7 @@ impl SourceObservationRegistry {
     }
 
     /// Open a snapshot backed by a current epoch or establish a new exact epoch.
+    #[cfg(test)]
     fn prepare_observed_store(
         &self,
         entry: &SourceObservationEntry,
@@ -1691,6 +1749,7 @@ impl SourceObservationRegistry {
             SourceRepairPolicy::Incremental,
         )
         .and_then(SourceReadAdmission::require_current)
+        .map(|prepared| prepared.map(|(store, epoch, _policies)| (store, epoch)))
     }
 
     /// Establish or reuse an observed epoch with an explicit source-repair policy.
@@ -1701,7 +1760,16 @@ impl SourceObservationRegistry {
         work: &mut VerifiedReadWork,
         force_exact: bool,
         repair: SourceRepairPolicy,
-    ) -> Result<SourceReadAdmission<Option<(AtlasStore, VerifiedSourceEpoch)>>, CliError> {
+    ) -> Result<
+        SourceReadAdmission<
+            Option<(
+                AtlasStore,
+                VerifiedSourceEpoch,
+                Option<Arc<super::VerifiedPolicyInputs>>,
+            )>,
+        >,
+        CliError,
+    > {
         let _reconcile = entry
             .reconcile
             .lock()
@@ -1747,7 +1815,7 @@ impl SourceObservationRegistry {
                             .binding
                             .matches_database_store(epoch.database_identity.as_ref(), &store)
                     {
-                        return Ok(SourceReadAdmission::Current(Some((store, epoch))));
+                        return Ok(SourceReadAdmission::Current(Some((store, epoch, None))));
                     }
                     entry.invalidate();
                     drop(store.finish_index_read_snapshot());
@@ -1777,6 +1845,12 @@ impl SourceObservationRegistry {
                 let exact_timing = ReadStage::ExactRead.start();
                 let admission = repair.open_exact(&entry.binding, Some(&before_plan), control)?;
                 #[cfg(test)]
+                if let Some(after) =
+                    super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take)
+                {
+                    after()?;
+                }
+                #[cfg(test)]
                 drop(exact_timing);
                 if let SourceReadAdmission::Current(exact) = &admission {
                     work.add_exact(exact.work);
@@ -1800,6 +1874,10 @@ impl SourceObservationRegistry {
                 let exact = match admission {
                     SourceReadAdmission::Current(exact) => exact,
                     SourceReadAdmission::Reconcile(assessment) => {
+                        assessment
+                            .source
+                            .policies
+                            .verify(&entry.binding.root, control)?;
                         return Ok(SourceReadAdmission::Reconcile(assessment));
                     }
                 };
@@ -1818,6 +1896,7 @@ impl SourceObservationRegistry {
                     .index_publication()?
                     .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
                 let captured = exact.store.captured_project_binding()?;
+                exact.policies.verify(&entry.binding.root, control)?;
                 let database_identity = exact.store.database_file_identity();
                 work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
                 let receiver = entry.receiver.lock().map_err(|_poisoned| {
@@ -1845,7 +1924,11 @@ impl SourceObservationRegistry {
                     (before_contract, before_policy),
                     database_identity,
                 )?;
-                return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
+                return Ok(SourceReadAdmission::Current(Some((
+                    exact.store,
+                    epoch,
+                    Some(exact.policies),
+                ))));
             }
             Ok(SourceReadAdmission::Current(None))
         })();
@@ -1863,6 +1946,17 @@ impl SourceObservationRegistry {
         epoch: &VerifiedSourceEpoch,
         store: &AtlasStore,
         control: &IndexWorkControl,
+    ) -> Result<ObservedAcceptance, CliError> {
+        Self::accepts_observed_result_with_policy(entry, epoch, store, control, &[])
+    }
+
+    /// Retain operation-owned consumed inputs through the final callback fence.
+    fn accepts_observed_result_with_policy(
+        entry: &SourceObservationEntry,
+        epoch: &VerifiedSourceEpoch,
+        store: &AtlasStore,
+        control: &IndexWorkControl,
+        policies: &[&super::VerifiedPolicyInputs],
     ) -> Result<ObservedAcceptance, CliError> {
         #[cfg(test)]
         let _timing = ReadStage::Acceptance.start();
@@ -1954,6 +2048,13 @@ impl SourceObservationRegistry {
                 return Ok(ObservedAcceptance::Superseded);
             }
             if current.ingress_sequence == entry.ingress_sequence.load(Ordering::Acquire) {
+                for policy in policies {
+                    if let Err(error) = policy.verify(&entry.binding.root, control) {
+                        state.verified = None;
+                        entry.continuity_lost.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                }
                 return Ok(ObservedAcceptance::Accepted);
             }
         }
@@ -1977,6 +2078,7 @@ impl SourceObservationRegistry {
             let exact = match repair.open_exact(binding, None, control)? {
                 SourceReadAdmission::Current(exact) => exact,
                 SourceReadAdmission::Reconcile(assessment) => {
+                    assessment.source.policies.verify(&binding.root, control)?;
                     return Ok(SourceReadAdmission::Reconcile(assessment));
                 }
             };
@@ -1988,6 +2090,7 @@ impl SourceObservationRegistry {
             let post = match repair.open_exact(binding, None, control)? {
                 SourceReadAdmission::Current(exact) => exact,
                 SourceReadAdmission::Reconcile(assessment) => {
+                    assessment.source.policies.verify(&binding.root, control)?;
                     return Ok(SourceReadAdmission::Reconcile(assessment));
                 }
             };
@@ -1995,10 +2098,16 @@ impl SourceObservationRegistry {
             let post_publication = post.store.index_publication()?;
             let post_binding = post.store.captured_project_binding()?;
             post.store.finish_index_read_snapshot()?;
+            #[cfg(test)]
+            if let Some(after) = super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take) {
+                after()?;
+            }
             if post_publication.is_some_and(|candidate| {
                 candidate.generation == stamp.generation
                     && post_binding.project_instance_id == stamp.project_instance_id
             }) {
+                exact.policies.verify(&binding.root, control)?;
+                post.policies.verify(&binding.root, control)?;
                 work.elapsed = started.elapsed();
                 return Ok(SourceReadAdmission::Current(VerifiedReadOutcome {
                     value,
@@ -2390,6 +2499,989 @@ mod tests {
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
+    }
+
+    #[test]
+    fn exact_admission_binds_policy_to_the_source_walk() -> Result<(), Box<dyn Error>> {
+        const CHILD_ROOT: &str = "PROJECTATLAS_TEST_POLICY_ADMISSION_ROOT";
+        const CHILD_CASE: &str = "PROJECTATLAS_TEST_POLICY_ADMISSION_CASE";
+        const CHILD_PHASE: &str = "PROJECTATLAS_TEST_POLICY_ADMISSION_PHASE";
+        let Some(root) = std::env::var_os(CHILD_ROOT) else {
+            let mut failures = Vec::new();
+            for case in [
+                "config",
+                "config-replace",
+                "global-rules",
+                "git-exclude",
+                "git-directory-replace",
+                "linked-git-pointer",
+                "linked-commondir",
+                "worktree-registration",
+                "worktree-registration-existing",
+                "root-gitignore",
+                "root-ignore",
+                "nested-gitignore",
+                "nested-ignore",
+            ] {
+                for phase in ["walk", "admission"] {
+                    let temp = tempfile::tempdir()?;
+                    let root = temp.path().join("repo");
+                    fs::create_dir(&root)?;
+                    let rules = temp.path().join("selected.ignore");
+                    fs::write(&rules, "")?;
+                    let config = temp.path().join("selected.gitconfig");
+                    fs::write(&config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+                    let output = std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "runtime::source_observation::tests::exact_admission_binds_policy_to_the_source_walk",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_ROOT, &root)
+                    .env(CHILD_CASE, case)
+                    .env(CHILD_PHASE, phase)
+                    .env("GIT_CONFIG_GLOBAL", &config)
+                    .env("GIT_CONFIG_SYSTEM", "")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()?;
+                    if !output.status.success() {
+                        failures.push(format!(
+                            "{case}/{phase}: stdout={} stderr={}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        ));
+                    }
+                }
+            }
+            return require(
+                failures.is_empty(),
+                &format!(
+                    "isolated source-policy admission failures: {}",
+                    failures.join("\n")
+                ),
+            );
+        };
+        let root = PathBuf::from(root);
+        let case = std::env::var(CHILD_CASE)?;
+        let phase = std::env::var(CHILD_PHASE)?;
+        let parent = root.parent().ok_or("fixture root has no parent")?;
+        let config = parent.join("selected.gitconfig");
+        let selected_rules = parent.join("selected.ignore");
+        let alternate_rules = parent.join("alternate.ignore");
+        fs::write(&alternate_rules, "new.rs\n")?;
+        let registration = case.starts_with("worktree-registration");
+        let nested = case.starts_with("nested-") || registration;
+        if nested && !registration {
+            fs::create_dir(root.join("nested"))?;
+        }
+        let new_source = if nested { "nested/new.rs" } else { "new.rs" };
+        let run_git = |command: &mut std::process::Command| -> Result<(), Box<dyn Error>> {
+            let output = command.output()?;
+            require(
+                output.status.success(),
+                &format!(
+                    "Git policy fixture failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )
+        };
+        let mut registration_move = None;
+        let mut pending_checkout = None;
+        let (policy_path, alternate_bytes) = match case.as_str() {
+            "config" | "config-replace" => (
+                config,
+                format!("[core]\nexcludesFile = {alternate_rules:?}\n").into_bytes(),
+            ),
+            "global-rules" => (selected_rules, b"new.rs\n".to_vec()),
+            "git-exclude" | "git-directory-replace" => {
+                let output = std::process::Command::new("git")
+                    .args(["init", "--quiet"])
+                    .arg(&root)
+                    .output()?;
+                require(
+                    output.status.success(),
+                    "Git exclusion fixture initialization failed",
+                )?;
+                (root.join(".git/info/exclude"), b"new.rs\n".to_vec())
+            }
+            "linked-git-pointer" | "linked-commondir" => {
+                let main = parent.join("main");
+                run_git(
+                    std::process::Command::new("git")
+                        .args(["init", "--quiet"])
+                        .arg(&main),
+                )?;
+                run_git(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&main)
+                        .args([
+                            "-c",
+                            "user.name=Policy Fixture",
+                            "-c",
+                            "user.email=policy-fixture@example.invalid",
+                            "commit",
+                            "--quiet",
+                            "--allow-empty",
+                            "-m",
+                            "fixture",
+                        ]),
+                )?;
+                run_git(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&main)
+                        .args(["worktree", "add", "--quiet", "--detach"])
+                        .arg(&root)
+                        .arg("HEAD"),
+                )?;
+                let alternate_main = parent.join("alternate-main");
+                run_git(
+                    std::process::Command::new("git")
+                        .args(["init", "--quiet"])
+                        .arg(&alternate_main),
+                )?;
+                fs::write(alternate_main.join(".git/info/exclude"), "new.rs\n")?;
+                if case == "linked-commondir" {
+                    let pointer = fs::read_to_string(root.join(".git"))?;
+                    let admin = PathBuf::from(
+                        pointer
+                            .trim()
+                            .strip_prefix("gitdir: ")
+                            .ok_or("missing linked fixture pointer")?,
+                    );
+                    (
+                        admin.join("commondir"),
+                        format!("{}\n", alternate_main.join(".git").display()).into_bytes(),
+                    )
+                } else {
+                    run_git(
+                        std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&alternate_main)
+                            .args([
+                                "-c",
+                                "user.name=Policy Fixture",
+                                "-c",
+                                "user.email=policy-fixture@example.invalid",
+                                "commit",
+                                "--quiet",
+                                "--allow-empty",
+                                "-m",
+                                "fixture",
+                            ]),
+                    )?;
+                    let alternate_checkout = parent.join("alternate-checkout");
+                    run_git(
+                        std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&alternate_main)
+                            .args(["worktree", "add", "--quiet", "--detach"])
+                            .arg(&alternate_checkout)
+                            .arg("HEAD"),
+                    )?;
+                    let alternate_pointer = fs::read(alternate_checkout.join(".git"))?;
+                    let alternate_admin = PathBuf::from(
+                        std::str::from_utf8(&alternate_pointer)?
+                            .trim()
+                            .strip_prefix("gitdir: ")
+                            .ok_or("missing alternate linked pointer")?,
+                    );
+                    fs::write(
+                        alternate_admin.join("gitdir"),
+                        format!("{}\n", root.join(".git").display()),
+                    )?;
+                    (root.join(".git"), alternate_pointer)
+                }
+            }
+            "worktree-registration" | "worktree-registration-existing" => {
+                run_git(
+                    std::process::Command::new("git")
+                        .args(["init", "--quiet"])
+                        .arg(&root),
+                )?;
+                run_git(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&root)
+                        .args([
+                            "-c",
+                            "user.name=Policy Fixture",
+                            "-c",
+                            "user.email=policy-fixture@example.invalid",
+                            "commit",
+                            "--quiet",
+                            "--allow-empty",
+                            "-m",
+                            "fixture",
+                        ]),
+                )?;
+                let checkout = root.join("nested");
+                run_git(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&root)
+                        .args(["worktree", "add", "--quiet", "--detach"])
+                        .arg(&checkout)
+                        .arg("HEAD"),
+                )?;
+                let pointer_path = checkout.join(".git");
+                let registered_pointer = fs::read(&pointer_path)?;
+                let active_admin = PathBuf::from(
+                    std::str::from_utf8(&registered_pointer)?
+                        .trim()
+                        .strip_prefix("gitdir: ")
+                        .ok_or("missing registered fixture pointer")?,
+                );
+                let detached_admin = parent.join("detached-admin");
+                fs::rename(&active_admin, &detached_admin)?;
+                fs::write(
+                    detached_admin.join("commondir"),
+                    format!("{}\n", root.join(".git").display()),
+                )?;
+                fs::write(
+                    &pointer_path,
+                    format!("gitdir: {}\n", detached_admin.display()),
+                )?;
+                // Both selections are real working Git checkouts. Only the
+                // common directory's registration inventory differs.
+                run_git(
+                    std::process::Command::new("git")
+                        .arg("-C")
+                        .arg(&checkout)
+                        .args(["rev-parse", "--git-common-dir"]),
+                )?;
+                registration_move = Some((detached_admin, active_admin));
+                if case == "worktree-registration" {
+                    pending_checkout = Some((checkout, parent.join("pending-checkout")));
+                }
+                (pointer_path, registered_pointer)
+            }
+            "root-gitignore" | "nested-gitignore" => {
+                let path = if nested {
+                    root.join("nested/.gitignore")
+                } else {
+                    root.join(".gitignore")
+                };
+                fs::write(&path, ".gitignore\n")?;
+                (path, b".gitignore\nnew.rs\n".to_vec())
+            }
+            "root-ignore" | "nested-ignore" => {
+                let path = if nested {
+                    root.join("nested/.ignore")
+                } else {
+                    root.join(".ignore")
+                };
+                fs::write(&path, ".ignore\n")?;
+                (path, b".ignore\nnew.rs\n".to_vec())
+            }
+            _ => return Err("unknown isolated policy admission case".into()),
+        };
+        let original_bytes = fs::read(&policy_path)?;
+        let restored_bytes = original_bytes.clone();
+        if let Some((checkout, pending)) = &pending_checkout {
+            fs::rename(checkout, pending)?;
+        }
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let initial = registry
+            .with_verified_current_read(
+                &database,
+                &root,
+                None,
+                &test_control(),
+                |store, _stamp| Ok(store.index_publication()?),
+            )?
+            .require_current()?;
+        // Model the permitted asynchronous schedule in which callbacks remain
+        // upstream of ingress throughout this request. The scanner and every
+        // policy/SQLite admission and acceptance check remain real.
+        detach_native_delivery(&registry, &database, &root)?;
+        if let Some((checkout, pending)) = pending_checkout {
+            fs::rename(pending, checkout)?;
+        }
+        fs::write(root.join(new_source), "fn appeared() {}\n")?;
+        let stable = registry.with_verified_current_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, _stamp| Ok(()),
+        )?;
+        require(
+            matches!(stable, SourceReadAdmission::Reconcile(_)),
+            "stable selected policy missed the new source",
+        )?;
+        let replace_directory = case == "git-directory-replace";
+        let before_config = if replace_directory {
+            root.join(".git")
+        } else {
+            policy_path.clone()
+        };
+        let after_config = before_config.clone();
+        let original_object = parent.join("original.gitconfig");
+        let restored_object = original_object.clone();
+        let alternate_object = if replace_directory {
+            let alternate_root = parent.join("alternate-repo");
+            let output = std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&alternate_root)
+                .output()?;
+            require(
+                output.status.success(),
+                "alternate Git fixture initialization failed",
+            )?;
+            fs::write(alternate_root.join(".git/info/exclude"), &alternate_bytes)?;
+            alternate_root.join(".git")
+        } else {
+            parent.join("alternate.gitconfig")
+        };
+        let returned_alternate_object = alternate_object.clone();
+        let replace_object = case == "config-replace" || replace_directory;
+        let restore_registration = registration_move.clone();
+        if replace_object && !replace_directory {
+            fs::write(&alternate_object, &alternate_bytes)?;
+        }
+        super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+            *hooks = Some((
+                Box::new(move || {
+                    (if let Some((detached, active)) = registration_move {
+                        fs::rename(detached, active)
+                            .and_then(|()| fs::write(&before_config, alternate_bytes))
+                    } else if replace_object {
+                        fs::rename(&before_config, original_object)
+                            .and_then(|()| fs::rename(alternate_object, &before_config))
+                    } else {
+                        fs::write(&before_config, alternate_bytes)
+                    })
+                    .map_err(|source| CliError::Io {
+                        path: before_config,
+                        source,
+                    })
+                }),
+                Box::new(move || {
+                    (if let Some((detached, active)) = restore_registration {
+                        fs::rename(active, detached)
+                            .and_then(|()| fs::write(&after_config, original_bytes))
+                    } else if replace_object {
+                        fs::rename(&after_config, returned_alternate_object)
+                            .and_then(|()| fs::rename(restored_object, &after_config))
+                    } else {
+                        fs::write(&after_config, original_bytes)
+                    })
+                    .map_err(|source| CliError::Io {
+                        path: after_config,
+                        source,
+                    })
+                }),
+            ));
+        });
+        if phase == "admission" {
+            let restore = super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+                hooks
+                    .as_mut()
+                    .map(|(_before, after)| std::mem::replace(after, Box::new(|| Ok(()))))
+            });
+            super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = restore);
+        }
+        let admission = registry.with_verified_current_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |store, _stamp| Ok(store.index_publication()?),
+        );
+        super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| *hooks = None);
+        super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+        let store = open_atlas_store_read_only_for_project(&database, &root)?;
+        require(
+            store.index_publication()? == initial.value
+                && store.load_file_text(new_source)?.is_none()
+                && fs::read(&policy_path)? == restored_bytes,
+            "policy-race admission changed the prior publication or selected rules",
+        )?;
+        match admission {
+            Ok(SourceReadAdmission::Reconcile(assessment)) => require(
+                assessment.delta.is_some_and(|delta| {
+                    delta.requires_full_scan || delta.paths.contains(&root.join(new_source))
+                }),
+                "policy-race reconciliation did not retain the new source",
+            ),
+            Err(CliError::RefreshRequired(_)) => Ok(()),
+            Ok(SourceReadAdmission::Current(_)) => {
+                Err("policy A/B/A source walk admitted a stale publication as current".into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[test]
+    fn exact_admission_binds_policy_to_absent_document_inspection() -> Result<(), Box<dyn Error>> {
+        const CHILD_ROOT: &str = "PROJECTATLAS_TEST_DOCUMENT_POLICY_ADMISSION_ROOT";
+        const CHILD_PHASE: &str = "PROJECTATLAS_TEST_DOCUMENT_POLICY_ADMISSION_PHASE";
+        let Some(root) = std::env::var_os(CHILD_ROOT) else {
+            let mut failures = Vec::new();
+            for phase in ["document", "admission"] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("repo");
+                fs::create_dir(&root)?;
+                let rules = temp.path().join("selected.ignore");
+                fs::write(&rules, "ghost.rs\n")?;
+                let config = temp.path().join("selected.gitconfig");
+                fs::write(&config, format!("[core]\nexcludesFile = {rules:?}\n"))?;
+                let output = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "runtime::source_observation::tests::exact_admission_binds_policy_to_absent_document_inspection", "--nocapture"])
+                .env(CHILD_ROOT, &root).env(CHILD_PHASE, phase).env("GIT_CONFIG_GLOBAL", &config)
+                .env("GIT_CONFIG_SYSTEM", "").env("GIT_CONFIG_NOSYSTEM", "1").output()?;
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{phase}: stdout={} stderr={}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            return require(
+                failures.is_empty(),
+                &format!(
+                    "isolated document-policy admission failures: {}",
+                    failures.join("\n")
+                ),
+            );
+        };
+        let root = PathBuf::from(root);
+        let phase = std::env::var(CHILD_PHASE)?;
+        let rules = root
+            .parent()
+            .ok_or("document fixture has no parent")?
+            .join("selected.ignore");
+        fs::write(root.join("README.md"), "[absent source](ghost.rs)\n")?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let initial = registry
+            .with_verified_current_read(
+                &database,
+                &root,
+                None,
+                &test_control(),
+                |store, _stamp| Ok(store.index_publication()?),
+            )?
+            .require_current()?;
+        detach_native_delivery(&registry, &database, &root)?;
+        fs::write(&rules, "")?;
+        require(
+            matches!(
+                registry.with_verified_current_read(
+                    &database,
+                    &root,
+                    None,
+                    &test_control(),
+                    |_store, _stamp| Ok(())
+                )?,
+                SourceReadAdmission::Reconcile(_)
+            ),
+            "stable current policy missed absent-document drift",
+        )?;
+        let before = rules.clone();
+        let after = rules.clone();
+        super::super::DOCUMENT_POLICY_TEST_HOOKS.with_borrow_mut(|hooks| {
+            *hooks = Some((
+                Box::new(move || {
+                    fs::write(&before, "ghost.rs\n").map_err(|source| CliError::Io {
+                        path: before,
+                        source,
+                    })
+                }),
+                Box::new(move || {
+                    fs::write(&after, "").map_err(|source| CliError::Io {
+                        path: after,
+                        source,
+                    })
+                }),
+            ));
+        });
+        if phase == "admission" {
+            let restore = super::super::DOCUMENT_POLICY_TEST_HOOKS.with_borrow_mut(|hooks| {
+                hooks
+                    .as_mut()
+                    .map(|(_before, after)| std::mem::replace(after, Box::new(|| Ok(()))))
+            });
+            super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = restore);
+        }
+        let admission = registry.with_verified_current_read(
+            &database,
+            &root,
+            None,
+            &test_control(),
+            |_store, _stamp| Ok(()),
+        );
+        super::super::DOCUMENT_POLICY_TEST_HOOKS.with_borrow_mut(|hooks| *hooks = None);
+        super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+        let store = open_atlas_store_read_only_for_project(&database, &root)?;
+        require(
+            store.index_publication()? == initial.value && fs::read_to_string(&rules)?.is_empty(),
+            "document-policy race changed publication or failed to restore policy",
+        )?;
+        match admission {
+            Ok(SourceReadAdmission::Reconcile(assessment)) => require(
+                assessment.delta.is_some(),
+                "document reconciliation lost its policy drift",
+            ),
+            Err(CliError::RefreshRequired(_)) => Ok(()),
+            Ok(SourceReadAdmission::Current(_)) => Err(
+                "temporary document policy admitted an obsolete unresolved reason as current"
+                    .into(),
+            ),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[test]
+    fn consumed_policy_survives_query_mutation_and_fallback_acceptance()
+    -> Result<(), Box<dyn Error>> {
+        const CHILD_ROOT: &str = "PROJECTATLAS_TEST_POLICY_FINAL_ACCEPTANCE_ROOT";
+        const CHILD_MODE: &str = "PROJECTATLAS_TEST_POLICY_FINAL_ACCEPTANCE_MODE";
+        const SELECTED: &str = ".ignore\n";
+        const TEMPORARY: &str = ".ignore\nnew.rs\n";
+        let Some(root) = std::env::var_os(CHILD_ROOT) else {
+            let mut failures = Vec::new();
+            for mode in [
+                "query",
+                "observed-mutation",
+                "exact-mutation",
+                "observed-later-edit",
+                "exact-later-edit",
+                "fallback",
+                "direct-read",
+                "federated-read",
+            ] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("repo");
+                fs::create_dir(&root)?;
+                let config = temp.path().join("empty.gitconfig");
+                fs::write(&config, "")?;
+                let output = std::process::Command::new(std::env::current_exe()?)
+                    .args(["--exact", "runtime::source_observation::tests::consumed_policy_survives_query_mutation_and_fallback_acceptance", "--nocapture"])
+                    .env(CHILD_ROOT, &root).env(CHILD_MODE, mode)
+                    .env("GIT_CONFIG_GLOBAL", &config).env("GIT_CONFIG_SYSTEM", "").env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()?;
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{mode}: stdout={} stderr={}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+            return require(
+                failures.is_empty(),
+                &format!("final policy acceptance failures: {}", failures.join("\n")),
+            );
+        };
+        let root = PathBuf::from(root);
+        let mode = std::env::var(CHILD_MODE)?;
+        fs::create_dir(root.join("nested"))?;
+        let rules = root.join("nested/.ignore");
+        fs::write(&rules, SELECTED)?;
+        let (database, _source) = indexed_project(&root)?;
+        let registry = SourceObservationRegistry::default();
+        let initial = registry
+            .with_verified_current_read(
+                &database,
+                &root,
+                None,
+                &test_control(),
+                |store, _stamp| Ok(store.index_publication()?),
+            )?
+            .require_current()?;
+        detach_native_delivery(&registry, &database, &root)?;
+        let later_edit = mode.ends_with("later-edit");
+        let peer = if mode == "federated-read" {
+            let peer = root.parent().ok_or("missing peer parent")?.join("peer");
+            let (_database, _source) = indexed_project(&peer)?;
+            Some(peer)
+        } else {
+            None
+        };
+        let mut early_admission = if later_edit {
+            Some(if mode == "observed-later-edit" {
+                registry.admit_mutation(&database, &root, None, &test_control())?
+            } else {
+                registry.admit_exact_mutation(
+                    SourceBinding::new(&database, &root, None)?,
+                    &test_control(),
+                )?
+            })
+        } else {
+            None
+        };
+        fs::write(root.join("nested/new.rs"), "fn appeared() {}\n")?;
+        if !later_edit {
+            require(
+                matches!(
+                    registry.with_verified_current_read(
+                        &database,
+                        &root,
+                        None,
+                        &test_control(),
+                        |_store, _stamp| Ok(())
+                    )?,
+                    SourceReadAdmission::Reconcile(_)
+                ),
+                "stable selected policy failed to find the saved source",
+            )?;
+        }
+
+        // Both adapters must still admit a legitimate stable selection. Keep
+        // the real primary snapshot open to prove the cleanup oracle detects it.
+        if mode == "direct-read" || mode == "federated-read" {
+            fs::write(&rules, TEMPORARY)?;
+            let oracle = rusqlite::Connection::open(&database)?;
+            oracle.busy_timeout(Duration::ZERO)?;
+            if let Some(peer) = peer.as_ref() {
+                let stores = super::super::open_federated_atlas_stores_for_project(
+                    &database,
+                    &root,
+                    None,
+                    &[root.clone(), peer.clone()],
+                    None,
+                    &test_control(),
+                )?;
+                require(
+                    oracle
+                        .pragma_update(None, "journal_mode", "DELETE")
+                        .is_err(),
+                    "cleanup oracle missed an active federated read snapshot",
+                )?;
+                for store in stores {
+                    store.finish()?;
+                }
+            } else {
+                let store = super::super::open_fresh_atlas_store_for_project_controlled(
+                    &database,
+                    &root,
+                    None,
+                    &test_control(),
+                )?;
+                require(
+                    oracle
+                        .pragma_update(None, "journal_mode", "DELETE")
+                        .is_err(),
+                    "cleanup oracle missed an active direct read snapshot",
+                )?;
+                store.finish_index_read_snapshot()?;
+            }
+            drop(oracle);
+            fs::write(&rules, SELECTED)?;
+        }
+
+        // Hold B through the inner checks. Only the final operation boundary
+        // sees A again; nested inputs are outside the old endpoint inventory.
+        let temporary = rules.clone();
+        super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+            *hooks = Some((
+                Box::new(move || {
+                    fs::write(&temporary, TEMPORARY).map_err(|source| CliError::Io {
+                        path: temporary,
+                        source,
+                    })
+                }),
+                Box::new(|| Ok(())),
+            ));
+        });
+        let result = match mode.as_str() {
+            "direct-read" | "federated-read" => {
+                let restore = rules.clone();
+                super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        fs::write(&restore, SELECTED).map_err(|source| CliError::Io {
+                            path: restore,
+                            source,
+                        })
+                    }));
+                });
+                if let Some(peer) = peer.as_ref() {
+                    super::super::open_federated_atlas_stores_for_project(
+                        &database,
+                        &root,
+                        None,
+                        &[root.clone(), peer.clone()],
+                        None,
+                        &test_control(),
+                    )
+                    .and_then(|stores| {
+                        for store in stores {
+                            store.finish()?;
+                        }
+                        Ok(false)
+                    })
+                } else {
+                    super::super::open_fresh_atlas_store_for_project_controlled(
+                        &database,
+                        &root,
+                        None,
+                        &test_control(),
+                    )
+                    .and_then(|store| {
+                        store.finish_index_read_snapshot()?;
+                        Ok(false)
+                    })
+                }
+            }
+            "query" => registry
+                .with_verified_current_read(
+                    &database,
+                    &root,
+                    None,
+                    &test_control(),
+                    |_store, _stamp| {
+                        fs::write(&rules, SELECTED).map_err(|source| CliError::Io {
+                            path: rules.clone(),
+                            source,
+                        })?;
+                        Ok(())
+                    },
+                )
+                .map(|admission| matches!(admission, SourceReadAdmission::Reconcile(_))),
+            "fallback" => {
+                let restore = rules.clone();
+                super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        fs::write(&restore, SELECTED).map_err(|source| CliError::Io {
+                            path: restore,
+                            source,
+                        })
+                    }));
+                });
+                registry
+                    .with_exact_fallback(
+                        &SourceBinding::new(&database, &root, None)?,
+                        &test_control(),
+                        SourceRepairPolicy::RequireCurrent,
+                        |_store, _stamp| Ok(()),
+                    )
+                    .map(|admission| matches!(admission, SourceReadAdmission::Reconcile(_)))
+            }
+            "observed-mutation" | "exact-mutation" | "observed-later-edit" | "exact-later-edit" => {
+                let control = test_control();
+                let admission = if later_edit {
+                    early_admission
+                        .take()
+                        .ok_or("missing admission before the source edit")?
+                } else if mode == "observed-mutation" {
+                    registry.admit_mutation(&database, &root, None, &control)?
+                } else {
+                    registry.admit_exact_mutation(
+                        SourceBinding::new(&database, &root, None)?,
+                        &control,
+                    )?
+                };
+                let writer = super::super::open_atlas_store_for_project(&database, &root)?;
+                // B is a legitimate stable selection and must permit mutation.
+                if !later_edit {
+                    admission.verify(&writer)?;
+                }
+                fs::write(&rules, SELECTED)?;
+                let temporary = rules.clone();
+                super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+                    *hooks = Some((
+                        Box::new(move || {
+                            fs::write(&temporary, TEMPORARY).map_err(|source| CliError::Io {
+                                path: temporary,
+                                source,
+                            })
+                        }),
+                        Box::new(|| Ok(())),
+                    ));
+                });
+                let restore = rules.clone();
+                super::super::AFTER_SAVED_SOURCE_TEST_HOOK.with_borrow_mut(|hook| {
+                    *hook = Some(Box::new(move || {
+                        fs::write(&restore, SELECTED).map_err(|source| CliError::Io {
+                            path: restore,
+                            source,
+                        })
+                    }));
+                });
+                admission.verify(&writer).map(|()| false)
+            }
+            _ => return Err("unknown final policy acceptance mode".into()),
+        };
+        super::super::SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| *hooks = None);
+        super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+        super::super::AFTER_SAVED_SOURCE_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+        require(
+            fs::read_to_string(&rules)? == SELECTED,
+            "final policy acceptance failed to restore selected rules",
+        )?;
+        if mode == "direct-read" || mode == "federated-read" {
+            let mut databases = vec![database.clone()];
+            if let Some(peer) = peer {
+                databases.push(peer.join(".projectatlas/projectatlas.db"));
+            }
+            for database in databases {
+                let oracle = rusqlite::Connection::open(database)?;
+                oracle.busy_timeout(Duration::ZERO)?;
+                oracle.pragma_update(None, "journal_mode", "DELETE")?;
+                oracle.pragma_update(None, "journal_mode", "WAL")?;
+            }
+        }
+        if mode == "query" || mode.starts_with("observed-") {
+            let binding = SourceBinding::new(&database, &root, None)?;
+            let entry = registry
+                .entry(binding, &test_control())?
+                .ok_or("missing observed acceptance entry")?;
+            require(
+                entry.current_epoch()?.is_none(),
+                "failed policy acceptance retained an observed epoch",
+            )?;
+        }
+        let store = open_atlas_store_read_only_for_project(&database, &root)?;
+        require(
+            store.index_publication()? == initial.value
+                && store.load_file_text("nested/new.rs")?.is_none(),
+            "refused policy acceptance mutated the prior publication",
+        )?;
+        match result {
+            Ok(true) | Err(CliError::RefreshRequired(_)) => Ok(()),
+            Ok(false) => {
+                Err("final operation accepted source consumed under a restored policy".into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_snapshot_admission_rechecks_selected_root_alias() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let (database, _source) = indexed_project(&root)?;
+        let replacement = temp.path().join("replacement");
+        fs::create_dir(&replacement)?;
+        let selected = temp.path().join("selected");
+        std::os::unix::fs::symlink(&root, &selected)?;
+        super::super::open_fresh_atlas_store_for_project_controlled(
+            &database,
+            &selected,
+            None,
+            &test_control(),
+        )?
+        .finish_index_read_snapshot()?;
+        let changed = selected.clone();
+        super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                fs::remove_file(&changed)
+                    .and_then(|()| std::os::unix::fs::symlink(&replacement, &changed))
+                    .map_err(|source| CliError::Io {
+                        path: changed,
+                        source,
+                    })
+            }));
+        });
+        let result = super::super::open_fresh_atlas_store_for_project_controlled(
+            &database,
+            &selected,
+            None,
+            &test_control(),
+        );
+        super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+        match result {
+            Err(CliError::ProjectMismatch(_)) => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(store) => {
+                store.finish_index_read_snapshot()?;
+                Err("retargeted selected root admitted another root's snapshot".into())
+            }
+        }
+    }
+
+    #[test]
+    fn direct_and_federated_admission_recheck_current_scan_contract() -> Result<(), Box<dyn Error>>
+    {
+        for federated in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            let (database, _source) = indexed_project(&root)?;
+            let peer = temp.path().join("peer");
+            let (peer_database, _source) = indexed_project(&peer)?;
+            let publication = {
+                let store = open_atlas_store_read_only_for_project(&database, &root)?;
+                store.index_publication()?
+            };
+            let config = root.join(".projectatlas/config.toml");
+            let changed = config.clone();
+            let canonical_root = root.canonicalize()?;
+            let root_value = toml::Value::String(
+                canonical_root
+                    .to_str()
+                    .ok_or("fixture root is not UTF-8")?
+                    .to_owned(),
+            );
+            super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    fs::write(
+                        &changed,
+                        format!(
+                            "[project]\nroot = {root_value}\n[scan]\ntext_index_max_bytes = 7\n"
+                        ),
+                    )
+                    .map_err(|source| CliError::Io {
+                        path: changed,
+                        source,
+                    })
+                }));
+            });
+            let result = if federated {
+                super::super::open_federated_atlas_stores_for_project(
+                    &database,
+                    &root,
+                    None,
+                    &[root.clone(), peer],
+                    Some(&["selected".to_owned(), "peer".to_owned()]),
+                    &test_control(),
+                )
+                .and_then(|stores| {
+                    for store in stores {
+                        store.finish()?;
+                    }
+                    Ok(())
+                })
+            } else {
+                super::super::open_fresh_atlas_store_for_project_controlled(
+                    &database,
+                    &root,
+                    None,
+                    &test_control(),
+                )
+                .and_then(|store| store.finish_index_read_snapshot().map_err(Into::into))
+            };
+            super::super::AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(|hook| *hook = None);
+            require(
+                config.exists(),
+                "admission did not cross the config transition",
+            )?;
+            let Err(CliError::RefreshRequired(report)) = result else {
+                return Err("changed scan contract crossed final adapter admission".into());
+            };
+            require(
+                !federated || report.worktree.as_deref() == Some("selected"),
+                "final federation failure lost its participant alias",
+            )?;
+            for database in [&database, &peer_database] {
+                let oracle = rusqlite::Connection::open(database)?;
+                oracle.busy_timeout(Duration::ZERO)?;
+                oracle.pragma_update(None, "journal_mode", "DELETE")?;
+                oracle.pragma_update(None, "journal_mode", "WAL")?;
+            }
+            fs::remove_file(config)?;
+            let store = open_atlas_store_read_only_for_project(&database, &root)?;
+            require(
+                store.index_publication()? == publication,
+                "rejected final adapter admission changed the publication",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

@@ -120,6 +120,117 @@ The fresh after-plan/policy comparison guards both current results and stale-sou
 assessments before transfer to the refresh owner; changed policy drops the
 assessment and retries within the original control. This removes duplicate operation-local setup, not a freshness check or source walk.
 
+### Bind discovery to the policy inputs actually consumed
+
+The endpoint witness alone is insufficient. A causal owning-admission test has
+shown that configuration A at both endpoints can bracket a real walk using B,
+which excludes an already saved new source. With callback delivery delayed, the
+operation incorrectly reports the prior publication as current. The same test
+confirms in-place configuration edits, restoration of the original configuration
+file object, global excludes, repository `info/exclude`, and self-ignored root and
+nested `.gitignore`/`.ignore` inputs. Stable-policy controls detect the new file;
+the defective admission does not alter the prior valid publication. This finding
+belongs to task 2.4 and must be resolved before its acceptance.
+
+The filesystem owner must retain bounded evidence of the exact policy bytes it
+hands to the canonical matchers, including directly parsed Git configuration and
+lazy hierarchical ignore inputs. Selection evidence also includes the exact
+environment/configuration source selection and the matcher's actual `.git` and
+`commondir` input streams. For repository-derived exclusions, retain the exact
+excluded-prefix vector produced by the existing validating worktree owner and
+recompute it freshly at admission. That vector is the complete effect of the
+registration inventory and `gitdir` pointers on scan inclusion; raw registration
+bytes are not a second authority. A valid outside-root registration that leaves
+the vector unchanged remains admissible, while an in-root registration changing
+selection invalidates the evidence. Causal pointer/registration and equal-result
+controls protect this distinction. Selected-root aliases
+must retain their existing canonical-root and explicit-spelling behavior.
+The source assessment must validate that
+evidence at its admission boundary, in addition to the fresh endpoint policy,
+native identity, callback and SQLite publication checks. A consumed-input mismatch
+requires typed refusal or a fresh bounded retry; it must not transfer stale
+discovery to publication. Evidence is operation-owned and transient, not a new
+persistent cache or authority for zero-source-work admission. Existing file,
+aggregate input, entry, worker, cancellation and deadline bounds remain effective.
+
+The pinned canonical `ignore` API privately opens its global and hierarchical
+inputs. It provides no policy-load observer or in-memory injection into the
+parallel walker. Reusing only a compiled global policy leaves lazy local inputs
+unbound. Endpoint file identity/timestamps also fail when the original object is
+restored, and local node hashes cannot cover self-ignored inputs. Reimplementing
+ignore precedence or adding a second full discovery is not an acceptable shortcut.
+Before adopting a dependency patch, review an additive policy-reader/observation
+seam that leaves the canonical parser, hierarchy and precedence in place. Its
+default path must preserve upstream behavior; the Atlas reader must stream a
+digest of the same bytes supplied for parsing, retain absence and errors, and expose
+the consumed-input evidence through the scan result for fresh runtime validation.
+Do not retain whole policy files or hold the evidence lock during input I/O. Bound
+the distinct input inventory by the admitted traversal/registration limits,
+charge streamed reads and validation to the original work control, and reuse a
+consistent observation when a canonical matcher reuses its cached context.
+Multiple inconsistent observations of the same selected input invalidate the
+operation. Absence is evidence too, including candidates omitted by directory
+entry optimizations. Preserve the canonical default missing-file, parse-error and
+symlink behavior. The external policy witness's 16 MiB per-file cap must not be
+silently imposed on nested ignore files; specify and test their streaming work
+accounting under the existing scan resource/deadline controls before adoption.
+Any retained upstream source must have exact provenance, license, a minimal
+auditable patch and a removal condition when an equivalent official API exists.
+The additive reader/evidence direction has passed design compatibility review.
+Its concrete source patch, provenance/license, resource accounting and native
+behavior remain subject to implementation review and proof.
+
+Positive and causal controls must cover all confirmed input families, original
+object restoration, local negation/precedence and selected-root aliases, persistent
+policy changes, unchanged no-op work, correct reconciliation paths, native failure,
+bounded reads and cancellation. Native installed CLI/MCP/watch acceptance and
+performance targets remain mandatory. This scoped consumed-input contract does
+not promise an atomic global filesystem snapshot.
+
+The exact source assessment owns the source certificate and any additional
+certificate consumed by nonindexed document resolution. The runtime retains
+them through exact admission, the outer fresh endpoint checks, and final query
+acceptance inside the existing callback-receiver fence. A mutation retains both
+its initial admission and its fresh commit-verification certificate through the
+writer's final acceptance. Exact fallback retains its first and post-query
+certificates. None is stored in a cached observer epoch or used to authorize a
+later request without fresh source work. A rejected final policy check invalidates
+that operation's epoch. Causal restoration after inner verification, during the
+query, and after fresh mutation verification protects these distinct boundaries;
+stable policy remains a valid workflow.
+
+Direct CLI snapshot admission verifies the retained certificate and a freshly
+derived plan against the pinned root identity and publication immediately before
+returning the store. Retargeting the original selected root alias must produce
+the existing typed project mismatch even when both roots have equal scan options.
+Federation holds every exact snapshot and certificate privately until
+all participants have opened, then performs the same controlled checks for each
+participant. It charges the extra identity/publication reads and admission time to that
+participant's existing work report, preserves its alias on typed failure, and
+closes all snapshots on rejection. The service still receives immutable admitted
+SQLite snapshots; certificates do not cross into its types or survive through
+the later aggregate query or `finish`. These are sequential per-root admission
+checks, not a simultaneous cross-root filesystem snapshot. Positive stable-policy
+admission and an independently checked active-reader cleanup oracle protect both
+adapters, alongside late matcher and AtlasMap-plan transitions.
+
+Mutable reconciliation preserves its existing database identity, root, contract
+and generation fences. If captured policy has changed, the full owner discards
+the captured source and discovers it afresh under the original work control;
+the incremental attempt selects its normal full fallback. A stale reusable
+assessment is not a reason to disable legitimate full reconciliation. Existing
+document-only policy changes retain zero parser work and authored state while
+publishing the updated graph once.
+
+The whole `.git` directory substitution has also reproduced the defect using two
+real initialized repositories. Separate causal controls reproduce linked-worktree
+`.git` pointer and `commondir` transitions and registration of a newly added
+checkout, whose folder is completely hidden during the walk. Registering an
+already indexed folder instead requests full reconciliation; retain that safe
+control rather than requiring a narrow changed-path list when the assessment
+already requires a full scan. All selector controls must pass through the fixed
+admission boundary before accepting the dependency/evidence implementation for RC1.
+
 ### Prove the standalone CLI approach before production changes
 
 Task 2.1 settles the exact-discovery/cross-invocation evidence contract and a separate cold-CLI target using code analysis and a focused reference check. The selected initial implementation uses exact discovery plus lightweight ordered comparison and affected updates when no trusted history exists. Task 2.4 proves that CLI approach as well as the warm MCP path. A fast MCP result cannot substitute for a slow CLI result.

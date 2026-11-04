@@ -4395,76 +4395,129 @@ fn nonindexed_document_projection_changed_with_limits(
     control: &IndexWorkControl,
     limits: DocumentVerificationLimits,
 ) -> Result<(bool, u64), CliError> {
+    let (changed, statements, evidence) =
+        nonindexed_document_projection_changed_recorded_with_limits(
+            store, root, nodes, options, control, limits,
+        )?;
+    if let Some(evidence) = evidence
+        && !evidence
+            .is_current(control)
+            .map_err(|source| super::source_inspection_error(root, source))?
+    {
+        return Err(super::source_changed_during_derivation(root, "."));
+    }
+    Ok((changed, statements))
+}
+
+/// Verify unresolved document reasons while retaining the policy actually consumed.
+pub(super) fn nonindexed_document_projection_changed_recorded(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+) -> Result<(bool, u64, Option<projectatlas_fs::ScanPolicyEvidence>), CliError> {
+    nonindexed_document_projection_changed_recorded_with_limits(
+        store,
+        root,
+        nodes,
+        options,
+        control,
+        DocumentVerificationLimits::default(),
+    )
+}
+
+/// Retain consumed policy across the runtime's final document-admission boundary.
+fn nonindexed_document_projection_changed_recorded_with_limits(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+    limits: DocumentVerificationLimits,
+) -> Result<(bool, u64, Option<projectatlas_fs::ScanPolicyEvidence>), CliError> {
     const DOCUMENT_INPUT_PAGE: u32 = 256;
     let mut page =
         store.repository_unresolved_documents_page(None, DOCUMENT_INPUT_PAGE, control)?;
     // Each page loads the exact project identity, then its indexed keyset rows.
     let mut statements = 2_u64;
     if page.rows.is_empty() {
-        return Ok((false, statements));
+        return Ok((false, statements, None));
     }
-    let scan_policy = RootScanPolicy::discover(root, options, control)
-        .map_err(|source| super::source_inspection_error(root, source))?;
-    let index = DocumentResolutionIndex::with_limits(
+    let observed = projectatlas_fs::ObservedRootScanPolicy::discover(
         root,
-        nodes,
-        &scan_policy,
+        options,
+        projectatlas_fs::ScanLimits::default(),
         control,
-        limits.policy,
-        limits.prefix_probes,
-    )?;
-    let mut inspected_rows = 0_u64;
-    loop {
-        for row in &page.rows {
-            control.check(IndexWorkStage::RepositoryTraversal)?;
-            inspected_rows = inspected_rows.saturating_add(1);
-            if inspected_rows > limits.rows {
-                return Err(CliError::VerificationIncomplete(Box::new(
-                    super::IndexVerificationIncomplete {
-                        policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
-                        project_root: lossless_project_root_display(root),
-                        worktree: None,
-                        status: IndexReadStatus::VerificationIncomplete,
-                        reason: super::IndexVerificationReason::PolicyUnavailable,
-                        scope: IndexRefreshScope::Full,
-                        message: format!(
-                            "document verification exceeds row work: observed {inspected_rows}, limit {}",
-                            limits.rows,
-                        ),
-                    },
-                )));
-            }
-            let Ok(target) = normalize_document_target(row.source.as_str(), row.reference.as_str())
-            else {
-                continue;
-            };
-            // Existing file/heading and folder state is covered by the source-node delta.
-            if index.kinds_by_path.contains_key(target.path.as_str()) {
-                continue;
-            }
-            let current = if index
-                .casefold_path_counts
-                .contains_key(&target.path.to_lowercase())
-            {
-                DocumentTargetUnresolvedReason::CaseConflict
-            } else {
-                index.inspect_absent_reason(&target.path)?
-            };
-            if current != row.reason {
-                return Ok((true, statements));
-            }
-        }
-        if !page.truncated {
-            return Ok((false, statements));
-        }
-        let after = page.rows.last().map(|row| row.digest);
-        page = store.repository_unresolved_documents_page(
-            after.as_ref(),
-            DOCUMENT_INPUT_PAGE,
+    )
+    .map_err(|source| super::source_inspection_error(root, source))?;
+    let result = (|| -> Result<(bool, u64), CliError> {
+        let index = DocumentResolutionIndex::with_limits(
+            root,
+            nodes,
+            observed.policy(),
             control,
+            limits.policy,
+            limits.prefix_probes,
         )?;
-        statements = statements.saturating_add(2);
-    }
+        let mut inspected_rows = 0_u64;
+        loop {
+            for row in &page.rows {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                inspected_rows = inspected_rows.saturating_add(1);
+                if inspected_rows > limits.rows {
+                    return Err(CliError::VerificationIncomplete(Box::new(
+                        super::IndexVerificationIncomplete {
+                            policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
+                            project_root: lossless_project_root_display(root),
+                            worktree: None,
+                            status: IndexReadStatus::VerificationIncomplete,
+                            reason: super::IndexVerificationReason::PolicyUnavailable,
+                            scope: IndexRefreshScope::Full,
+                            message: format!(
+                                "document verification exceeds row work: observed {inspected_rows}, limit {}",
+                                limits.rows,
+                            ),
+                        },
+                    )));
+                }
+                let Ok(target) =
+                    normalize_document_target(row.source.as_str(), row.reference.as_str())
+                else {
+                    continue;
+                };
+                // Existing file/heading and folder state is covered by the source-node delta.
+                if index.kinds_by_path.contains_key(target.path.as_str()) {
+                    continue;
+                }
+                let current = if index
+                    .casefold_path_counts
+                    .contains_key(&target.path.to_lowercase())
+                {
+                    DocumentTargetUnresolvedReason::CaseConflict
+                } else {
+                    index.inspect_absent_reason(&target.path)?
+                };
+                if current != row.reason {
+                    return Ok((true, statements));
+                }
+            }
+            if !page.truncated {
+                return Ok((false, statements));
+            }
+            let after = page.rows.last().map(|row| row.digest);
+            page = store.repository_unresolved_documents_page(
+                after.as_ref(),
+                DOCUMENT_INPUT_PAGE,
+                control,
+            )?;
+            statements = statements.saturating_add(2);
+        }
+    })()?;
+    let evidence = observed
+        .finish()
+        .map_err(|source| super::source_inspection_error(root, source))?;
+    Ok((result.0, result.1, Some(evidence)))
 }
 
 /// One resolved or typed-unresolved document candidate plus invalidation keys.
