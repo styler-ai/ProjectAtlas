@@ -412,6 +412,31 @@ first polling capture, subsequent policy/source edits, and unchanged project
 identity and authored purpose state. Existing cancellation/deadline proof retains
 the original clock and never renews a handoff budget.
 
+Native Windows root-replacement proof exposed a separate continuous-watch failure:
+the selected pathname can disappear between retiring the old directory and moving
+its staged replacement into place. A controlled Linux backend reproduces the same
+failure during initial reconciliation. Immediate policy-fence retries and later
+plan/coverage setup can both encounter that gap. The source-inspection adapter
+currently erases typed root absence into its public diagnostic. Preserve a private,
+nonserialized selected-root absence witness through that adapter; do not parse
+diagnostic strings or retry all source-inspection or `NotFound` errors.
+
+Use one private closure-based continuous-watch reconciliation helper, bounded to
+three attempts. Only absence/non-directory errors naming the already selected
+canonical root or its retained configured spelling permit a wait and retry; the
+operation's original control is checked before each attempt and around the
+existing watch-interval wait. Initial and later native setup, policy fencing and
+refresh, and initial/later polling refresh use that boundary. On native recovery,
+retain policy uncertainty, require recursive rebinding and select full work even
+if the native root callback is delayed. Typed native missing-root registration
+failures retain the same recovery classification. Successful cycles alone count;
+exhaustion returns the original failure. Persistent absence, cancellation and
+deadline refusal preserve the last complete publication, identity and purposes.
+No new store, schema, observer thread, cross-request evidence or public payload
+field is added. One-shot CLI/MCP and unrelated I/O or identity failures retain
+their existing strict behavior. The existing policy-overlap polling handoff and
+preregistered performance/platform targets remain independent requirements.
+
 The Linux real-CLI flood fixture separately proves native producer compatibility
 with noise before startup and after a quiet initial capture. Sibling writes can
 legitimately miss every bounded fence, so either notify or automatic polling is

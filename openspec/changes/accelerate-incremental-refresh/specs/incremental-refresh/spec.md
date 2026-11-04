@@ -83,6 +83,12 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 - **WHEN** source changes after the initial evidence is captured
 - **THEN** refresh revalidates or retries the affected work, or refuses publication without exposing stale or partial new state
 
+#### Scenario: Continuous watch crosses a source-root replacement gap
+- **WHEN** the selected source directory briefly disappears during replacement while continuous native or polling watch retains its external database and configuration
+- **THEN** initial and later reconciliation retry only the selected root's typed absence, at most three attempts with the existing watch interval and original cancellation/deadline control
+- **AND** native watch retains uncertainty, rebinds recursive coverage and performs full reconciliation before counting a successful cycle, preserving project identity, authored purposes and the last complete publication during absence
+- **AND** persistent absence terminates with the existing typed failure; unrelated configuration/database I/O, permission errors, project mismatches and explicit one-shot/MCP calls retain their existing failure behavior
+
 #### Scenario: Source indirection substituted after admission
 - **WHEN** a direct source leaf or parent becomes a symlink after metadata inspection, whether its target is inside or outside the selected root
 - **THEN** discovery refuses before hashing redirected source bytes and preserves the prior valid publication

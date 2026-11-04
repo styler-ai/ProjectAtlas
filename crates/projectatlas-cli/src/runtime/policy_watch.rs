@@ -951,20 +951,12 @@ impl PolicyWatchSelection {
             if let Err(error) = watcher.unwatch(&self.root)
                 && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
             {
-                return Err(CliError::Watcher(format!(
-                    "cannot retire recursive source observation for {}: {error}",
-                    self.root.display()
-                )));
+                return Err(self.recursive_watch_error(error, "retire"));
             }
             control.check(IndexWorkStage::RepositoryTraversal)?;
             watcher
                 .watch(&self.root, RecursiveMode::Recursive)
-                .map_err(|error| {
-                    CliError::Watcher(format!(
-                        "cannot restore recursive source observation for {}: {error}",
-                        self.root.display()
-                    ))
-                })?;
+                .map_err(|error| self.recursive_watch_error(error, "restore"))?;
             control.check(IndexWorkStage::RepositoryTraversal)?;
             Ok(())
         })();
@@ -972,6 +964,32 @@ impl PolicyWatchSelection {
             self.require_recursive_rebind();
         }
         result
+    }
+
+    /// Keep missing selected-root errors typed for continuous-watch recovery only.
+    pub(super) fn recursive_watch_error(&self, error: notify::Error, operation: &str) -> CliError {
+        if error.paths.iter().any(|path| path != self.root.as_ref()) {
+            return CliError::Watcher(format!(
+                "cannot {operation} recursive source observation for {}: {error}",
+                self.root.display()
+            ));
+        }
+        match error.kind {
+            notify::ErrorKind::Io(source) if super::root_absence_kind(source.kind()) => {
+                CliError::Io {
+                    path: self.root.to_path_buf(),
+                    source,
+                }
+            }
+            notify::ErrorKind::PathNotFound => CliError::Io {
+                path: self.root.to_path_buf(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            _ => CliError::Watcher(format!(
+                "cannot {operation} recursive source observation for {}: {error}",
+                self.root.display()
+            )),
+        }
     }
 }
 

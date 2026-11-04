@@ -4148,6 +4148,7 @@ impl<'a> DocumentResolutionIndex<'a> {
         if observed > self.prefix_probe_limit {
             return Err(CliError::VerificationIncomplete(Box::new(
                 super::IndexVerificationIncomplete {
+                    unavailable_source_root: None,
                     policy_work_limit: Some(super::VerificationWorkLimit::DocumentPrefixes),
                     project_root: lossless_project_root_display(&self.root),
                     worktree: None,
@@ -4236,6 +4237,7 @@ impl<'a> DocumentResolutionIndex<'a> {
                     }
                     other => CliError::VerificationIncomplete(Box::new(
                         super::IndexVerificationIncomplete {
+                            unavailable_source_root: None,
                             policy_work_limit,
                             project_root: lossless_project_root_display(&self.root),
                             worktree: None,
@@ -4468,6 +4470,7 @@ fn nonindexed_document_projection_changed_recorded_with_limits(
                 if inspected_rows > limits.rows {
                     return Err(CliError::VerificationIncomplete(Box::new(
                         super::IndexVerificationIncomplete {
+                            unavailable_source_root: None,
                             policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
                             project_root: lossless_project_root_display(root),
                             worktree: None,

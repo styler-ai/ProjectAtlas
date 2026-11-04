@@ -23,6 +23,13 @@ unavailable. Ordinary file edits use partial SQLite/symbol refresh; directory/ro
 full scan for correctness. For bounded agent refreshes after edits, use `projectatlas watch --once` or MCP
 `atlas_watch_once`.
 
+Continuous watch retries a briefly absent selected source root up to three times,
+waiting the configured interval between attempts under the original refresh budget.
+After replacement, native watch restores recursive coverage and reconciles the full
+source state. Keep the database and configuration outside a root that will be
+replaced. Persistent absence, unrelated I/O failures and identity mismatches remain
+errors; explicit one-shot CLI/MCP refresh retains its normal refusal and retry behavior.
+
 Exact line slices validate the file through the atlas database, then read the current file from disk. Symbol slices
 use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
 symbol-level slices matter.

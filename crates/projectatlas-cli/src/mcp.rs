@@ -17613,6 +17613,7 @@ mod tests {
         fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
         let incomplete = |policy_work_limit| {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                unavailable_source_root: None,
                 policy_work_limit,
                 project_root: lossless_project_root_display(root),
                 worktree: None,
