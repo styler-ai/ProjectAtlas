@@ -15,6 +15,14 @@ use std::sync::OnceLock;
 #[cfg(test)]
 use projectatlas_core::normalize_native_path_display;
 
+#[cfg(test)]
+thread_local! {
+    /// Complete owned schema captures performed by this synchronous test thread.
+    static SCHEMA_CONTRACT_READS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Current `SQLite` schema version supported by this crate.
 pub(crate) const SCHEMA_VERSION: i64 = 23;
 /// Released 0.3.26 schema accepted by the migration inventory.
@@ -3016,58 +3024,124 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
             });
         }
     };
-    let found = read_schema_contract(connection)?;
     let released_schema_eight = stored_version == Some(PREVIOUS_SCHEMA_VERSION);
-    let tables_match = if released_schema_eight {
-        released_schema_tables_match(&expected.tables, &found.tables)
+    validate_schema_tables(connection, expected, released_schema_eight)?;
+    validate_schema_foreign_keys(connection, expected)?;
+    validate_schema_indexes(connection, expected, released_schema_eight)?;
+    validate_extension_objects(connection)?;
+    Ok(())
+}
+
+/// Compare complete fresh tables while retaining only their names and one table's rows.
+fn validate_schema_tables(
+    connection: &Connection,
+    expected: &SchemaContract,
+    released_schema_eight: bool,
+) -> DbResult<()> {
+    let names = user_table_names(connection)?;
+    let mut tables_match = names
+        .iter()
+        .map(String::as_str)
+        .eq(expected.tables.iter().map(|table| table.name.as_str()));
+    if tables_match {
+        for (name, required) in names.into_iter().zip(&expected.tables) {
+            let actual = TableContract {
+                definition: table_definition(connection, &name)?,
+                columns: table_columns(connection, &name)?,
+                name,
+            };
+            tables_match = if released_schema_eight {
+                released_schema_tables_match(
+                    std::slice::from_ref(required),
+                    std::slice::from_ref(&actual),
+                )
+            } else {
+                required == &actual
+            };
+            if !tables_match {
+                break;
+            }
+        }
+    }
+    if tables_match {
+        Ok(())
     } else {
-        expected.tables == found.tables
-    };
-    if !tables_match {
-        return Err(schema_shape_error(
+        // Keep the established complete, bounded diagnostic on a refusal. The
+        // successful hot path never retains all inspected table contracts.
+        let found = read_schema_contract(connection)?;
+        Err(schema_shape_error(
             "tables",
             &expected.tables,
             &found.tables,
-        ));
+        ))
     }
-    if expected.foreign_keys != found.foreign_keys {
-        return Err(schema_shape_error(
-            "foreign_keys",
-            &expected.foreign_keys,
-            &found.foreign_keys,
-        ));
-    }
-    for required in &expected.indexes {
-        let Some(actual) = found
-            .indexes
+}
+
+/// Compare fresh foreign keys by table without retaining the full schema's rows.
+fn validate_schema_foreign_keys(
+    connection: &Connection,
+    expected: &SchemaContract,
+) -> DbResult<()> {
+    for table in &expected.tables {
+        let found = table_foreign_keys(connection, &table.name)?;
+        if !expected
+            .foreign_keys
             .iter()
-            .find(|index| index.name == required.name)
-        else {
-            return Err(schema_shape_error(&required.name, required, &"missing"));
-        };
-        let index_matches = if released_schema_eight {
-            released_schema_index_matches(required, actual)
-        } else {
-            actual == required
-        };
-        if !index_matches {
-            return Err(schema_shape_error(&required.name, required, actual));
-        }
-    }
-    for extra in found
-        .indexes
-        .iter()
-        .filter(|index| !expected.indexes.iter().any(|item| item.name == index.name))
-    {
-        if !is_compatible_extension_index(extra) {
+            .filter(|key| key.table == table.name)
+            .eq(found.iter())
+        {
+            drop(found);
+            let found = read_schema_contract(connection)?;
             return Err(schema_shape_error(
-                &extra.name,
-                &"optional non-unique full index over declared columns",
-                extra,
+                "foreign_keys",
+                &expected.foreign_keys,
+                &found.foreign_keys,
             ));
         }
     }
-    validate_extension_objects(connection)?;
+    Ok(())
+}
+
+/// Validate complete required and extension index metadata one table at a time.
+fn validate_schema_indexes(
+    connection: &Connection,
+    expected: &SchemaContract,
+    released_schema_eight: bool,
+) -> DbResult<()> {
+    for table in &expected.tables {
+        let found = table_indexes(connection, &table.name)?;
+        for required in expected
+            .indexes
+            .iter()
+            .filter(|index| index.table == table.name)
+        {
+            let Some(actual) = found.iter().find(|index| index.name == required.name) else {
+                return Err(schema_shape_error(&required.name, required, &"missing"));
+            };
+            let matches = if released_schema_eight {
+                released_schema_index_matches(required, actual)
+            } else {
+                required == actual
+            };
+            if !matches {
+                return Err(schema_shape_error(&required.name, required, actual));
+            }
+        }
+        for extra in found.iter().filter(|index| {
+            expected
+                .indexes
+                .binary_search_by(|required| required.name.cmp(&index.name))
+                .is_err()
+        }) {
+            if !is_compatible_extension_index(extra) {
+                return Err(schema_shape_error(
+                    &extra.name,
+                    &"optional non-unique full index over declared columns",
+                    extra,
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3568,6 +3642,8 @@ fn predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
 
 /// Read all behavior-relevant schema state through `SQLite` introspection.
 fn read_schema_contract(connection: &Connection) -> DbResult<SchemaContract> {
+    #[cfg(test)]
+    SCHEMA_CONTRACT_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
     let table_names = user_table_names(connection)?;
     let mut tables = Vec::with_capacity(table_names.len());
     let mut indexes = Vec::new();
@@ -4531,6 +4607,33 @@ mod tests {
                 .into());
             }
             require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    /// Ordinary admission validates fresh metadata without retaining an owned full schema.
+    #[test]
+    fn current_schema_validation_does_not_materialize_whole_contract() -> Result<(), Box<dyn Error>>
+    {
+        let connection = Connection::open_in_memory()?;
+        initialize(&connection, None)?;
+        schema_contract()?;
+        let before = SCHEMA_CONTRACT_READS.with(std::cell::Cell::get);
+        validate_schema_shape(&connection, SchemaState::Current)?;
+        let after = SCHEMA_CONTRACT_READS.with(std::cell::Cell::get);
+        if after != before {
+            return Err(io::Error::other(format!(
+                "current admission materialized the complete schema: {before} -> {after}"
+            ))
+            .into());
+        }
+
+        connection.execute_batch("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")?;
+        if !matches!(
+            validate_schema_shape(&connection, SchemaState::Current),
+            Err(DbError::SchemaShape { .. })
+        ) {
+            return Err(io::Error::other("changed schema passed current admission").into());
         }
         Ok(())
     }

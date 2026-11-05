@@ -272,6 +272,22 @@ with cache-disabled reads and DDL changes protects rebinding and fresh column,
 index and foreign-key results. Measure optimized navigation and no-op latency/RSS
 before retaining a performance claim.
 
+Compare actual schema metadata one table at a time in the existing storage
+validator, rather than retaining an owned copy of every inspected contract.
+Transient memory includes the existing table-name inventory plus one table's
+metadata; the immutable expected contract remains derived from authoritative
+DDL. Validate exact table names, complete definitions and columns first, then
+foreign keys, required and compatible extension indexes, and extension objects.
+Retain the released schema-8 named-column rules. The separate disposable-graph
+schema-15 validator remains unchanged. Failed table or foreign-key checks may
+capture the complete actual contract for the established bounded diagnostic;
+successful admission does not. Actual SQL and native conversion errors remain
+fresh on the selected connection and snapshot, with no acceptance-result cache,
+schema, query, connection-profile or statement-cache-capacity change. Causal
+capture counts, existing predecessor/drift/extension controls and fixed focused
+shipping summary/warm measurements must establish this experiment's bounds,
+compatibility and benefit before new installed acceptance is requested.
+
 ### Apply the delta and avoid repeated whole-project work
 
 Convert discovered or observed changes into the existing incremental path. Use source/dependency invalidation rules to expand the affected set only when necessary. Relevant compiler, ignore, parser or publication-policy changes may legitimately invalidate a wider scope.
