@@ -2424,8 +2424,10 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
     let metadata_kind = object_kind(connection, "metadata")?;
     match metadata_kind.as_deref() {
         None => {
+            // The underscore in SQLite's reserved namespace is literal, not
+            // LIKE's single-character wildcard. Keep user lookalikes visible.
             let user_objects = connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'",
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
@@ -3041,7 +3043,7 @@ fn validate_schema_tables(
     let tables_match = {
         let mut statement = connection.prepare(
             "SELECT name, sql FROM sqlite_schema \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+             WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
         )?;
         let mut rows = statement.query([])?;
         let mut matches = true;
@@ -3697,7 +3699,7 @@ fn normalize_table_definition(definition: &str) -> String {
 fn user_table_names(connection: &Connection) -> DbResult<Vec<String>> {
     let mut statement = connection.prepare(
         "SELECT name FROM sqlite_schema \
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+         WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
     )?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -3790,7 +3792,7 @@ fn table_foreign_keys(connection: &Connection, table: &str) -> DbResult<Vec<Fore
 fn validate_extension_objects(connection: &Connection) -> DbResult<()> {
     let mut statement = connection.prepare(
         "SELECT type, name, tbl_name, sql FROM sqlite_schema \
-         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+         WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY type, name",
     )?;
     let objects = statement.query_map([], |row| {
         Ok((
@@ -4118,13 +4120,13 @@ mod tests {
             connection,
             "SELECT type, name, tbl_name, sql
              FROM sqlite_master
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY type, name",
         )?;
         let table_names = query_all_values(
             connection,
             "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY name",
         )?;
         let mut tables = Vec::with_capacity(table_names.len());
@@ -4422,6 +4424,121 @@ mod tests {
                 return Err(io::Error::other("invalid schema metadata unexpectedly opened").into());
             }
             require_unchanged(temp.path(), &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_internal_prefix_lookalikes_are_not_initialized() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for (name, view_only) in [
+            ("sqlitex_foreign_view", true),
+            ("ordinary_foreign", false),
+            ("sqlitex_foreign", false),
+            ("SQLITEX_foreign", false),
+            ("sqlite☃foreign", false),
+            ("sqlite!foreign", false),
+        ] {
+            let database = temp.path().join(format!("{name}.db"));
+            {
+                let connection = Connection::open(&database)?;
+                let schema = if view_only {
+                    format!("CREATE VIEW \"{name}\" AS SELECT 'preserve foreign data' AS value;")
+                } else {
+                    format!(
+                        "CREATE TABLE \"{name}\" (value TEXT);\n\
+                         INSERT INTO \"{name}\" VALUES ('preserve foreign data');"
+                    )
+                };
+                connection.execute_batch(&schema)?;
+            }
+            let before = fs::read(&database)?;
+            let inventory = directory_entry_names(temp.path())?;
+            if !matches!(
+                AtlasStore::open(&database),
+                Err(DbError::SchemaShape { .. })
+            ) {
+                return Err(io::Error::other(format!(
+                    "foreign database {name} was not refused before initialization"
+                ))
+                .into());
+            }
+            if !matches!(
+                read_project_root(&database),
+                Err(DbError::SchemaShape { .. })
+            ) {
+                return Err(io::Error::other("foreign database selected a project root").into());
+            }
+            require_unchanged(temp.path(), &database, &before, &inventory)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_admission_rejects_internal_prefix_lookalike_objects() -> Result<(), Box<dyn Error>> {
+        let layouts: [(&str, fn(&Connection) -> DbResult<()>); 3] = [
+            ("current", |connection| initialize(connection, None)),
+            ("released", create_released_schema_eight),
+            ("evolved", create_evolved_released_schema_eight),
+        ];
+        let changes = [
+            "CREATE TABLE sqlitex_extra (value TEXT);",
+            "CREATE TABLE SQLITEX_extra (value TEXT);",
+            "CREATE TABLE \"sqlite☃extra\" (value TEXT);",
+            "CREATE VIEW sqlitex_view AS SELECT 1 AS value;",
+            "CREATE TRIGGER sqlitex_trigger AFTER INSERT ON nodes BEGIN SELECT 1; END;",
+        ];
+        let temp = tempfile::tempdir()?;
+        for (layout, create) in layouts {
+            for (case, change) in changes.iter().enumerate() {
+                let directory = temp.path().join(format!("{layout}-{case}"));
+                fs::create_dir(&directory)?;
+                let database = directory.join("index.db");
+                {
+                    let connection = Connection::open(&database)?;
+                    create(&connection)?;
+                    connection.execute_batch(change)?;
+                }
+                let before = fs::read(&database)?;
+                let inventory = directory_entry_names(&directory)?;
+                if !matches!(
+                    AtlasStore::open(&database),
+                    Err(DbError::SchemaShape { .. })
+                ) {
+                    return Err(io::Error::other(format!(
+                        "{layout} admitted an incompatible lookalike object: {change}"
+                    ))
+                    .into());
+                }
+                require_unchanged(&directory, &database, &before, &inventory)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn internal_prefix_filter_preserves_statistics_and_compatible_indexes()
+    -> Result<(), Box<dyn Error>> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch("ANALYZE;")?;
+        if schema_state(&connection)? != SchemaState::Fresh {
+            return Err(
+                io::Error::other("SQLite internal objects prevented initialization").into(),
+            );
+        }
+        initialize(&connection, None)?;
+        connection.execute_batch(
+            "CREATE INDEX sqlitex_optional_index ON nodes(path);\n\
+             ANALYZE;",
+        )?;
+        validate_schema_shape(&connection, SchemaState::Current)?;
+        let snapshot = current_schema_snapshot(&connection)?;
+        if !snapshot
+            .schema_objects
+            .iter()
+            .any(|row| row.get(1) == Some(&Value::Text("sqlitex_optional_index".to_string())))
+        {
+            return Err(io::Error::other("snapshot omitted a user extension index").into());
         }
         Ok(())
     }

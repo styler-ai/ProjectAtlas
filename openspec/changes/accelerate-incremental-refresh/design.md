@@ -292,6 +292,21 @@ capture counts, existing predecessor/drift/extension controls and fixed focused
 shipping summary/warm measurements must establish this experiment's bounds,
 compatibility and benefit before new installed acceptance is requested.
 
+Schema catalogs distinguish SQLite's literal reserved `sqlite_` namespace from
+ordinary user-object names. SQL `LIKE` treats an unescaped underscore as a
+single-character wildcard; that assumption previously hid lookalike user tables,
+views and triggers from admission and could classify a foreign database as fresh.
+Use an escaped literal underscore in every owning catalog filter: fresh-state
+detection, current streamed table validation, complete predecessor/diagnostic
+table capture and extension-object validation. Compatibility and rollback
+snapshot readers use the same literal namespace rule independently. This changes
+no durable schema, version, connection profile, cached fact or supported extension
+policy. Genuine engine statistics and compatible non-unique indexes remain valid.
+The correction belongs to tasks 2.3/2.4 alongside the changed metadata admission
+owner. Causal foreign/current/released/evolved-schema controls must prove typed
+refusal without mutation, with real CLI/MCP refusal and positive navigation before
+acceptance; preserve the registered performance targets on the corrected source.
+
 ### Apply the delta and avoid repeated whole-project work
 
 Convert discovered or observed changes into the existing incremental path. Use source/dependency invalidation rules to expand the affected set only when necessary. Relevant compiler, ignore, parser or publication-policy changes may legitimately invalidate a wider scope.

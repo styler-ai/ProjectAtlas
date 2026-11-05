@@ -26858,7 +26858,7 @@ fn sqlite_compatibility_snapshot(
         let mut statement = connection.prepare(
             "SELECT type, name, tbl_name, COALESCE(sql, '')
              FROM sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY type, name",
         )?;
         statement

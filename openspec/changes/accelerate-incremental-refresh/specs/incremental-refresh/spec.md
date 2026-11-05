@@ -113,6 +113,19 @@ CLI and MCP SHALL use the explicitly selected project/worktree and its existing 
 - **WHEN** project-local initialized state is absent or a required publication is missing
 - **THEN** refresh returns the applicable typed initialization or refresh guidance without silently replacing state
 
+#### Scenario: Foreign database has a lookalike internal namespace
+- **WHEN** a selected existing database contains foreign user objects whose names resemble SQLite's reserved internal prefix
+- **THEN** initialization and root discovery classify those objects as user state and refuse the unrecognized database before adding ProjectAtlas schema or changing its data
+
+#### Scenario: Unsupported objects in current or supported predecessor state
+- **WHEN** current or supported predecessor state contains an unexpected table, view or trigger with a lookalike internal name
+- **THEN** shared schema admission refuses the incompatible shape before mutation or migration, including case and Unicode variants
+- **AND** compatibility and rollback snapshots retain every user object rather than hiding the same names from their proof
+
+#### Scenario: Genuine internal objects and compatible indexes
+- **WHEN** a valid database contains SQLite-generated statistics and permitted non-unique extension indexes
+- **THEN** initialization, normal CLI/MCP navigation and supported upgrades retain their established behavior, including indexes with ordinary user names resembling the internal prefix
+
 #### Scenario: Plain directory
 - **WHEN** a valid selected project has no Git repository or Git is unavailable
 - **THEN** refresh retains its ordinary filesystem and index behavior without making Git a prerequisite

@@ -11,6 +11,7 @@ Indexing and refreshing a large project can take too long and hit a deadline. Ve
 - Reuse the existing watcher and source observer safely. With trustworthy change evidence, update all changed sources and affected data, and make an exactly reconciled unchanged refresh avoid derived work. Zero-source-work warm admission is explicitly deferred to unscheduled #725 by the accepted RC1 scope.
 - Reconcile uncertain history, offline edits and relevant configuration changes exactly. Preserve the complete results and force/rebuild semantics of initial and full indexing.
 - Choose bounded default work budgets from the work required. Preserve explicit caller limits, cancellation, atomic publication, authored purposes, native identity and safe retry.
+- Preserve exact schema admission in the shared metadata owner: match SQLite's reserved internal namespace literally, refuse foreign or unsupported user objects before initialization or migration, and retain genuine engine statistics and permitted extension indexes. Apply the same complete user-object inventory to compatibility and rollback proofs.
 - Prove each improvement with the optimized installed product, normal telemetry, realistic large-project fixtures, work counts and resource measurements on supported platforms.
 
 ## Capabilities
