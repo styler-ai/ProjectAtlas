@@ -1029,6 +1029,30 @@ jobs:
           path: ${{ runner.temp }}/projectatlas-indexing-measurement/results.json
           if-no-files-found: warn
 
+      - name: Supplemental native navigation resource attribution
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$RUNNER_TEMP/projectatlas-indexing-measurement/results.json" ]]; then
+            echo "No original indexing report is available for supplemental attribution."
+            exit 0
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_navigation_resources.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --candidate "$PROJECTATLAS_PACKAGED_RUNTIME" \
+            --campaign-root "$RUNNER_TEMP/projectatlas-indexing-measurement" \
+            --output-root "$RUNNER_TEMP/projectatlas-indexing-navigation-resources"
+
+      - name: Upload supplemental native navigation resources
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-navigation-resources-${{ matrix.label }}
+          path: ${{ runner.temp }}/projectatlas-indexing-navigation-resources/
+          if-no-files-found: warn
+
       - name: Installed-candidate native Btrfs database placement contract
         if: matrix.label == 'linux-x64-posix'
         timeout-minutes: 10

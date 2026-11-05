@@ -493,5 +493,117 @@ class AcceptanceTargets(unittest.TestCase):
                 campaign.evaluate()
 
 
+class NativeResourceAttribution(unittest.TestCase):
+    def test_native_resource_units_and_invalid_or_missing_counters(self):
+        import indexing_navigation_resources as resources
+
+        with tempfile.TemporaryDirectory() as task:
+            counter = Path(task) / "native-time"
+            for native, text, expected in [
+                ("linux", "16384\n", 16777216),
+                ("darwin", "        16777216  maximum resident set size\n", 16777216),
+            ]:
+                with patch.object(resources.sys, "platform", native):
+                    counter.write_text(text)
+                    self.assertEqual(resources.native_peak(counter), expected)
+                    for invalid in ("", "not a resource counter", text + text, "-1"):
+                        counter.write_text(invalid)
+                        with self.assertRaises(ValueError):
+                            resources.native_peak(counter)
+            with patch.object(resources.sys, "platform", "linux"):
+                counter.write_text("0\n")
+                self.assertEqual(resources.native_peak(counter, require_positive=False), 0)
+                with self.assertRaises(ValueError):
+                    resources.native_peak(counter)
+            counter.unlink()
+            with self.assertRaises(ValueError):
+                resources.native_peak(counter)
+
+    def test_supplemental_resource_attribution_rejects_unbound_originals_before_launch(self):
+        import indexing_navigation_resources as resources
+
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            binary = root / "runtime"
+            binary.write_bytes(b"unit-test runtime identity")
+            original = root / "results.json"
+            source = {"source_revision": "current", "machine": resources.platform.machine(),
+                      "runtimes": {name: {"sha256": digest(binary), "version": "0.5.0"}
+                                   for name in ("baseline", "candidate")},
+                      "samples": [{"runtime": name, "case": "detailed"}
+                                  for name in ("baseline", "candidate") for _ in range(9)]}
+            output = root.parent / (root.name + "-resource-output")
+            arguments = ["resources", "--baseline", str(binary), "--candidate", str(binary),
+                         "--campaign-root", str(root), "--output-root", str(output)]
+            cases = [
+                ({**source, "source_revision": "other"}, "different source revision"),
+                ({**source, "machine": "other"}, "different native architecture"),
+                ({**source, "runtimes": {**source["runtimes"], "candidate": {"sha256": "0" * 64}}}, "Executable differs"),
+                ({**source, "samples": source["samples"][:-1]}, "samples are incomplete"),
+            ]
+            for report, message in cases:
+                original.write_text(json.dumps(report))
+                before = original.read_bytes()
+                with patch.object(resources.sys, "argv", arguments), \
+                     patch.object(resources.sys, "platform", "linux"), \
+                     patch.dict(resources.os.environ, {"GITHUB_ACTIONS": "false"}), \
+                     patch.object(resources.subprocess, "check_output", return_value="current\n"), \
+                     patch.object(resources, "spawn_owned_process") as spawn:
+                    with self.assertRaisesRegex(ValueError, message):
+                        resources.main()
+                    spawn.assert_not_called()
+                self.assertEqual(original.read_bytes(), before)
+                self.assertFalse(output.exists())
+            source.update(workflow_run_id="current-run", candidate_origin="installed release workflow")
+            for changes in ({"workflow_run_id": "different-run"}, {"candidate_origin": "local draft"}):
+                original.write_text(json.dumps({**source, **changes}))
+                with patch.object(resources.sys, "argv", arguments), \
+                     patch.object(resources.sys, "platform", "linux"), \
+                     patch.dict(resources.os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_RUN_ID": "current-run"}), \
+                     patch.object(resources.subprocess, "check_output", return_value="current\n"), \
+                     patch.object(resources, "spawn_owned_process") as spawn:
+                    with self.assertRaisesRegex(ValueError, "not from this installed workflow run"):
+                        resources.main()
+                    spawn.assert_not_called()
+                self.assertFalse(output.exists())
+            original.write_text(json.dumps(source))
+            for name in ("baseline", "candidate"):
+                (root / "navigation" / name).mkdir(parents=True)
+            # A matching installed-run binding reaches the fixture boundary.
+            # No child or synthetic measurement is required for this gate test.
+            with patch.object(resources.sys, "argv", arguments), \
+                 patch.object(resources.sys, "platform", "linux"), \
+                 patch.dict(resources.os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_RUN_ID": "current-run"}), \
+                 patch.object(resources.subprocess, "check_output", return_value="current\n"), \
+                 patch.object(resources, "state", side_effect=RuntimeError("fixture boundary reached")) as inspect, \
+                 patch.object(resources, "spawn_owned_process") as spawn:
+                with self.assertRaisesRegex(RuntimeError, "fixture boundary reached"):
+                    resources.main()
+                inspect.assert_called_once()
+                spawn.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_total_resource_budget_refuses_before_spawn_and_cleans_up_expiry(self):
+        import indexing_navigation_resources as resources
+
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            with patch.object(resources.time, "perf_counter", return_value=10), \
+                 patch.object(resources, "spawn_owned_process") as spawn:
+                with self.assertRaisesRegex(TimeoutError, "total budget"):
+                    resources.observe(["unused"], root, {}, root, "expired", deadline=9)
+                spawn.assert_not_called()
+            with patch.object(resources.time, "perf_counter", return_value=10), \
+                 patch.object(resources, "spawn_owned_process") as spawn, \
+                 patch.object(resources, "terminate_owned_process") as cleanup:
+                process = unittest.mock.Mock()
+                spawn.return_value = (process, None)
+                process.communicate.side_effect = resources.subprocess.TimeoutExpired("unit fixture", .25)
+                with self.assertRaises(resources.subprocess.TimeoutExpired):
+                    resources.observe(["unused"], root, {}, root, "active", deadline=10.25)
+                process.communicate.assert_called_once_with(timeout=.25)
+                cleanup.assert_called_once_with(process, None)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py")
+CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py", "indexing_navigation_resources.py")
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 
 
@@ -70,7 +70,8 @@ def campaign_entrypoint(line: str) -> bool:
 
 def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int) -> bool:
     """Admit only the opt-in step of the dispatch-only prepublication diagnostic."""
-    if relative != ".github/workflows/release.yml" or "indexing_acceptance.py" not in lines[position]:
+    supplemental = "indexing_navigation_resources.py" in lines[position]
+    if relative != ".github/workflows/release.yml" or not ("indexing_acceptance.py" in lines[position] or supplemental):
         return False
     if any(name in lines[position] for name in ("system_scale.py", "agent_navigation.py")):
         return False
@@ -86,7 +87,9 @@ def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int)
         return False
     for start in range(position, -1, -1):
         if lines[start].startswith("      - name:"):
-            return "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}" in lines[start:position]
+            guard = ("        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
+                     if supplemental else "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}")
+            return guard in lines[start:position]
     return False
 
 
@@ -116,6 +119,21 @@ def self_test() -> None:
         changed = [after if line == before else line for line in diagnostic]
         assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
     assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
+    supplemental = diagnostic.copy()
+    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
+    supplemental[-1] = "        run: python docs/benchmarks/harness/indexing_navigation_resources.py"
+    assert campaign_entrypoint(supplemental[-1])
+    assert explicit_indexing_diagnostic(route, supplemental, len(supplemental) - 1)
+    assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", supplemental, len(supplemental) - 1)
+    for before, after in [
+        (" && inputs.prepublish_only", ""),
+        (" && inputs.run_indexing_performance", ""),
+        (" && matrix.label == 'macos-arm64-posix'", ""),
+        ("        default: false", "        default: true"),
+        ("  workflow_dispatch:", "  push:"),
+    ]:
+        changed = [line.replace(before, after) for line in supplemental]
+        assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
     assert not is_oversized_tracked_raw_result(
         "docs/benchmarks/fixtures/generated.jsonl",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,

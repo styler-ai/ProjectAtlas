@@ -1061,3 +1061,30 @@ capacity, cancellation, observer, CLI/MCP and Cloud Files controls. The native
 optimized owner profile and genuine corrected packaged measurements must justify
 retaining this change. No latency/RSS limit, diagnostic-only number or failed
 cohort is substituted for the registered installed acceptance.
+
+## Supplemental native navigation memory attribution
+
+After the explicit installed campaign, the Apple Silicon job may run one bounded
+resource diagnostic on that same campaign's completed navigation fixtures and
+exact executable hashes. The route remains manual, prepublication-only and
+opt-in, with separate output and artifacts; it runs after the original report is
+saved even when a registered target fails. Source revision, architecture and
+workflow-run identity must match. Missing or incomplete originals fail closed.
+
+Use the native `/usr/bin/time` program high-water counter: Darwin's current
+maximum resident set size is bytes; GNU `%M` is KiB and is converted to bytes for
+local method verification. Preserve its raw resource output and a tiny native
+floor control. Run one discarded warmup each and nine alternating serial pairs
+of the original detailed-navigation command, with normal telemetry and C locale
+for stable resource labels. Use one cooperative 180-second helper budget within
+the five-minute workflow step; each owned process group gets at most 120 seconds of its remaining budget. Kill and
+reap the owned group before reporting timeout, reserving workflow cleanup margin.
+Retain partial attempts and failures. Keep capture files outside the original
+campaign and check that original publication, authored state and report bytes
+remain unchanged after every observation.
+
+These supplemental counters have different accounting from the registered
+5 ms sampled process-tree RSS. They do not replace its samples, reevaluate its
+targets, establish an inequality between counters, or waive an original failure.
+Native timing is diagnostic only. Linux execution verifies the helper's method;
+Apple Silicon attribution requires actual Apple Silicon execution.
