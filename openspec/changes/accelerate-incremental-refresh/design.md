@@ -1006,3 +1006,22 @@ absence-to-presence and errors, and prove fresh root/external alias retargets
 and policy bytes across independent discoveries and registration. Shipping
 reference/shallow/deep timing and memory results, followed by the registered
 installed matrix, determine whether this bounded reuse is retained.
+
+## Native current-read attribution
+
+Native CI retains the existing debug/all-feature stage profile and runs the same
+bounded current-read test with default features and the ordinary release profile.
+Place the optimized diagnostic after document resource proof so its build reuses
+the already-required shipping release dependencies. Retain separate native log
+artifacts for both profiles; preserve the exact test and its source, policy,
+snapshot, publication and observer assertions.
+
+The test warms one registry before five repeated admissions on its 1,024 generated
+one-function sources plus the observer helper's source fixture. It attributes
+inclusive owner durations and work counts;
+nested spans are not additive. It does not time MCP transport, use the installed
+matrix's twelve-function fixture, measure RSS, or compare the packaged 0.5.0
+baseline. An optimized owner profile can localize a remaining native latency
+cost, but cannot establish a product speedup, explain an RSS miss, replace the
+registered installed measurements or waive their limits. Keep previous failed
+cohorts intact while investigating their owning paths.

@@ -902,6 +902,25 @@ jobs:
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture
 
+      - name: Optimized native current-read stage attribution
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        # Reuse the preceding shipping/default-feature release dependencies.
+        # This test-only owner profile is diagnostic, not installed acceptance.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --locked -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-current-read-optimized-attribution.log"
+
+      - name: Upload optimized native current-read stage attribution
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-current-read-optimized-attribution-${{ matrix.label }}
+          path: ${{ runner.temp }}/native-current-read-optimized-attribution.log
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
