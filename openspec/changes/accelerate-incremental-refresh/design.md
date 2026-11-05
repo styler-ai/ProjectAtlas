@@ -265,8 +265,10 @@ Schema admission still inspects complete current table definitions, columns,
 indexes and foreign keys on its actual connection and snapshot. Reuse only the
 five fixed parameterized SQL preparations through rusqlite's existing bounded
 connection-local statement cache; bind each table/index name and execute again.
+Successful table validation instead streams names and definitions from one
+ordered schema-catalog query, avoiding a separate catalog search for each table.
 No schema facts, acceptance result, project identity or cross-connection witness
-is cached, and no capacity, SQL, compatibility rule or connection profile changes.
+is cached, and no capacity, compatibility rule or connection profile changes.
 Real SQLite authorizer counts prove bounded preparation across tables; comparison
 with cache-disabled reads and DDL changes protects rebinding and fresh column,
 index and foreign-key results. Measure optimized navigation and no-op latency/RSS
@@ -274,16 +276,18 @@ before retaining a performance claim.
 
 Compare actual schema metadata one table at a time in the existing storage
 validator, rather than retaining an owned copy of every inspected contract.
-Transient memory includes the existing table-name inventory plus one table's
-metadata; the immutable expected contract remains derived from authoritative
-DDL. Validate exact table names, complete definitions and columns first, then
+Rust retains one table's metadata from the ordered cursor rather than a separate
+table-name inventory; the immutable expected contract remains derived from
+authoritative DDL. SQLite may sort the selected names and definitions, so retain
+this query change only after measuring latency and sampled RSS, without claiming
+that the engine retains only one definition. Validate exact table names, complete definitions and columns first, then
 foreign keys, required and compatible extension indexes, and extension objects.
 Retain the released schema-8 named-column rules. The separate disposable-graph
 schema-15 validator remains unchanged. Failed table or foreign-key checks may
 capture the complete actual contract for the established bounded diagnostic;
 successful admission does not. Actual SQL and native conversion errors remain
 fresh on the selected connection and snapshot, with no acceptance-result cache,
-schema, query, connection-profile or statement-cache-capacity change. Causal
+schema, connection-profile or statement-cache-capacity change. Causal
 capture counts, existing predecessor/drift/extension controls and fixed focused
 shipping summary/warm measurements must establish this experiment's bounds,
 compatibility and benefit before new installed acceptance is requested.

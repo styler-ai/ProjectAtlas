@@ -3032,25 +3032,36 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
     Ok(())
 }
 
-/// Compare complete fresh tables while retaining only their names and one table's rows.
+/// Compare complete fresh tables through one ordered schema cursor.
 fn validate_schema_tables(
     connection: &Connection,
     expected: &SchemaContract,
     released_schema_eight: bool,
 ) -> DbResult<()> {
-    let names = user_table_names(connection)?;
-    let mut tables_match = names
-        .iter()
-        .map(String::as_str)
-        .eq(expected.tables.iter().map(|table| table.name.as_str()));
-    if tables_match {
-        for (name, required) in names.into_iter().zip(&expected.tables) {
+    let tables_match = {
+        let mut statement = connection.prepare(
+            "SELECT name, sql FROM sqlite_schema \
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut matches = true;
+        for required in &expected.tables {
+            let Some(row) = rows.next()? else {
+                matches = false;
+                break;
+            };
+            let name = row.get::<_, String>(0)?;
+            if name != required.name {
+                matches = false;
+                break;
+            }
+            let definition = row.get::<_, String>(1)?;
             let actual = TableContract {
-                definition: table_definition(connection, &name)?,
+                definition: normalize_table_definition(&definition),
                 columns: table_columns(connection, &name)?,
                 name,
             };
-            tables_match = if released_schema_eight {
+            matches = if released_schema_eight {
                 released_schema_tables_match(
                     std::slice::from_ref(required),
                     std::slice::from_ref(&actual),
@@ -3058,11 +3069,12 @@ fn validate_schema_tables(
             } else {
                 required == &actual
             };
-            if !tables_match {
+            if !matches {
                 break;
             }
         }
-    }
+        matches && rows.next()?.is_none()
+    };
     if tables_match {
         Ok(())
     } else {
@@ -3673,7 +3685,12 @@ fn table_definition(connection: &Connection, table: &str) -> DbResult<String> {
     let mut statement = connection
         .prepare_cached("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1")?;
     let definition = statement.query_row([table], |row| row.get::<_, String>(0))?;
-    Ok(definition.split_whitespace().collect::<Vec<_>>().join(" "))
+    Ok(normalize_table_definition(&definition))
+}
+
+/// Preserve the established whitespace-only normalization of table definitions.
+fn normalize_table_definition(definition: &str) -> String {
+    definition.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Return exact user table names in deterministic order.
