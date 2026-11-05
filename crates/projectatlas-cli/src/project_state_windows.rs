@@ -7,12 +7,25 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileCaseSensitiveInfo,
-    FileRenameInfo, FindClose, FindFirstFileW, GetFileInformationByHandleEx,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_CASE_SENSITIVE_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileCaseSensitiveInfo, FileRenameInfo, FindClose,
+    FindFirstFileW, GetFileAttributesW, GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES,
     SetFileInformationByHandle, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+#[cfg(test)]
+thread_local! {
+    /// Actual native attribute calls on the current owning test thread.
+    static DIRECTORY_ATTRIBUTE_QUERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Observe actual native work without counting selectors that use the fallback.
+#[cfg(test)]
+pub(crate) fn directory_attribute_query_count() -> u64 {
+    DIRECTORY_ATTRIBUTE_QUERIES.get()
+}
 
 /// Encode a native path without permitting a truncated NUL-terminated lookup.
 fn native_path(path: &Path) -> io::Result<Vec<u16>> {
@@ -25,6 +38,60 @@ fn native_path(path: &Path) -> io::Result<Vec<u16>> {
     }
     name.push(0);
     Ok(name)
+}
+
+/// Query fresh ordinary-directory attributes without collecting unrelated metadata.
+///
+/// A positive result proves only the queried entry's directory/reparse flags,
+/// not its identity, canonical name, access rights or continued existence.
+/// All other results require the caller's ordinary metadata inspection. In
+/// particular, leave reparse classification and alternate-stream selectors to
+/// that backend rather than inferring directory type from their base entry.
+///
+/// # Errors
+/// Returns an error when path encoding or the native attribute lookup fails.
+/// Callers using this as an optional probe must retain their standard fallback.
+pub(crate) fn has_ordinary_directory_attributes(path: &Path) -> io::Result<bool> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return Ok(false);
+    }
+    let name = native_path(path)?;
+    if name
+        .iter()
+        .rev()
+        .nth(1)
+        .is_some_and(|unit| matches!(*unit, 47 | 92))
+        || path.components().any(|component| match component {
+            Component::CurDir | Component::ParentDir => true,
+            Component::Normal(name) => {
+                let mut last = None;
+                for unit in name.encode_wide() {
+                    if matches!(unit, 0 | 42 | 58 | 63) {
+                        return true;
+                    }
+                    last = Some(unit);
+                }
+                matches!(last, Some(32 | 46))
+            }
+            _ => false,
+        })
+    {
+        return Ok(false);
+    }
+    #[cfg(test)]
+    DIRECTORY_ATTRIBUTE_QUERIES.set(DIRECTORY_ATTRIBUTE_QUERIES.get().saturating_add(1));
+    // SAFETY: the owned, nonempty UTF-16 buffer has exactly one trailing NUL
+    // and remains live for this synchronous query. No pointer is retained.
+    let attributes = unsafe { GetFileAttributesW(name.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(
+        attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == FILE_ATTRIBUTE_DIRECTORY,
+    )
 }
 
 /// Select a conservative superset of DOS components without filesystem queries.
@@ -236,6 +303,43 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::os::windows::fs::OpenOptionsExt;
+
+    /// Probing never turns ambiguous native spellings into ordinary directories.
+    #[test]
+    fn ordinary_directory_attributes_are_fresh_and_keep_selector_fallbacks() -> io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let directory = temp.path().join("ordinary");
+        fs::create_dir(&directory)?;
+        assert!(has_ordinary_directory_attributes(&directory)?);
+        assert!(has_ordinary_directory_attributes(
+            &directory.canonicalize()?
+        )?);
+        for suffix in ["\\", "/", ":settings", "*", ".", " "] {
+            let mut spelling = directory.as_os_str().to_os_string();
+            spelling.push(suffix);
+            let before = directory_attribute_query_count();
+            assert!(!has_ordinary_directory_attributes(Path::new(&spelling))?);
+            assert_eq!(directory_attribute_query_count(), before);
+        }
+        assert!(!has_ordinary_directory_attributes(Path::new("relative"))?);
+        assert!(!has_ordinary_directory_attributes(&directory.join(".."))?);
+        let missing = directory.join("missing");
+        assert_eq!(
+            has_ordinary_directory_attributes(&missing)
+                .err()
+                .map(|error| error.kind()),
+            fs::symlink_metadata(&missing)
+                .err()
+                .map(|error| error.kind()),
+        );
+        fs::remove_dir(&directory)?;
+        fs::write(&directory, "ordinary file at the former directory spelling")?;
+        assert!(!has_ordinary_directory_attributes(&directory)?);
+        fs::remove_file(&directory)?;
+        fs::create_dir(&directory)?;
+        assert!(has_ordinary_directory_attributes(&directory)?);
+        Ok(())
+    }
 
     /// Publishing a readonly stage never clears its retained access attributes.
     #[test]

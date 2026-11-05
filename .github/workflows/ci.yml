@@ -911,6 +911,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --release --locked -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-current-read-optimized-attribution.log"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo test --release --locked -p projectatlas-cli --bin projectatlas runtime::policy_watch::tests::ordinary_policy_directory_attributes_preserve_selection_with_less_full_metadata -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-policy-directory-attribution.log"
+          fi
 
       - name: Upload optimized native current-read stage attribution
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
@@ -918,6 +921,15 @@ jobs:
         with:
           name: native-current-read-optimized-attribution-${{ matrix.label }}
           path: ${{ runner.temp }}/native-current-read-optimized-attribution.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload native policy-directory attribution
+        if: matrix.label == 'windows' && contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-policy-directory-attribution-${{ matrix.label }}
+          path: ${{ runner.temp }}/native-policy-directory-attribution.log
           if-no-files-found: error
           retention-days: 7
 

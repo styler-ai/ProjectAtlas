@@ -1025,3 +1025,39 @@ baseline. An optimized owner profile can localize a remaining native latency
 cost, but cannot establish a product speedup, explain an RSS miss, replace the
 registered installed measurements or waive their limits. Keep previous failed
 cohorts intact while investigating their owning paths.
+
+## Fresh Windows policy-directory attributes
+
+The optimized native owner profile on the unchanged Windows source attributes
+10.61 ms of a 64.21 ms median admission to two policy-discovery passes. This is
+test-only attribution on the smaller fixture, not installed MCP acceptance or
+proof that one particular syscall accounts for the complete regression.
+
+The ancestor-classification loop needs to distinguish an ordinary directory from
+an alias or other entry. Requesting complete metadata for each ordinary ancestor
+also collects fields that this decision never consumes. Use the existing native
+Windows filesystem boundary and locked official `windows-sys` bindings for one
+fresh attribute query. Only a successful directory result with no reparse flag
+can select the ordinary-directory branch. All other results, including errors,
+go through the existing `symlink_metadata` branch and its original diagnostics.
+Relative, parent-component, wildcard and alternate-stream selectors also retain
+that fallback, as do trailing separators and dot/space components whose native
+lookup rules must remain with the established backend. Keep UTF-16/NUL validation
+in the existing native-path owner.
+
+This is an operation-local query, not a metadata or identity cache. Keep both
+fresh policy discoveries, all selected binding/alias canonicalizations, bytes,
+watch rebinding, ordinary-directory namespace memo bounds, source comparisons
+and pre/post acceptance fences. Do not change source-reader handles, sharing,
+reparse compatibility or legitimate Cloud Files behavior. Unix keeps its existing
+metadata path. Native query errors are not ignored as successful inspection: the
+standard backend must still classify the entry or return its original failure.
+
+Compare the complete selection against the original full-metadata control on
+Windows, recording actual attribute and complete-metadata calls. Cover fresh
+directory replacement, aliases, ordinary/non-directory and missing parents,
+verbatim/native selectors and fallback errors; retain existing retarget, A/B/A,
+capacity, cancellation, observer, CLI/MCP and Cloud Files controls. The native
+optimized owner profile and genuine corrected packaged measurements must justify
+retaining this change. No latency/RSS limit, diagnostic-only number or failed
+cohort is substituted for the registered installed acceptance.
