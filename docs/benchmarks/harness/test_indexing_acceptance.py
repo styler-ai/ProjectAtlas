@@ -1,6 +1,6 @@
 """Protect acceptance arithmetic and fail-closed completeness without a campaign."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 import hashlib
 import importlib.util
 import io
@@ -270,6 +270,137 @@ class DatabaseInspection(unittest.TestCase):
                     for connection in opened:
                         connection.close()
                     source.close()
+
+
+class WarmMeasurement(unittest.TestCase):
+    @contextmanager
+    def protocol(self, root, *, fail_construct=None, fail_call=None, change_state=None):
+        """Observe real fixture state around controlled, serial MCP responses."""
+        executable = root / "runtime"
+        executable.write_bytes(b"warm measurement protocol fixture")
+        campaign = Campaign(root / "result.json", executable, executable, "0.5.1-rc1")
+        events, live, calls = [], set(), {"baseline": 0, "candidate": 0}
+        owner = self
+
+        def create(current):
+            current.mkdir(parents=True)
+            path = current / SOURCE_FILE
+            path.parent.mkdir(parents=True)
+            path.write_text("pub fn example(n: u64) -> u64 { n.saturating_add(1) }\n")
+            DatabaseInspection().project(current)
+            with closing(sqlite3.connect(database(current))) as connection, connection:
+                connection.execute("CREATE TABLE file_texts(path TEXT, content TEXT)")
+                connection.execute("INSERT INTO file_texts VALUES(?,?)", (SOURCE_FILE, path.read_text()))
+
+        def run(runtime, current, arguments, case=None):
+            owner.assertEqual(current.name, runtime)
+            if case == "offline_same_metadata":
+                owner.assertFalse(live, "offline controls must follow both client closures")
+                events.append(("offline", runtime))
+                with closing(sqlite3.connect(database(current))) as connection, connection:
+                    connection.execute("UPDATE file_texts SET content=? WHERE path=?",
+                                       ((current / SOURCE_FILE).read_text(), SOURCE_FILE))
+            else:
+                owner.assertEqual(arguments, ["init"])
+                events.append(("init", runtime))
+            return {}
+
+        class Client:
+            def __init__(self, executable, current, env, **options):
+                self.runtime, self.current = current.name, current
+                events.append(("construct", self.runtime))
+                owner.assertEqual(options["required_version"], campaign.versions[self.runtime])
+                if self.runtime == fail_construct:
+                    raise RuntimeError("injected client construction failure")
+                live.add(self.runtime)
+
+            def call(self, name, arguments):
+                owner.assertEqual(live, {"baseline", "candidate"},
+                                  "both clients must remain live throughout paired sampling")
+                owner.assertEqual(name, "atlas_watch_once")
+                owner.assertEqual(arguments, {"project_path": str(self.current)})
+                calls[self.runtime] += 1
+                point = self.runtime, calls[self.runtime]
+                events.append(("call", self.runtime))
+                if point == fail_call:
+                    raise RuntimeError("injected request failure")
+                if point == change_state:
+                    with closing(sqlite3.connect(database(self.current))) as connection, connection:
+                        connection.execute("UPDATE purposes SET purpose='unexpected publication'")
+                return "watch: unchanged", float(len(events))
+
+            def close(self):
+                owner.assertIn(self.runtime, live)
+                live.remove(self.runtime)
+                events.append(("close", self.runtime))
+
+        with ExitStack() as patches:
+            patches.enter_context(patch("indexing_acceptance.fixture", side_effect=create))
+            patches.enter_context(patch.object(campaign, "run", side_effect=run))
+            patches.enter_context(patch("indexing_acceptance.McpClient", Client))
+            yield campaign, events, live
+
+    def test_warm_calls_are_paired_and_controls_follow_both_client_closures(self):
+        with tempfile.TemporaryDirectory() as task, self.protocol(Path(task)) as (campaign, events, live):
+            campaign.warm(Path(task) / "warm")
+            expected = [runtime for round_index in range(10)
+                        for runtime in (("baseline", "candidate") if round_index % 2 == 0
+                                        else ("candidate", "baseline"))]
+            self.assertEqual([runtime for event, runtime in events if event == "call"], expected)
+            first_call = next(index for index, event in enumerate(events) if event[0] == "call")
+            self.assertEqual(events[:2], [("init", "baseline"), ("init", "candidate")])
+            self.assertEqual(sum(event[0] == "construct" for event in events[:first_call]), 2)
+            samples = campaign.result["warm_mcp"]
+            self.assertEqual([row["runtime"] for row in samples], expected[2:])
+            self.assertEqual([(row["round"], row["position"]) for row in samples],
+                             [(round_index, position) for round_index in range(1, 10)
+                              for position in range(2)])
+            self.assertEqual(campaign.result["warm_mcp_order"], [
+                {"runtime": runtime, "round": index // 2, "position": index % 2,
+                 "warmup": index < 2} for index, runtime in enumerate(expected)])
+            self.assertEqual(len(campaign.result["checks"]), 44)
+            self.assertTrue(all(row["passed"] for row in campaign.result["checks"]))
+            for runtime in ("baseline", "candidate"):
+                for control in ("warm MCP refresh succeeds", "warm MCP preserves publication"):
+                    self.assertEqual(sum(row["name"] == runtime + " " + control
+                                         for row in campaign.result["checks"]), 10)
+            self.assertEqual([event for event in events if event[0] == "offline"],
+                             [("offline", "baseline"), ("offline", "candidate")])
+            self.assertFalse(live)
+
+    def test_second_client_construction_failure_closes_first_before_any_call(self):
+        with tempfile.TemporaryDirectory() as task, self.protocol(
+                Path(task), fail_construct="candidate") as (campaign, events, live):
+            with self.assertRaisesRegex(RuntimeError, "injected client construction failure"):
+                campaign.warm(Path(task) / "warm")
+            self.assertFalse(live)
+            self.assertNotIn("call", [event[0] for event in events])
+            self.assertEqual(events[-1], ("close", "baseline"))
+
+    def test_request_and_publication_failures_close_both_and_preserve_partial_evidence(self):
+        cases = [(failure, (runtime, call_index)) for failure in ("request", "publication")
+                 for runtime in ("baseline", "candidate") for call_index in range(1, 11)]
+        for failure, point in cases:
+            with self.subTest(failure=failure, point=point), tempfile.TemporaryDirectory() as task:
+                options = {"fail_call" if failure == "request" else "change_state": point}
+                with self.protocol(Path(task), **options) as (campaign, events, live):
+                    with self.assertRaisesRegex(
+                            (RuntimeError if failure == "request" else AssertionError),
+                            ("injected request failure" if failure == "request" else
+                             "warm MCP preserves publication")):
+                        campaign.warm(Path(task) / "warm")
+                    self.assertFalse(live)
+                    self.assertEqual({runtime for event, runtime in events if event == "close"},
+                                     {"baseline", "candidate"})
+                    self.assertNotIn("offline", [event[0] for event in events])
+                    attempts = [runtime for event, runtime in events if event == "call"]
+                    self.assertEqual([row["runtime"] for row in campaign.result["warm_mcp_order"]],
+                                     attempts)
+                    self.assertEqual(len(campaign.result["warm_mcp"]),
+                                     max(0, len(attempts) - 2 - (failure == "request")))
+                    saved = json.loads(campaign.output.read_text())
+                    self.assertEqual(saved["warm_mcp"], campaign.result["warm_mcp"])
+                    self.assertEqual(saved["warm_mcp_order"], campaign.result["warm_mcp_order"])
 
 
 class AcceptanceTargets(unittest.TestCase):

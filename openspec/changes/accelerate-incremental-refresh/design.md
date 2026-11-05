@@ -939,6 +939,20 @@ preregistered input catalog, targets and compact Linux draft evidence are linked
 from the indexing reference. Pure arithmetic/completeness tests run normally;
 full measurements remain manual and do not establish RC publication acceptance.
 
+Warm MCP comparison retains two isolated client processes and fixtures before
+the first call. Use ten serial paired rounds with alternating order: round zero
+is baseline then candidate with one discarded warm-up each; rounds one through
+nine alternate candidate/baseline and baseline/candidate. Retain exactly nine
+timed calls per runtime, their round and position, and a separate actual-call
+order audit including warm-ups. Preserve success and unchanged-publication checks
+after every call. Standard-library `ExitStack` closes both clients on success,
+partial construction, request failure or state refusal; both must close before
+either offline same-size/same-mtime edit and CLI/content control. This changes
+measurement order, without changing product behavior, resource targets or sample
+counts. The prior fixed-order warm blocks confounded runtime with between-block
+host conditions; retain their observed failures and require corrected-protocol
+proof before acceptance, without attributing those failures to a product cause.
+
 Native packaging retains independent optimized shipping and contract target trees
 and the shipping-runtime digest guard. Its 60-minute job budget accounts for both
 builds: the Intel Mac shipping build consumed 16 minutes before contract compilation

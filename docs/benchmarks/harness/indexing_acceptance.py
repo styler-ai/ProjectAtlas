@@ -8,7 +8,7 @@ retain failures and sampled RSS; they do not claim allocation or physical I/O.
 from __future__ import annotations
 
 import argparse
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 import hashlib
 import json
 import os
@@ -506,27 +506,48 @@ class Campaign:
 
     def warm(self, root: Path) -> None:
         self.result["warm_mcp"] = []
+        self.result["warm_mcp_order"] = []
+        states = {}
         for runtime in self.runtimes:
             current = root / runtime
             fixture(current)
             self.run(runtime, current, ["init"])
-            before = state(current)
-            client = McpClient(self.runtimes[runtime], current, self.env,
-                               request_timeout_seconds=COMMAND_TIMEOUT,
-                               required_version=self.versions[runtime])
-            try:
-                for iteration in range(10):
-                    response, milliseconds = client.call("atlas_watch_once", {"project_path": str(current)})
+            states[runtime] = state(current)
+        with ExitStack() as cleanup:
+            clients = {}
+            for runtime in self.runtimes:
+                client = McpClient(self.runtimes[runtime], root / runtime, self.env,
+                                   request_timeout_seconds=COMMAND_TIMEOUT,
+                                   required_version=self.versions[runtime])
+                cleanup.callback(client.close)
+                clients[runtime] = client
+            # Both clients are idle-ready before sampling. Keep one request in
+            # flight and counterbalance order within the same local time window.
+            for iteration in range(10):
+                order = (("baseline", "candidate") if iteration % 2 == 0
+                         else ("candidate", "baseline"))
+                for position, runtime in enumerate(order):
+                    current = root / runtime
+                    self.result["warm_mcp_order"].append({"runtime": runtime,
+                        "round": iteration, "position": position, "warmup": iteration == 0})
+                    try:
+                        response, milliseconds = clients[runtime].call(
+                            "atlas_watch_once", {"project_path": str(current)})
+                    except BaseException:
+                        # Retain the attempted call even when no response arrives.
+                        self.save()
+                        raise
                     self.check("watch:" in response and "error:" not in response,
                                runtime + " warm MCP refresh succeeds")
                     if iteration:
                         self.result["warm_mcp"].append({"runtime": runtime,
+                            "round": iteration, "position": position,
                             "wall_seconds": milliseconds / 1000,
                             "output_bytes": len(response.encode()),
                             "source_work": "not exposed by this public response; owning causal tests required"})
-                    self.check(state(current) == before, runtime + " warm MCP preserves publication")
-            finally:
-                client.close()
+                    self.check(state(current) == states[runtime], runtime + " warm MCP preserves publication")
+        for runtime in self.runtimes:
+            current = root / runtime
             path = current / SOURCE_FILE
             metadata = path.stat()
             original = path.read_bytes()
