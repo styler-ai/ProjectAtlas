@@ -321,7 +321,9 @@ mod tests {
                 l_pid: 0,
             };
             fcntl(&file, FcntlArg::F_GETLK(&mut lock))?;
-            if i32::from(lock.l_type) == nix::libc::F_UNLCK || i64::from(lock.l_pid) != expected {
+            if i64::from(lock.l_type) == i64::from(nix::libc::F_UNLCK)
+                || i64::from(lock.l_pid) != expected
+            {
                 return Err(format!("SQLite main-file shared lock lost: owner={}, kind={}, expected owner={expected}", lock.l_pid, lock.l_type).into());
             }
             return Ok(());
