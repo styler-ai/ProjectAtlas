@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "scope": "Complete installed development-candidate campaign; not a published RC1 result. All original report/package identities authenticated. No failed targets waived.",
-  "workflow_run_id": "42005215934",
-  "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42005215934",
-  "source_revision": "bfc3ba9f1739a29a73054f6fdd0188a3c95e97f0",
+  "workflow_run_id": "42051716235",
+  "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42051716235",
+  "source_revision": "82a6b17920ccdf3be0ed84e5a80b3c579dab2a5a",
   "complete": true,
   "all_platforms_passed": false,
   "platforms": {
@@ -24,12 +24,12 @@
         },
         "candidate": {
           "version": "0.5.0",
-          "sha256": "a991fa4c00f4a92ceae5c7408356a058d234d270c9c186c755d524d7e3109fbc"
+          "sha256": "f6f9dc4567e8222be56ec1fbc5cb5482a01bbe216353cc0d0650cfc04e3af99b"
         }
       },
       "candidate_archive": {
         "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
-        "sha256": "35bbdc87c54691628e9f100d70f8820652719b95117bc6999337f748d15c94c7"
+        "sha256": "b5fc52a50526b9432686009d68f00d6007a151bc1005d5ec8034b02022c05159"
       },
       "baseline_archive": {
         "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
@@ -38,157 +38,161 @@
       "summary": {
         "initial": {
           "baseline": {
-            "median_seconds": 5.527100888999996,
-            "maximum_sampled_rss_bytes": 175181824,
-            "median_source_bytes_per_second": 135452.3854431492
+            "median_seconds": 5.5410492600000225,
+            "maximum_sampled_rss_bytes": 175734784,
+            "median_source_bytes_per_second": 135111.41389852884
           },
           "candidate": {
-            "median_seconds": 4.296081151999999,
-            "maximum_sampled_rss_bytes": 183418880,
-            "median_source_bytes_per_second": 174265.56284940496
+            "median_seconds": 4.293554191999988,
+            "maximum_sampled_rss_bytes": 183881728,
+            "median_source_bytes_per_second": 174368.12638697962
           }
         },
         "full": {
           "baseline": {
-            "median_seconds": 7.2177926929999785,
-            "maximum_sampled_rss_bytes": 176242688,
-            "median_source_bytes_per_second": 103719.93652935499
+            "median_seconds": 6.824496845999988,
+            "maximum_sampled_rss_bytes": 176582656,
+            "median_source_bytes_per_second": 109692.92196812619
           },
           "candidate": {
-            "median_seconds": 5.098026293000032,
-            "maximum_sampled_rss_bytes": 184692736,
-            "median_source_bytes_per_second": 146846.82992473443
+            "median_seconds": 4.947221619000004,
+            "maximum_sampled_rss_bytes": 184885248,
+            "median_source_bytes_per_second": 151317.05382370084
           }
         },
         "rebuild": {
           "baseline": {
-            "median_seconds": 6.961323001000039,
-            "maximum_sampled_rss_bytes": 175390720,
-            "median_source_bytes_per_second": 107532.5767662933
+            "median_seconds": 6.389301787000022,
+            "maximum_sampled_rss_bytes": 175861760,
+            "median_source_bytes_per_second": 117169.14069127181
           },
           "candidate": {
-            "median_seconds": 4.747979208000004,
-            "maximum_sampled_rss_bytes": 183504896,
-            "median_source_bytes_per_second": 157660.54719420738
+            "median_seconds": 4.662801566999974,
+            "maximum_sampled_rss_bytes": 183414784,
+            "median_source_bytes_per_second": 160553.47611150105
           }
         },
         "cold_noop": {
           "baseline": {
-            "median_seconds": 0.05467476949996808,
-            "maximum_sampled_rss_bytes": 20328448,
+            "median_seconds": 0.04120157749997588,
+            "maximum_sampled_rss_bytes": 19513344,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.04855254949998766,
-            "maximum_sampled_rss_bytes": 20054016,
+            "median_seconds": 0.038273284499979354,
+            "maximum_sampled_rss_bytes": 20119552,
             "median_source_bytes_per_second": null
           }
         },
         "sparse": {
           "baseline": {
-            "median_seconds": 6.828455389999988,
-            "maximum_sampled_rss_bytes": 175824896,
+            "median_seconds": 6.537740192000001,
+            "maximum_sampled_rss_bytes": 176050176,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.1343069069999956,
-            "maximum_sampled_rss_bytes": 27070464,
+            "median_seconds": 0.2197441499999968,
+            "maximum_sampled_rss_bytes": 27181056,
             "median_source_bytes_per_second": null
           }
         },
         "summary": {
           "baseline": {
-            "median_seconds": 0.059755348000010144,
-            "maximum_sampled_rss_bytes": 22114304,
+            "median_seconds": 0.061405003999993824,
+            "maximum_sampled_rss_bytes": 22241280,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.0586028919999535,
-            "maximum_sampled_rss_bytes": 22175744,
+            "median_seconds": 0.04453367899998284,
+            "maximum_sampled_rss_bytes": 22474752,
             "median_source_bytes_per_second": null
           }
         },
         "detailed": {
           "baseline": {
-            "median_seconds": 0.051385241999980735,
-            "maximum_sampled_rss_bytes": 19611648,
+            "median_seconds": 0.03966969600003267,
+            "maximum_sampled_rss_bytes": 19800064,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.04664997999998377,
-            "maximum_sampled_rss_bytes": 21520384,
+            "median_seconds": 0.03696111499999688,
+            "maximum_sampled_rss_bytes": 20271104,
             "median_source_bytes_per_second": null
           }
         },
         "compatible_open": {
           "baseline": {
-            "median_seconds": 0.05557838199996468,
-            "maximum_sampled_rss_bytes": 20385792,
+            "median_seconds": 0.04302247100002887,
+            "maximum_sampled_rss_bytes": 20791296,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.049169941999991806,
-            "maximum_sampled_rss_bytes": 20078592,
+            "median_seconds": 0.0604870629999823,
+            "maximum_sampled_rss_bytes": 20545536,
             "median_source_bytes_per_second": null
           }
         },
         "large_sparse": {
           "baseline": {
-            "median_seconds": 16.586684584000068,
-            "maximum_sampled_rss_bytes": 352710656,
+            "median_seconds": 15.84514661899999,
+            "maximum_sampled_rss_bytes": 353009664,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.18582898099998602,
-            "maximum_sampled_rss_bytes": 28430336,
+            "median_seconds": 0.2463855880000665,
+            "maximum_sampled_rss_bytes": 28504064,
             "median_source_bytes_per_second": null
           }
         },
         "dense_sparse": {
           "baseline": {
-            "median_seconds": 9.230623205999905,
-            "maximum_sampled_rss_bytes": 258695168,
+            "median_seconds": 8.74111153199999,
+            "maximum_sampled_rss_bytes": 259198976,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 6.708138572000053,
-            "maximum_sampled_rss_bytes": 223956992,
+            "median_seconds": 6.405118399999992,
+            "maximum_sampled_rss_bytes": 224333824,
             "median_source_bytes_per_second": null
           }
         },
         "semantic_upgrade": {
           "baseline": {
-            "median_seconds": 7.084350961999974,
-            "maximum_sampled_rss_bytes": 177459200,
+            "median_seconds": 6.65093023899999,
+            "maximum_sampled_rss_bytes": 177778688,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 4.962309887999993,
-            "maximum_sampled_rss_bytes": 185438208,
+            "median_seconds": 4.996249910000017,
+            "maximum_sampled_rss_bytes": 185491456,
             "median_source_bytes_per_second": null
           }
         },
         "warm_mcp": {
           "median_seconds": {
-            "baseline": 0.019110730999955194,
-            "candidate": 0.021326081999973212
+            "baseline": 0.016016207000006943,
+            "candidate": 0.01772116899996945
           },
           "rss": "not measured by public MCP route"
         }
       },
-      "failure": "AssertionError: warm MCP exact reconciliation latency target",
-      "raw_sha256": "e0798c8b913a407ebf23f7bb2821315848785285e4e981b7d2cf1859870769df",
+      "failure": "AssertionError: compatible_open latency target; warm MCP exact reconciliation latency target",
+      "raw_sha256": "8405b94696219245ba0385537a1ed60db7e405422b50f8559297bb3be9d75111",
       "source_artifact": {
-        "artifact_id": 13408146953,
+        "artifact_id": 13430649405,
         "name": "indexing-performance-linux-x64-posix",
-        "zip_sha256": "e108751f13efc2939a933e5ac45bc2bcb6fc0d6c702637447d60aaf96ffdfc22"
+        "zip_sha256": "400b960e0cba7be3673b980b789547a05f45e5e4e3cf0dc228aa759e89e64da3"
       },
       "package_artifact": {
-        "artifact_id": 13405149093,
-        "zip_sha256": "93ce8ffd99922aa00cee978043fd1824db0249c85ee69ac5d40352c56e9fdd16"
+        "artifact_id": 13428658445,
+        "zip_sha256": "fa63565f0402085d6cddd880d38ed282d00838741f142450f50f1686573c0379"
       },
       "check_count": 361,
       "failed_checks": [
+        {
+          "name": "compatible_open latency target",
+          "passed": false
+        },
         {
           "name": "warm MCP exact reconciliation latency target",
           "passed": false
@@ -249,12 +253,12 @@
         },
         "candidate": {
           "version": "0.5.0",
-          "sha256": "9d7b9f60a0a4d521ede9ab9c086e0b5858b632aac01d2fdd77f029a00c361ae9"
+          "sha256": "4ebddec057bc72936e1dd313a4facd21393ec0b601fd1c16f9df1c5c4bb9dbf9"
         }
       },
       "candidate_archive": {
         "name": "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz",
-        "sha256": "24b25ba38efec6a206752d14a9ce8d09ff75ae96d4fc7e0e1471f4fdbca404f8"
+        "sha256": "c7ca778e5a5e1769ca26561cbb6470ed383500e098ceafc6f1e6dafb426b0b13"
       },
       "baseline_archive": {
         "name": "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz",
@@ -263,153 +267,153 @@
       "summary": {
         "initial": {
           "baseline": {
-            "median_seconds": 9.65258797699994,
-            "maximum_sampled_rss_bytes": 180826112,
-            "median_source_bytes_per_second": 77560.44304220742
+            "median_seconds": 16.564114887000187,
+            "maximum_sampled_rss_bytes": 180502528,
+            "median_source_bytes_per_second": 45197.6459416833
           },
           "candidate": {
-            "median_seconds": 7.871229529999937,
-            "maximum_sampled_rss_bytes": 185782272,
-            "median_source_bytes_per_second": 95113.34882899877
+            "median_seconds": 10.368884290999858,
+            "maximum_sampled_rss_bytes": 185257984,
+            "median_source_bytes_per_second": 72202.46450718255
           }
         },
         "full": {
           "baseline": {
-            "median_seconds": 13.020184881999967,
-            "maximum_sampled_rss_bytes": 190414848,
-            "median_source_bytes_per_second": 57497.57064010344
+            "median_seconds": 13.213140895000151,
+            "maximum_sampled_rss_bytes": 187670528,
+            "median_source_bytes_per_second": 56655.643495277465
           },
           "candidate": {
-            "median_seconds": 8.136114143999976,
-            "maximum_sampled_rss_bytes": 186576896,
-            "median_source_bytes_per_second": 92013.08963346842
+            "median_seconds": 9.024556831999917,
+            "maximum_sampled_rss_bytes": 192356352,
+            "median_source_bytes_per_second": 82954.65516328269
           }
         },
         "rebuild": {
           "baseline": {
-            "median_seconds": 12.123420701999976,
-            "maximum_sampled_rss_bytes": 184565760,
-            "median_source_bytes_per_second": 61748.16649532794
+            "median_seconds": 13.304309790999923,
+            "maximum_sampled_rss_bytes": 189812736,
+            "median_source_bytes_per_second": 56269.660866318016
           },
           "candidate": {
-            "median_seconds": 7.740295484999933,
-            "maximum_sampled_rss_bytes": 185909248,
-            "median_source_bytes_per_second": 96710.649025049
+            "median_seconds": 8.994723541999974,
+            "maximum_sampled_rss_bytes": 182837248,
+            "median_source_bytes_per_second": 83226.46010235787
           }
         },
         "cold_noop": {
           "baseline": {
-            "median_seconds": 0.11458181800003331,
-            "maximum_sampled_rss_bytes": 12447744,
+            "median_seconds": 0.1189844064999761,
+            "maximum_sampled_rss_bytes": 11423744,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.09350854099994876,
-            "maximum_sampled_rss_bytes": 10182656,
+            "median_seconds": 0.11093875300002765,
+            "maximum_sampled_rss_bytes": 10227712,
             "median_source_bytes_per_second": null
           }
         },
         "sparse": {
           "baseline": {
-            "median_seconds": 11.938183809999941,
-            "maximum_sampled_rss_bytes": 183685120,
+            "median_seconds": 12.351474603000042,
+            "maximum_sampled_rss_bytes": 190369792,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.3280174829999396,
-            "maximum_sampled_rss_bytes": 17002496,
+            "median_seconds": 0.38206080100007966,
+            "maximum_sampled_rss_bytes": 16961536,
             "median_source_bytes_per_second": null
           }
         },
         "summary": {
           "baseline": {
-            "median_seconds": 0.11626355199996397,
-            "maximum_sampled_rss_bytes": 13717504,
+            "median_seconds": 0.1551430930001061,
+            "maximum_sampled_rss_bytes": 13770752,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.10918542700005673,
-            "maximum_sampled_rss_bytes": 12394496,
+            "median_seconds": 0.13970373400002245,
+            "maximum_sampled_rss_bytes": 12345344,
             "median_source_bytes_per_second": null
           }
         },
         "detailed": {
           "baseline": {
-            "median_seconds": 0.10328959599996779,
-            "maximum_sampled_rss_bytes": 12480512,
+            "median_seconds": 0.13643873399996664,
+            "maximum_sampled_rss_bytes": 13860864,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.09354341199991723,
-            "maximum_sampled_rss_bytes": 11935744,
+            "median_seconds": 0.11778924799978086,
+            "maximum_sampled_rss_bytes": 12238848,
             "median_source_bytes_per_second": null
           }
         },
         "compatible_open": {
           "baseline": {
-            "median_seconds": 0.11299630899998192,
-            "maximum_sampled_rss_bytes": 13017088,
+            "median_seconds": 0.14076263899983132,
+            "maximum_sampled_rss_bytes": 12795904,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.09334260100013125,
-            "maximum_sampled_rss_bytes": 10866688,
+            "median_seconds": 0.12780598899985307,
+            "maximum_sampled_rss_bytes": 10907648,
             "median_source_bytes_per_second": null
           }
         },
         "large_sparse": {
           "baseline": {
-            "median_seconds": 29.26193669500003,
-            "maximum_sampled_rss_bytes": 378687488,
+            "median_seconds": 45.011782220999976,
+            "maximum_sampled_rss_bytes": 371236864,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.4307341879998603,
-            "maximum_sampled_rss_bytes": 18038784,
+            "median_seconds": 0.6197770709998167,
+            "maximum_sampled_rss_bytes": 18325504,
             "median_source_bytes_per_second": null
           }
         },
         "dense_sparse": {
           "baseline": {
-            "median_seconds": 16.278458221999927,
-            "maximum_sampled_rss_bytes": 261398528,
+            "median_seconds": 24.538155134000135,
+            "maximum_sampled_rss_bytes": 275353600,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 11.35360068,
-            "maximum_sampled_rss_bytes": 262434816,
+            "median_seconds": 17.0212063890001,
+            "maximum_sampled_rss_bytes": 256921600,
             "median_source_bytes_per_second": null
           }
         },
         "semantic_upgrade": {
           "baseline": {
-            "median_seconds": 13.148732873999961,
-            "maximum_sampled_rss_bytes": 184074240,
+            "median_seconds": 20.751313270999844,
+            "maximum_sampled_rss_bytes": 189321216,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 8.50058123100007,
-            "maximum_sampled_rss_bytes": 182124544,
+            "median_seconds": 11.455635475999998,
+            "maximum_sampled_rss_bytes": 186179584,
             "median_source_bytes_per_second": null
           }
         },
         "warm_mcp": {
           "median_seconds": {
-            "baseline": 0.051497516000154064,
-            "candidate": 0.040713105000122596
+            "baseline": 0.06434628900001371,
+            "candidate": 0.05425509599990619
           },
           "rss": "not measured by public MCP route"
         }
       },
-      "raw_sha256": "04d09fd1dfb1dc50e047302c2de5ebd278dbf1f0ed6fa21dd03d50a281426dbf",
+      "raw_sha256": "127436e6178602cfef9b192bf64c4ca9daa89bbf16ec65fe28d36d6c4bf4d67d",
       "source_artifact": {
-        "artifact_id": 13408243663,
+        "artifact_id": 13432872313,
         "name": "indexing-performance-macos-x64-posix",
-        "zip_sha256": "032b7097056ffa20f79229b38f2f3f4cfb5683b4c61633dd2d6c3ec916bb2904"
+        "zip_sha256": "25b47a4102ab78a791e5918624191bff5af9999caa941a9685b92120d45536a7"
       },
       "package_artifact": {
-        "artifact_id": 13406848761,
-        "zip_sha256": "6bd5351e1fc081f373a07f7157b118c977b7bbe1448345579a5be2181d8df334"
+        "artifact_id": 13430947181,
+        "zip_sha256": "4be09e6a7e00515f1f8ada9610589f1bb7f24aa4cd59e1cd32f38753a6c736cd"
       },
       "check_count": 360,
       "failed_checks": [],
@@ -468,12 +472,12 @@
         },
         "candidate": {
           "version": "0.5.0",
-          "sha256": "a6b8bb4648dc4e83dfba395d8ee6adae6a774ad0603652368a15c6add7ba0958"
+          "sha256": "dc2a133867852d4bcafc2e9185a0b7f3144e9c798b0f3d682b2ea71b4d909edc"
         }
       },
       "candidate_archive": {
         "name": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
-        "sha256": "1f1b3456203acb58fd07d56945d65a96f769b3cfde33ef3510ea997337d221fc"
+        "sha256": "56889d081ac95f132125cae24e2c393e7c78f8fbde95f9a1389bee43a5a88933"
       },
       "baseline_archive": {
         "name": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
@@ -482,153 +486,153 @@
       "summary": {
         "initial": {
           "baseline": {
-            "median_seconds": 8.939631625000061,
-            "maximum_sampled_rss_bytes": 195035136,
-            "median_source_bytes_per_second": 83746.0682279506
+            "median_seconds": 4.974062834000051,
+            "maximum_sampled_rss_bytes": 193593344,
+            "median_source_bytes_per_second": 150512.573922984
           },
           "candidate": {
-            "median_seconds": 6.130755625000006,
-            "maximum_sampled_rss_bytes": 197984256,
-            "median_source_bytes_per_second": 122115.28982612143
+            "median_seconds": 3.998128166000015,
+            "maximum_sampled_rss_bytes": 202293248,
+            "median_source_bytes_per_second": 187252.37634115334
           }
         },
         "full": {
           "baseline": {
-            "median_seconds": 11.385621125000057,
-            "maximum_sampled_rss_bytes": 198901760,
-            "median_source_bytes_per_second": 65749.50912043425
+            "median_seconds": 6.984673207999947,
+            "maximum_sampled_rss_bytes": 193527808,
+            "median_source_bytes_per_second": 107177.38363801854
           },
           "candidate": {
-            "median_seconds": 7.863608708000015,
-            "maximum_sampled_rss_bytes": 204816384,
-            "median_source_bytes_per_second": 95197.89549528518
+            "median_seconds": 4.734165125000004,
+            "maximum_sampled_rss_bytes": 203358208,
+            "median_source_bytes_per_second": 158133.2674787087
           }
         },
         "rebuild": {
           "baseline": {
-            "median_seconds": 8.678856999999994,
-            "maximum_sampled_rss_bytes": 194379776,
-            "median_source_bytes_per_second": 86255.48272082378
+            "median_seconds": 5.67133012499994,
+            "maximum_sampled_rss_bytes": 194740224,
+            "median_source_bytes_per_second": 131997.07714070127
           },
           "candidate": {
-            "median_seconds": 7.650345874999971,
-            "maximum_sampled_rss_bytes": 193527808,
-            "median_source_bytes_per_second": 97851.65432144633
+            "median_seconds": 4.153865208000013,
+            "maximum_sampled_rss_bytes": 194674688,
+            "median_source_bytes_per_second": 180210.2289112116
           }
         },
         "cold_noop": {
           "baseline": {
-            "median_seconds": 0.10749570800004449,
-            "maximum_sampled_rss_bytes": 14254080,
+            "median_seconds": 0.065678999499994,
+            "maximum_sampled_rss_bytes": 14876672,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.11182952049995265,
-            "maximum_sampled_rss_bytes": 13860864,
+            "median_seconds": 0.06807414599998651,
+            "maximum_sampled_rss_bytes": 13910016,
             "median_source_bytes_per_second": null
           }
         },
         "sparse": {
           "baseline": {
-            "median_seconds": 9.441127457999983,
-            "maximum_sampled_rss_bytes": 193478656,
+            "median_seconds": 6.032475041999987,
+            "maximum_sampled_rss_bytes": 191987712,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.2901230409999016,
-            "maximum_sampled_rss_bytes": 21069824,
+            "median_seconds": 0.15999504199999137,
+            "maximum_sampled_rss_bytes": 20561920,
             "median_source_bytes_per_second": null
           }
         },
         "summary": {
           "baseline": {
-            "median_seconds": 0.11419737500000338,
-            "maximum_sampled_rss_bytes": 17055744,
+            "median_seconds": 0.06760825000003479,
+            "maximum_sampled_rss_bytes": 17039360,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.1243912500000306,
-            "maximum_sampled_rss_bytes": 16646144,
+            "median_seconds": 0.0649849589999576,
+            "maximum_sampled_rss_bytes": 16072704,
             "median_source_bytes_per_second": null
           }
         },
         "detailed": {
           "baseline": {
-            "median_seconds": 0.112205999999901,
-            "maximum_sampled_rss_bytes": 16646144,
+            "median_seconds": 0.0581654579999622,
+            "maximum_sampled_rss_bytes": 16662528,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.11002724999991642,
-            "maximum_sampled_rss_bytes": 16056320,
+            "median_seconds": 0.058093500000040876,
+            "maximum_sampled_rss_bytes": 16613376,
             "median_source_bytes_per_second": null
           }
         },
         "compatible_open": {
           "baseline": {
-            "median_seconds": 0.12140875000000051,
-            "maximum_sampled_rss_bytes": 15450112,
+            "median_seconds": 0.0649394580000262,
+            "maximum_sampled_rss_bytes": 14893056,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.11152937499991822,
-            "maximum_sampled_rss_bytes": 14729216,
+            "median_seconds": 0.06069958300008693,
+            "maximum_sampled_rss_bytes": 14614528,
             "median_source_bytes_per_second": null
           }
         },
         "large_sparse": {
           "baseline": {
-            "median_seconds": 18.988234250000005,
-            "maximum_sampled_rss_bytes": 394379264,
+            "median_seconds": 23.876339832999975,
+            "maximum_sampled_rss_bytes": 390316032,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.9923690000000533,
-            "maximum_sampled_rss_bytes": 21774336,
+            "median_seconds": 0.9243702909999456,
+            "maximum_sampled_rss_bytes": 21741568,
             "median_source_bytes_per_second": null
           }
         },
         "dense_sparse": {
           "baseline": {
-            "median_seconds": 11.743294583000079,
-            "maximum_sampled_rss_bytes": 283656192,
+            "median_seconds": 10.768347457999994,
+            "maximum_sampled_rss_bytes": 289128448,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 7.935288375000027,
-            "maximum_sampled_rss_bytes": 302235648,
+            "median_seconds": 9.16475950000006,
+            "maximum_sampled_rss_bytes": 292306944,
             "median_source_bytes_per_second": null
           }
         },
         "semantic_upgrade": {
           "baseline": {
-            "median_seconds": 7.954500167000106,
-            "maximum_sampled_rss_bytes": 196460544,
+            "median_seconds": 7.299042583000073,
+            "maximum_sampled_rss_bytes": 191479808,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 6.085110499999928,
-            "maximum_sampled_rss_bytes": 206061568,
+            "median_seconds": 5.534415250000052,
+            "maximum_sampled_rss_bytes": 192561152,
             "median_source_bytes_per_second": null
           }
         },
         "warm_mcp": {
           "median_seconds": {
-            "baseline": 0.04454529200006618,
-            "candidate": 0.042404958000133774
+            "baseline": 0.032629417000066496,
+            "candidate": 0.03503304200000912
           },
           "rss": "not measured by public MCP route"
         }
       },
-      "raw_sha256": "81e05dba3cf12ba7a4bf8e00092212517ca7d13ed6adc9327a4017069ebd89c2",
+      "raw_sha256": "4cfa6736d8a4a3be8e057aae5d2a590df093a10915ab0feedf77820d00212046",
       "source_artifact": {
-        "artifact_id": 13409135954,
+        "artifact_id": 13432084307,
         "name": "indexing-performance-macos-arm64-posix",
-        "zip_sha256": "8b6696215fe36ab31ce5d67d852db30c45f74cf0422fa43c0e983073bf42e4b2"
+        "zip_sha256": "2666cdac7dad39eb08fad05161c78e2a24ab7e8de295bb0cf542f5a954204922"
       },
       "package_artifact": {
-        "artifact_id": 13406054017,
-        "zip_sha256": "481ee310fb8e28a25d220c4776452336a4995f67f35faaed15aa9951bcbf66b7"
+        "artifact_id": 13428509527,
+        "zip_sha256": "0daf000bf71b414b60972e2ad74c6d7bd4d33ce6e27cf9c2b669e8cb0b4413c7"
       },
       "check_count": 360,
       "failed_checks": [],
@@ -687,12 +691,12 @@
         },
         "candidate": {
           "version": "0.5.0",
-          "sha256": "1a5d628640ac795049f6595bc371ede3a2e58ee66dbe55b89fd4b4762f6b2c36"
+          "sha256": "e4e535c340f1b9e3016661f44ef812063c9486a9ca5f85f2710cfd6d61776f10"
         }
       },
       "candidate_archive": {
         "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
-        "sha256": "0fb4e88316cc73613755c065264529c2b9452473ce4b2e308d7c09a14dd814db"
+        "sha256": "e2450a1495962b71a3b7c50c087836793281d48952458b6468fe4fc4889bfa0f"
       },
       "baseline_archive": {
         "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
@@ -701,154 +705,154 @@
       "summary": {
         "initial": {
           "baseline": {
-            "median_seconds": 9.489078199999994,
-            "maximum_sampled_rss_bytes": 163696640,
-            "median_source_bytes_per_second": 80290.62296061596
+            "median_seconds": 9.638392900000099,
+            "maximum_sampled_rss_bytes": 165031936,
+            "median_source_bytes_per_second": 79056.74814314659
           },
           "candidate": {
-            "median_seconds": 6.9433707999999115,
-            "maximum_sampled_rss_bytes": 172613632,
-            "median_source_bytes_per_second": 109742.08665336002
+            "median_seconds": 6.611031799999978,
+            "maximum_sampled_rss_bytes": 172388352,
+            "median_source_bytes_per_second": 115244.34052790406
           }
         },
         "full": {
           "baseline": {
-            "median_seconds": 13.120187499999929,
-            "maximum_sampled_rss_bytes": 166883328,
-            "median_source_bytes_per_second": 58072.03593698673
+            "median_seconds": 12.83242990000008,
+            "maximum_sampled_rss_bytes": 169172992,
+            "median_source_bytes_per_second": 59374.25771560188
           },
           "candidate": {
-            "median_seconds": 8.606962300000077,
-            "maximum_sampled_rss_bytes": 174632960,
-            "median_source_bytes_per_second": 88526.9359202367
+            "median_seconds": 8.142883099999949,
+            "maximum_sampled_rss_bytes": 177176576,
+            "median_source_bytes_per_second": 93568.33330936616
           }
         },
         "rebuild": {
           "baseline": {
-            "median_seconds": 12.745685499999809,
-            "maximum_sampled_rss_bytes": 163418112,
-            "median_source_bytes_per_second": 59778.34617055406
+            "median_seconds": 12.182245599999987,
+            "maximum_sampled_rss_bytes": 163942400,
+            "median_source_bytes_per_second": 62540.52208568187
           },
           "candidate": {
-            "median_seconds": 7.763955099999976,
-            "maximum_sampled_rss_bytes": 173309952,
-            "median_source_bytes_per_second": 98130.91268392348
+            "median_seconds": 7.497979399999963,
+            "maximum_sampled_rss_bytes": 172392448,
+            "median_source_bytes_per_second": 101616.1767529001
           }
         },
         "cold_noop": {
           "baseline": {
-            "median_seconds": 0.12550924999999324,
-            "maximum_sampled_rss_bytes": 11468800,
+            "median_seconds": 0.1222948500000598,
+            "maximum_sampled_rss_bytes": 11177984,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.12279614999999922,
-            "maximum_sampled_rss_bytes": 11661312,
+            "median_seconds": 0.12258970000004865,
+            "maximum_sampled_rss_bytes": 11915264,
             "median_source_bytes_per_second": null
           }
         },
         "sparse": {
           "baseline": {
-            "median_seconds": 12.60370869999997,
-            "maximum_sampled_rss_bytes": 164380672,
+            "median_seconds": 12.099547799999982,
+            "maximum_sampled_rss_bytes": 166432768,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.3348693000000367,
-            "maximum_sampled_rss_bytes": 18419712,
+            "median_seconds": 0.32607930000006036,
+            "maximum_sampled_rss_bytes": 18022400,
             "median_source_bytes_per_second": null
           }
         },
         "summary": {
           "baseline": {
-            "median_seconds": 0.13122709999993276,
-            "maximum_sampled_rss_bytes": 12836864,
+            "median_seconds": 0.1302506000001813,
+            "maximum_sampled_rss_bytes": 12808192,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.13811179999993328,
-            "maximum_sampled_rss_bytes": 13332480,
+            "median_seconds": 0.13147979999985182,
+            "maximum_sampled_rss_bytes": 13365248,
             "median_source_bytes_per_second": null
           }
         },
         "detailed": {
           "baseline": {
-            "median_seconds": 0.11741639999991094,
-            "maximum_sampled_rss_bytes": 12451840,
+            "median_seconds": 0.11711229999991701,
+            "maximum_sampled_rss_bytes": 12447744,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.12093230000004951,
-            "maximum_sampled_rss_bytes": 13012992,
+            "median_seconds": 0.11753070000008847,
+            "maximum_sampled_rss_bytes": 13123584,
             "median_source_bytes_per_second": null
           }
         },
         "compatible_open": {
           "baseline": {
-            "median_seconds": 0.12519330000009177,
-            "maximum_sampled_rss_bytes": 11112448,
+            "median_seconds": 0.11993540000003122,
+            "maximum_sampled_rss_bytes": 12128256,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.12477469999998902,
-            "maximum_sampled_rss_bytes": 11857920,
+            "median_seconds": 0.12271380000015597,
+            "maximum_sampled_rss_bytes": 11931648,
             "median_source_bytes_per_second": null
           }
         },
         "large_sparse": {
           "baseline": {
-            "median_seconds": 36.74611180000011,
-            "maximum_sampled_rss_bytes": 333455360,
+            "median_seconds": 33.06055760000004,
+            "maximum_sampled_rss_bytes": 332976128,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 0.451063700000077,
-            "maximum_sampled_rss_bytes": 19128320,
+            "median_seconds": 0.4245988000000125,
+            "maximum_sampled_rss_bytes": 19124224,
             "median_source_bytes_per_second": null
           }
         },
         "dense_sparse": {
           "baseline": {
-            "median_seconds": 18.554530299999897,
-            "maximum_sampled_rss_bytes": 246173696,
+            "median_seconds": 16.58462499999996,
+            "maximum_sampled_rss_bytes": 245583872,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 10.279832500000111,
-            "maximum_sampled_rss_bytes": 211009536,
+            "median_seconds": 9.52049339999985,
+            "maximum_sampled_rss_bytes": 218652672,
             "median_source_bytes_per_second": null
           }
         },
         "semantic_upgrade": {
           "baseline": {
-            "median_seconds": 13.350863400000208,
-            "maximum_sampled_rss_bytes": 166305792,
+            "median_seconds": 12.205707999999959,
+            "maximum_sampled_rss_bytes": 169975808,
             "median_source_bytes_per_second": null
           },
           "candidate": {
-            "median_seconds": 8.453338300000041,
-            "maximum_sampled_rss_bytes": 175874048,
+            "median_seconds": 7.7689075000000685,
+            "maximum_sampled_rss_bytes": 175472640,
             "median_source_bytes_per_second": null
           }
         },
         "warm_mcp": {
           "median_seconds": {
-            "baseline": 0.05187840000007782,
-            "candidate": 0.06321760000014365
+            "baseline": 0.05134079999993446,
+            "candidate": 0.057553399999960675
           },
           "rss": "not measured by public MCP route"
         }
       },
       "failure": "AssertionError: warm MCP exact reconciliation latency target",
-      "raw_sha256": "dbc78a145be908851ede754fd9cb2c7bdf58cb1458782d97e505abdd5480d24e",
+      "raw_sha256": "b37dc2be094621b210a116c10dc445b0528ee331f1c4211039ef0fda51332811",
       "source_artifact": {
-        "artifact_id": 13408393224,
+        "artifact_id": 13432288336,
         "name": "indexing-performance-windows-x64",
-        "zip_sha256": "18cc74e79572d492b3b8ed100963e2b8c8215fdc8a00c82f1669dac0b02f0910"
+        "zip_sha256": "a4e845b1edf056c86aef3fa59ed9ba1d95d972fa308d2eedf8fa784f4f6d67eb"
       },
       "package_artifact": {
-        "artifact_id": 13406524738,
-        "zip_sha256": "df3ba1d589e5fe098180343c7ddfbd025eefa21f759d68c23a433a7c32919327"
+        "artifact_id": 13432175253,
+        "zip_sha256": "4faff885ce7cc3cff46196787fb61bf3da12575c1ddaa12cf6202c9e096fbeeb"
       },
       "check_count": 360,
       "failed_checks": [

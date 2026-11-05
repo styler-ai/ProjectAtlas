@@ -15,12 +15,12 @@
     },
     "candidate": {
       "version": "0.5.0",
-      "sha256": "1a5d628640ac795049f6595bc371ede3a2e58ee66dbe55b89fd4b4762f6b2c36"
+      "sha256": "e4e535c340f1b9e3016661f44ef812063c9486a9ca5f85f2710cfd6d61776f10"
     }
   },
   "candidate_archive": {
     "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
-    "sha256": "0fb4e88316cc73613755c065264529c2b9452473ce4b2e308d7c09a14dd814db"
+    "sha256": "e2450a1495962b71a3b7c50c087836793281d48952458b6468fe4fc4889bfa0f"
   },
   "baseline_archive": {
     "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
@@ -29,154 +29,154 @@
   "summary": {
     "initial": {
       "baseline": {
-        "median_seconds": 9.489078199999994,
-        "maximum_sampled_rss_bytes": 163696640,
-        "median_source_bytes_per_second": 80290.62296061596
+        "median_seconds": 9.638392900000099,
+        "maximum_sampled_rss_bytes": 165031936,
+        "median_source_bytes_per_second": 79056.74814314659
       },
       "candidate": {
-        "median_seconds": 6.9433707999999115,
-        "maximum_sampled_rss_bytes": 172613632,
-        "median_source_bytes_per_second": 109742.08665336002
+        "median_seconds": 6.611031799999978,
+        "maximum_sampled_rss_bytes": 172388352,
+        "median_source_bytes_per_second": 115244.34052790406
       }
     },
     "full": {
       "baseline": {
-        "median_seconds": 13.120187499999929,
-        "maximum_sampled_rss_bytes": 166883328,
-        "median_source_bytes_per_second": 58072.03593698673
+        "median_seconds": 12.83242990000008,
+        "maximum_sampled_rss_bytes": 169172992,
+        "median_source_bytes_per_second": 59374.25771560188
       },
       "candidate": {
-        "median_seconds": 8.606962300000077,
-        "maximum_sampled_rss_bytes": 174632960,
-        "median_source_bytes_per_second": 88526.9359202367
+        "median_seconds": 8.142883099999949,
+        "maximum_sampled_rss_bytes": 177176576,
+        "median_source_bytes_per_second": 93568.33330936616
       }
     },
     "rebuild": {
       "baseline": {
-        "median_seconds": 12.745685499999809,
-        "maximum_sampled_rss_bytes": 163418112,
-        "median_source_bytes_per_second": 59778.34617055406
+        "median_seconds": 12.182245599999987,
+        "maximum_sampled_rss_bytes": 163942400,
+        "median_source_bytes_per_second": 62540.52208568187
       },
       "candidate": {
-        "median_seconds": 7.763955099999976,
-        "maximum_sampled_rss_bytes": 173309952,
-        "median_source_bytes_per_second": 98130.91268392348
+        "median_seconds": 7.497979399999963,
+        "maximum_sampled_rss_bytes": 172392448,
+        "median_source_bytes_per_second": 101616.1767529001
       }
     },
     "cold_noop": {
       "baseline": {
-        "median_seconds": 0.12550924999999324,
-        "maximum_sampled_rss_bytes": 11468800,
+        "median_seconds": 0.1222948500000598,
+        "maximum_sampled_rss_bytes": 11177984,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.12279614999999922,
-        "maximum_sampled_rss_bytes": 11661312,
+        "median_seconds": 0.12258970000004865,
+        "maximum_sampled_rss_bytes": 11915264,
         "median_source_bytes_per_second": null
       }
     },
     "sparse": {
       "baseline": {
-        "median_seconds": 12.60370869999997,
-        "maximum_sampled_rss_bytes": 164380672,
+        "median_seconds": 12.099547799999982,
+        "maximum_sampled_rss_bytes": 166432768,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.3348693000000367,
-        "maximum_sampled_rss_bytes": 18419712,
+        "median_seconds": 0.32607930000006036,
+        "maximum_sampled_rss_bytes": 18022400,
         "median_source_bytes_per_second": null
       }
     },
     "summary": {
       "baseline": {
-        "median_seconds": 0.13122709999993276,
-        "maximum_sampled_rss_bytes": 12836864,
+        "median_seconds": 0.1302506000001813,
+        "maximum_sampled_rss_bytes": 12808192,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.13811179999993328,
-        "maximum_sampled_rss_bytes": 13332480,
+        "median_seconds": 0.13147979999985182,
+        "maximum_sampled_rss_bytes": 13365248,
         "median_source_bytes_per_second": null
       }
     },
     "detailed": {
       "baseline": {
-        "median_seconds": 0.11741639999991094,
-        "maximum_sampled_rss_bytes": 12451840,
+        "median_seconds": 0.11711229999991701,
+        "maximum_sampled_rss_bytes": 12447744,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.12093230000004951,
-        "maximum_sampled_rss_bytes": 13012992,
+        "median_seconds": 0.11753070000008847,
+        "maximum_sampled_rss_bytes": 13123584,
         "median_source_bytes_per_second": null
       }
     },
     "compatible_open": {
       "baseline": {
-        "median_seconds": 0.12519330000009177,
-        "maximum_sampled_rss_bytes": 11112448,
+        "median_seconds": 0.11993540000003122,
+        "maximum_sampled_rss_bytes": 12128256,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.12477469999998902,
-        "maximum_sampled_rss_bytes": 11857920,
+        "median_seconds": 0.12271380000015597,
+        "maximum_sampled_rss_bytes": 11931648,
         "median_source_bytes_per_second": null
       }
     },
     "large_sparse": {
       "baseline": {
-        "median_seconds": 36.74611180000011,
-        "maximum_sampled_rss_bytes": 333455360,
+        "median_seconds": 33.06055760000004,
+        "maximum_sampled_rss_bytes": 332976128,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 0.451063700000077,
-        "maximum_sampled_rss_bytes": 19128320,
+        "median_seconds": 0.4245988000000125,
+        "maximum_sampled_rss_bytes": 19124224,
         "median_source_bytes_per_second": null
       }
     },
     "dense_sparse": {
       "baseline": {
-        "median_seconds": 18.554530299999897,
-        "maximum_sampled_rss_bytes": 246173696,
+        "median_seconds": 16.58462499999996,
+        "maximum_sampled_rss_bytes": 245583872,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 10.279832500000111,
-        "maximum_sampled_rss_bytes": 211009536,
+        "median_seconds": 9.52049339999985,
+        "maximum_sampled_rss_bytes": 218652672,
         "median_source_bytes_per_second": null
       }
     },
     "semantic_upgrade": {
       "baseline": {
-        "median_seconds": 13.350863400000208,
-        "maximum_sampled_rss_bytes": 166305792,
+        "median_seconds": 12.205707999999959,
+        "maximum_sampled_rss_bytes": 169975808,
         "median_source_bytes_per_second": null
       },
       "candidate": {
-        "median_seconds": 8.453338300000041,
-        "maximum_sampled_rss_bytes": 175874048,
+        "median_seconds": 7.7689075000000685,
+        "maximum_sampled_rss_bytes": 175472640,
         "median_source_bytes_per_second": null
       }
     },
     "warm_mcp": {
       "median_seconds": {
-        "baseline": 0.05187840000007782,
-        "candidate": 0.06321760000014365
+        "baseline": 0.05134079999993446,
+        "candidate": 0.057553399999960675
       },
       "rss": "not measured by public MCP route"
     }
   },
-  "raw_sha256": "dbc78a145be908851ede754fd9cb2c7bdf58cb1458782d97e505abdd5480d24e",
+  "raw_sha256": "b37dc2be094621b210a116c10dc445b0528ee331f1c4211039ef0fda51332811",
   "source_artifact": {
-    "artifact_id": 13408393224,
+    "artifact_id": 13432288336,
     "name": "indexing-performance-windows-x64",
-    "zip_sha256": "18cc74e79572d492b3b8ed100963e2b8c8215fdc8a00c82f1669dac0b02f0910",
-    "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42005215934"
+    "zip_sha256": "a4e845b1edf056c86aef3fa59ed9ba1d95d972fa308d2eedf8fa784f4f6d67eb",
+    "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42051716235"
   },
   "package_artifact": {
-    "artifact_id": 13406524738,
-    "zip_sha256": "df3ba1d589e5fe098180343c7ddfbd025eefa21f759d68c23a433a7c32919327"
+    "artifact_id": 13432175253,
+    "zip_sha256": "4faff885ce7cc3cff46196787fb61bf3da12575c1ddaa12cf6202c9e096fbeeb"
   },
   "check_count": 360,
   "sample_counts": {
@@ -223,9 +223,9 @@
     }
   ],
   "schema_version": 1,
-  "source_revision": "bfc3ba9f1739a29a73054f6fdd0188a3c95e97f0",
-  "workflow_run_id": "42005215934",
-  "scope": "Installed Windows development candidate; 359 of 360 checks passed. Warm MCP latency failed; all cold-operation targets passed. Complete campaign also failed Linux warm MCP latency. Not a published RC1 result.",
+  "source_revision": "82a6b17920ccdf3be0ed84e5a80b3c579dab2a5a",
+  "workflow_run_id": "42051716235",
+  "scope": "Installed Windows development candidate; 359 of 360 checks passed. Complete workflow accepted: False. Not a published RC1 result.",
   "reference_edit": {
     "rust_files": 1024,
     "markdown_files": 1,
@@ -238,8 +238,8 @@
     ],
     "parsed_files_each_runtime": 1,
     "samples_each_runtime": 3,
-    "speed_ratio": 37.637695363530156,
-    "speed_increase_percent": 3663.7695363530156,
-    "elapsed_time_reduction_percent": 97.34308918136105
+    "speed_ratio": 37.10615117242261,
+    "speed_increase_percent": 3610.6151172422606,
+    "elapsed_time_reduction_percent": 97.30502903587801
   }
 }
