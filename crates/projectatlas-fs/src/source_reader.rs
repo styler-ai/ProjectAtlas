@@ -52,7 +52,7 @@ impl SourceRootReader {
             cursor: None,
             occupied: &DIRECTORY_HANDLES,
             limit: self.directory_handle_limit,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             resolver: SourceResolver::Unchecked,
             #[cfg(test)]
             hits: 0,
@@ -63,7 +63,7 @@ impl SourceRootReader {
     pub(crate) fn uncached(&self) -> SourceFileReader<'_> {
         SourceFileReader {
             limit: 0,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             resolver: SourceResolver::Components,
             ..self.reader()
         }
@@ -129,7 +129,7 @@ pub(crate) struct SourceFileReader<'root> {
     /// Extra component-cursor handle limit; zero disables retained ancestors.
     limit: usize,
     /// Optional all-component kernel resolution, selected only for this worker.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     resolver: SourceResolver,
     /// Causal coverage distinguishes actual reuse from the uncached fallback.
     #[cfg(test)]
@@ -137,12 +137,12 @@ pub(crate) struct SourceFileReader<'root> {
 }
 
 /// Closed backend selection; neither variant retains a source freshness witness.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceResolver {
-    /// No optional-syscall availability check has run in this discovery.
+    /// No native backend support check has run in this discovery.
     Unchecked,
-    /// The kernel accepted the content-free root capability probe.
+    /// The platform's all-component resolution contract was positively admitted.
     Kernel,
     /// Use the existing bounded no-follow component cursor.
     Components,
@@ -182,7 +182,7 @@ impl SourceFileReader<'_> {
         let relative = path.strip_prefix(&self.root.root).map_err(|source| {
             source_error(path, io::Error::new(io::ErrorKind::InvalidInput, source))
         })?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(opened) = self.try_kernel_open(
             relative,
             path,
@@ -240,9 +240,9 @@ impl SourceFileReader<'_> {
         open_source_leaf(directory, Path::new(name), path, admitted_metadata)
     }
 
-    /// Probe the optional syscall without confusing source permissions with
-    /// syscall filtering, then resolve every source component in one operation.
-    #[cfg(target_os = "linux")]
+    /// Positively admit native support, then resolve every source component in
+    /// one operation without confusing source errors with backend availability.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn try_kernel_open(
         &mut self,
         relative: &Path,
@@ -251,7 +251,9 @@ impl SourceFileReader<'_> {
         control: &IndexWorkControl,
         mut open: impl FnMut(&Dir, &Path, nix::fcntl::OFlag) -> nix::Result<std::os::fd::OwnedFd>,
     ) -> FsResult<Option<(File, std::fs::Metadata)>> {
+        #[cfg(target_os = "linux")]
         use nix::errno::Errno;
+        #[cfg(target_os = "linux")]
         use nix::fcntl::OFlag;
 
         if self.resolver == SourceResolver::Components {
@@ -275,6 +277,7 @@ impl SourceFileReader<'_> {
             // A positive, content-free root probe distinguishes an available
             // syscall from filters that synthesize an errno, including ENOENT.
             // Drop its one descriptor before attempting any source open.
+            #[cfg(target_os = "linux")]
             match open(
                 &self.root.directory,
                 Path::new("."),
@@ -290,10 +293,25 @@ impl SourceFileReader<'_> {
                 }
                 Err(source) => return Err(source_error(path, source.into())),
             }
+            #[cfg(target_os = "macos")]
+            {
+                // Older Darwin kernels can ignore unknown open flags. A
+                // successful open or F_GETFL is therefore not a support probe.
+                let system = nix::sys::utsname::uname().ok();
+                let identified = system
+                    .as_ref()
+                    .and_then(|system| system.sysname().to_str().zip(system.release().to_str()));
+                if !darwin_supports_no_follow_any(identified) {
+                    self.resolver = SourceResolver::Components;
+                    return Ok(None);
+                }
+                self.resolver = SourceResolver::Kernel;
+            }
         }
         control.check(IndexWorkStage::SourceHash)?;
         let descriptor = match open(&self.root.directory, relative, source_open_flags()) {
             Ok(descriptor) => descriptor,
+            #[cfg(target_os = "linux")]
             Err(Errno::ENOSYS) => {
                 self.resolver = SourceResolver::Components;
                 return Ok(None);
@@ -323,11 +341,43 @@ fn kernel_source_open(
     )
 }
 
+/// Use Darwin's all-component flag instead of its incompatible leaf-only flag.
+#[cfg(target_os = "macos")]
+fn kernel_source_open(
+    root: &Dir,
+    relative: &Path,
+    flags: nix::fcntl::OFlag,
+) -> nix::Result<std::os::fd::OwnedFd> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+
+    let flags = (flags & !OFlag::O_NOFOLLOW) | OFlag::from_bits_retain(nix::libc::O_NOFOLLOW_ANY);
+    openat(root, relative, flags, Mode::empty())
+}
+
 /// Shared source-only flags preserve nonblocking refusal and descriptor lifetime.
 #[cfg(unix)]
 fn source_open_flags() -> nix::fcntl::OFlag {
     use nix::fcntl::OFlag;
     OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_NOCTTY | OFlag::O_CLOEXEC
+}
+
+/// Admit Darwin's all-component no-follow flag only on an identified supporting kernel.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_supports_no_follow_any(system: Option<(&str, &str)>) -> bool {
+    let Some(("Darwin", release)) = system else {
+        return false;
+    };
+    let mut fields = release.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    [major, minor, patch]
+        .into_iter()
+        .all(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()))
+        && major.parse::<u32>().is_ok_and(|major| major >= 20)
 }
 
 /// Complete retained chain: close frames BEFORE returning their occupancy permit.
@@ -651,6 +701,29 @@ mod tests {
     use std::fs;
     use std::io::Read;
 
+    #[test]
+    fn darwin_all_component_support_requires_positive_kernel_identification() {
+        for release in ["20.0.0", "20.6.0", "21.1.0", "25.1.0", "26.0.0"] {
+            assert!(darwin_supports_no_follow_any(Some(("Darwin", release))));
+        }
+        for system in [
+            None,
+            Some(("Linux", "25.1.0")),
+            Some(("darwin", "25.1.0")),
+            Some(("Darwin", "19.6.0")),
+            Some(("Darwin", "")),
+            Some(("Darwin", "20")),
+            Some(("Darwin", "20.0")),
+            Some(("Darwin", "20..0")),
+            Some(("Darwin", "20.0.0.extra")),
+            Some(("Darwin", "+20.0.0")),
+            Some(("Darwin", "20.0.0beta")),
+            Some(("Darwin", "4294967296.0.0")),
+        ] {
+            assert!(!darwin_supports_no_follow_any(system));
+        }
+    }
+
     /// Read exact bytes through the actual discovery-owned source opener.
     fn read_source(reader: &SourceRootReader, path: &Path) -> FsResult<Vec<u8>> {
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
@@ -896,7 +969,7 @@ mod tests {
 #[path = "source_cursor_tests.rs"]
 mod cursor_tests;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "source_kernel_tests.rs"]
 mod kernel_tests;
 

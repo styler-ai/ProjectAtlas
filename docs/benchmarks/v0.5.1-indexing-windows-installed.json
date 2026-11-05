@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "passed": true,
+  "candidate_origin": "installed release workflow",
+  "source_revision": "b469bd361711949e0d934c3edf58f356c13afb7b",
+  "source_dirty": true,
+  "workflow_run_id": "41943315124",
+  "platform": "Windows-2025Server-10.0.26100-SP0",
+  "machine": "AMD64",
+  "python": "3.12.10",
+  "sqlite_version": "3.49.1",
+  "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+  "telemetry": "enabled",
+  "runtimes": {
+    "baseline": {
+      "version": "0.5.0",
+      "sha256": "87ae41df90b35770841ae6ca7e3d88c25ab99f0e0f83c3e3c85a235a63f30ebc"
+    },
+    "candidate": {
+      "version": "0.5.0",
+      "sha256": "fce0b07639d77dec57bd9d58f07864a453853d054290d79dfa168c0692f6bc0b"
+    }
+  },
+  "candidate_archive": {
+    "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+    "sha256": "1f0a0a0c5ca9255df5705cab36c986c9c4b524a46b6d7554e29d75af77e4b452"
+  },
+  "baseline_archive": {
+    "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+    "sha256": "b2fddfa71f7ad73a816fbeb3111101c1a20b25f2286bd418fdbda73448f127c4"
+  },
+  "summary": {
+    "initial": {
+      "baseline": {
+        "median_seconds": 5.992640099999903,
+        "maximum_sampled_rss_bytes": 166625280,
+        "median_source_bytes_per_second": 127152.63845062417
+      },
+      "candidate": {
+        "median_seconds": 4.411326400000007,
+        "maximum_sampled_rss_bytes": 172834816,
+        "median_source_bytes_per_second": 172732.62753805722
+      }
+    },
+    "full": {
+      "baseline": {
+        "median_seconds": 7.923970199999985,
+        "maximum_sampled_rss_bytes": 167038976,
+        "median_source_bytes_per_second": 96153.31466037082
+      },
+      "candidate": {
+        "median_seconds": 5.402025699999967,
+        "maximum_sampled_rss_bytes": 174686208,
+        "median_source_bytes_per_second": 141042.64627989545
+      }
+    },
+    "rebuild": {
+      "baseline": {
+        "median_seconds": 7.822251199999982,
+        "maximum_sampled_rss_bytes": 164139008,
+        "median_source_bytes_per_second": 97403.6732545743
+      },
+      "candidate": {
+        "median_seconds": 4.936315500000092,
+        "maximum_sampled_rss_bytes": 172646400,
+        "median_source_bytes_per_second": 154349.12942659072
+      }
+    },
+    "cold_noop": {
+      "baseline": {
+        "median_seconds": 0.07597420000001875,
+        "maximum_sampled_rss_bytes": 11059200,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.07223774999999932,
+        "maximum_sampled_rss_bytes": 11804672,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "sparse": {
+      "baseline": {
+        "median_seconds": 7.916656499999931,
+        "maximum_sampled_rss_bytes": 164343808,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.17380309999998644,
+        "maximum_sampled_rss_bytes": 18251776,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "summary": {
+      "baseline": {
+        "median_seconds": 0.0770038000000568,
+        "maximum_sampled_rss_bytes": 12652544,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.07954919999997401,
+        "maximum_sampled_rss_bytes": 13885440,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "detailed": {
+      "baseline": {
+        "median_seconds": 0.07011980000004314,
+        "maximum_sampled_rss_bytes": 12435456,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.07019680000007611,
+        "maximum_sampled_rss_bytes": 13152256,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "compatible_open": {
+      "baseline": {
+        "median_seconds": 0.0743293000000449,
+        "maximum_sampled_rss_bytes": 11333632,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.0736252000000377,
+        "maximum_sampled_rss_bytes": 12062720,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "large_sparse": {
+      "baseline": {
+        "median_seconds": 18.742740099999992,
+        "maximum_sampled_rss_bytes": 333029376,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.2410256999999092,
+        "maximum_sampled_rss_bytes": 19070976,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "dense_sparse": {
+      "baseline": {
+        "median_seconds": 10.539863200000013,
+        "maximum_sampled_rss_bytes": 235339776,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 6.8234218000000055,
+        "maximum_sampled_rss_bytes": 256745472,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "semantic_upgrade": {
+      "baseline": {
+        "median_seconds": 7.987491299999988,
+        "maximum_sampled_rss_bytes": 166109184,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 5.169490499999938,
+        "maximum_sampled_rss_bytes": 175489024,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "warm_mcp": {
+      "median_seconds": {
+        "baseline": 0.030790799999977025,
+        "candidate": 0.03114570000002459
+      },
+      "rss": "not measured by public MCP route"
+    }
+  },
+  "scope": "Installed Windows development candidate; all 360 Windows checks passed. Complete campaign failed on Linux warm MCP and Apple Silicon initial speed/throughput and dense sampled RSS. This is not a published RC1 result.",
+  "raw_sha256": "9f770abb77f0a23a70ad2d5f514a90df82873b1e1661df3e4656e0c463d8cbe6",
+  "source_artifact": {
+    "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/41943315124",
+    "artifact_id": 13381031201,
+    "name": "indexing-performance-windows-x64",
+    "zip_sha256": "6c448bb143496abaf3727dede878277ecfbbf01a5feb4586e24af80cfaf7b654"
+  },
+  "package_artifact": {
+    "artifact_id": 13379074711,
+    "zip_sha256": "6fe1e5b566532512190f5dd33e086b6562a5e840317b8309a5a8082a7cb84b56"
+  },
+  "reference_edit": {
+    "rust_files": 1024,
+    "markdown_files": 1,
+    "changed_rust_files": 1,
+    "edit": "Append one exported function to src/group_0/module_0.rs",
+    "cli": [
+      "atlas",
+      "watch",
+      "--once"
+    ],
+    "parsed_files_each_runtime": 1,
+    "samples_each_runtime": 3,
+    "speed_ratio": 45.549570174528235,
+    "speed_increase_percent": 4454.9570174528235,
+    "elapsed_time_reduction_percent": 97.80458960168365
+  },
+  "check_count": 360,
+  "sample_counts": {
+    "baseline": {
+      "initial": 3,
+      "full": 5,
+      "rebuild": 3,
+      "cold_noop": 6,
+      "sparse": 3,
+      "summary": 9,
+      "detailed": 9,
+      "compatible_open": 9,
+      "semantic_upgrade": 3,
+      "large_initial": 1,
+      "dense_initial": 1,
+      "large_sparse": 3,
+      "dense_sparse": 3,
+      "offline_same_metadata": 1
+    },
+    "candidate": {
+      "initial": 3,
+      "full": 5,
+      "rebuild": 3,
+      "cold_noop": 6,
+      "sparse": 3,
+      "summary": 9,
+      "detailed": 9,
+      "compatible_open": 9,
+      "semantic_upgrade": 3,
+      "large_initial": 1,
+      "dense_initial": 1,
+      "large_sparse": 3,
+      "dense_sparse": 3,
+      "large_full_convergence": 1,
+      "dense_full_convergence": 1,
+      "offline_same_metadata": 1
+    }
+  },
+  "warm_samples_each_runtime": 9,
+  "failed_checks": []
+}

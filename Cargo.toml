@@ -94,6 +94,7 @@ jsonc-parser = { version = "0.34", features = ["serde"] }
 landlock = "=0.4.7"
 libloading = "=0.9.0"
 nix = { version = "=0.31.3", default-features = false, features = [
+    "feature",
     "fs",
     "process",
     "resource",

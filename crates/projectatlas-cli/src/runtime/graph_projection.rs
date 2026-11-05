@@ -1915,7 +1915,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             nodes,
             project,
             generation,
-            &graphs,
+            graphs,
             &document_facts,
             &identity_admission,
             entity_projection,
@@ -1928,7 +1928,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             project,
             generation,
             RepositoryGraphMutation::Full,
-            &graphs,
+            graphs,
             root,
             nodes,
             &document_facts,
@@ -2570,7 +2570,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
-        &affected_graphs,
+        affected_graphs,
         root,
         expected_nodes,
         &document_facts,
@@ -3563,12 +3563,13 @@ fn cleanup_abandoned_graph_staging_while_locked(
 }
 
 /// Spill a large full graph to typed disposable `SQLite` rows before main publication.
+/// Owned raw inputs are released after their rows enter the bounded staging batch.
 fn finish_projection_in_database_with_documents(
     root: &Path,
     nodes: &[Node],
     project: ProjectInstanceId,
     generation: IndexGeneration,
-    graphs: &[impl Borrow<SymbolGraph>],
+    graphs: impl IntoIterator<Item = impl Borrow<SymbolGraph>>,
     document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
     identity_admission: &GraphIdentityAdmission,
     mut entities: EntityProjection,
@@ -3764,7 +3765,7 @@ fn finish_projection_in_database(
         nodes,
         project,
         generation,
-        graphs,
+        graphs.iter().map(Borrow::<SymbolGraph>::borrow),
         &BTreeMap::new(),
         &GraphIdentityAdmission::default(),
         entities,
@@ -3775,11 +3776,12 @@ fn finish_projection_in_database(
 }
 
 /// Resolve staged relationships and finish one complete normalized graph batch.
+/// Consume owned raw inputs as their normalized rows accumulate.
 fn finish_projection_with_documents(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     mutation: RepositoryGraphMutation,
-    graphs: &[impl Borrow<SymbolGraph>],
+    graphs: impl IntoIterator<Item = impl Borrow<SymbolGraph>>,
     root: &Path,
     nodes: &[Node],
     document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
@@ -3938,7 +3940,7 @@ fn finish_projection(
         project,
         generation,
         mutation,
-        graphs,
+        graphs.iter().map(Borrow::<SymbolGraph>::borrow),
         Path::new("."),
         &[],
         &BTreeMap::new(),
@@ -16406,7 +16408,7 @@ function helper() {}
             project,
             generation,
             RepositoryGraphMutation::Full,
-            std::slice::from_ref(&admitted),
+            std::iter::once(admitted.as_ref()),
             temp.path(),
             &nodes,
             &BTreeMap::new(),
@@ -20826,6 +20828,127 @@ function helper() {}
                 ),
                 "fully staged selection ignored cancellation",
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_graph_payloads_release_between_materialized_sources() -> Result<(), Box<dyn Error>> {
+        for database_staging in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let canonical_root = temp.path().canonicalize()?;
+            let root = canonical_root.as_path();
+            let store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
+            let project = store
+                .project_instance_id()?
+                .ok_or("missing fixture project")?;
+            let generation = IndexGeneration::new(1);
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let paths = ["first.rs", "second.rs"];
+            let mut graphs = Vec::new();
+            for path in paths {
+                fs::write(root.join(path), "pub fn symbol_0() { dependency(); }\n")?;
+                graphs.push(Arc::new(extract_symbol_graph(
+                    path,
+                    Some("rust"),
+                    "pub fn symbol_0() { dependency(); }\n",
+                )));
+            }
+            let nodes = paths.map(|path| test_file_node(path, "rust"));
+            let packages = PackageIndex::from_graphs(&graphs)?;
+            let scan_policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+            let (baseline, entities, candidates) = {
+                let make_projection = || {
+                    let entities = build_entity_projection(
+                        project, generation, &nodes, &graphs, &packages, true, &control,
+                    )?;
+                    let candidates = resolution_registry_from_exports(&entities, &control)?;
+                    Result::<_, CliError>::Ok((entities, candidates))
+                };
+                let (entities, candidates) = make_projection()?;
+                let baseline = finish_projection_with_documents(
+                    project,
+                    generation,
+                    RepositoryGraphMutation::Full,
+                    graphs.iter().map(Arc::as_ref),
+                    root,
+                    &nodes,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?;
+                let (entities, candidates) = make_projection()?;
+                (baseline, entities, candidates)
+            };
+            let weak = graphs.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let released_before_next = std::cell::Cell::new(true);
+            let input = graphs.into_iter().enumerate().map(|(index, graph)| {
+                if index > 0 {
+                    released_before_next
+                        .set(released_before_next.get() && weak[index - 1].strong_count() == 0);
+                }
+                super::BoundSourceGraph::Shared(graph)
+            });
+            let staged = if database_staging {
+                finish_projection_in_database_with_documents(
+                    root,
+                    &nodes,
+                    project,
+                    generation,
+                    input,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?
+            } else {
+                finish_projection_with_documents(
+                    project,
+                    generation,
+                    RepositoryGraphMutation::Full,
+                    input,
+                    root,
+                    &nodes,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?
+            };
+            require(
+                released_before_next.get() && weak.iter().all(|graph| graph.strong_count() == 0),
+                "raw graph payload remained alive while the next source was materialized",
+            )?;
+            require(
+                staged.database.is_some() == database_staging,
+                "owned inputs changed the selected materialization path",
+            )?;
+            if !database_staging {
+                require_eq(&staged.entities, &baseline.entities, "owned graph entities")?;
+                require_eq(
+                    &staged.relations,
+                    &baseline.relations,
+                    "owned graph relations",
+                )?;
+                require_eq(
+                    &staged.occurrences,
+                    &baseline.occurrences,
+                    "owned graph occurrences",
+                )?;
+                require_eq(&staged.coverage, &baseline.coverage, "owned graph coverage")?;
+                require_eq(
+                    &staged.relation_dependencies,
+                    &baseline.relation_dependencies,
+                    "owned graph dependency keys",
+                )?;
+            }
         }
         Ok(())
     }

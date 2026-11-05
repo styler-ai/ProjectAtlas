@@ -4030,38 +4030,39 @@ fn starts_with_uppercase(value: &str) -> bool {
 
 /// Extract documentation attached to a declaration.
 fn symbol_documentation(node: Node<'_>, content: &str) -> Option<String> {
-    preceding_documentation(content, node.start_position().row + 1)
+    preceding_documentation(content, node.start_byte())
         .or_else(|| leading_docstring_literal(node, content))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Physical source lines visited by synchronous documentation extraction.
+    static DOCUMENTATION_LINE_VISITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Extract contiguous doc-comment text immediately preceding a declaration.
-fn preceding_documentation(content: &str, line_start: usize) -> Option<String> {
-    let lines = content.lines().collect::<Vec<_>>();
-    if line_start <= 1 || lines.is_empty() {
-        return None;
-    }
-    let mut index = line_start.saturating_sub(2);
+fn preceding_documentation(content: &str, declaration_start: usize) -> Option<String> {
+    let prefix = content.get(..declaration_start)?;
+    let previous_line_end = prefix.rfind('\n')?;
     let mut collected = Vec::new();
     let mut saw_doc = false;
-    loop {
-        let trimmed = lines[index].trim();
+    // Preserve empty physical lines: `lines().rev()` would omit a trailing
+    // empty line and incorrectly attach documentation across a blank separator.
+    for line in prefix[..previous_line_end].rsplit('\n') {
+        #[cfg(test)]
+        DOCUMENTATION_LINE_VISITS.with(|count| count.set(count.get().saturating_add(1)));
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             break;
         }
         if !saw_doc && is_attribute_line(trimmed) {
-            if index == 0 {
-                break;
-            }
-            index -= 1;
             continue;
         }
         if let Some(line) = clean_doc_comment_line(trimmed) {
             collected.push(line);
             saw_doc = true;
-            if index == 0 {
-                break;
-            }
-            index -= 1;
             continue;
         }
         break;
@@ -5417,6 +5418,127 @@ const helper = function helperFactory() { return createThing(); };
                     .iter()
                     .any(|symbol| symbol.kind == SymbolKind::Function && symbol.name == name),
                 "callable constant {name} should remain function-like"
+            );
+        }
+    }
+
+    #[test]
+    fn documentation_lookup_avoids_unrelated_source_lines() {
+        use std::fmt::Write as _;
+
+        let mut imports = String::new();
+        for index in 0..64 {
+            assert!(writeln!(&mut imports, "import module_{index}").is_ok());
+        }
+        for trailing_lines in [0, 512] {
+            let source = format!(
+                "{imports}{}",
+                "# unrelated trailing content\n".repeat(trailing_lines)
+            );
+            super::DOCUMENTATION_LINE_VISITS.with(|count| count.set(0));
+            let graph = extract_symbol_graph("module.py", Some("python"), &source);
+            assert_eq!(graph.symbols.len(), 64);
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .all(|symbol| symbol.documentation.is_none())
+            );
+            assert!(
+                super::DOCUMENTATION_LINE_VISITS.with(std::cell::Cell::get) <= graph.symbols.len(),
+                "undocumented imports traversed unrelated physical source lines"
+            );
+        }
+    }
+
+    #[test]
+    fn documentation_lookup_preserves_attachment_boundaries() {
+        for (path, language, source, expected) in [
+            ("source.rs", "rust", "pub fn target() {}\n", None),
+            (
+                "source.rs",
+                "rust",
+                "/// attached λ\n    pub fn target() {}",
+                Some("attached λ"),
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// first\n/// second\n#[inline]\n#[cold]\npub fn target() {}",
+                Some("first second"),
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/** block λ */\n#[inline] pub fn target() {}",
+                Some("block λ"),
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// attached\r\n#[inline]\r\npub fn target() {}",
+                Some("attached"),
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// detached\n\npub fn target() {}",
+                None,
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// detached\r\n\r\npub fn target() {}",
+                None,
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// detached\n \t\npub fn target() {}",
+                None,
+            ),
+            (
+                "source.rs",
+                "rust",
+                "/// detached\nfn earlier() {}\npub fn target() {}",
+                None,
+            ),
+            ("source.rs", "rust", "#[inline]\npub fn target() {}", None),
+            (
+                "source.py",
+                "python",
+                "def target():\n    \"\"\"body λ\"\"\"\n    pass\n",
+                Some("body λ"),
+            ),
+            (
+                "source.py",
+                "python",
+                "# adjacent λ\ndef target():\n    \"\"\"body\"\"\"\n    pass\n",
+                Some("adjacent λ"),
+            ),
+            (
+                "source.php",
+                "php",
+                "<?php\n/** attached λ */\nfunction target() {}",
+                Some("attached λ"),
+            ),
+            (
+                "source.html",
+                "html",
+                "<div>λ</div>\r\n<script>\r\n/** embedded */\r\nexport function target() {}\r\n</script>",
+                Some("embedded"),
+            ),
+        ] {
+            let graph = extract_symbol_graph(path, Some(language), source);
+            let symbol = graph.symbols.iter().find(|symbol| symbol.name == "target");
+            assert!(
+                symbol.is_some(),
+                "missing declaration in {path}: {source:?}"
+            );
+            assert_eq!(
+                symbol.and_then(|symbol| symbol.documentation.as_deref()),
+                expected,
+                "{path}: {source:?}"
             );
         }
     }

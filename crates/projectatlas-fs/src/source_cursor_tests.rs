@@ -37,7 +37,7 @@ fn reader_with_budget<'root>(
     SourceFileReader {
         occupied,
         limit,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         resolver: SourceResolver::Components,
         ..root.reader()
     }

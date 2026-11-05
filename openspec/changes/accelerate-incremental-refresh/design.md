@@ -501,7 +501,7 @@ The RC1 work-count target for unchanged current-contract source is one exact det
 
 ## Migration Plan
 
-No schema change, public route removal or new dependency is required by this plan. Introduce each proven improvement in its existing shared owner with causal tests and exact fallback. If storage or a persistent component becomes necessary, review its concrete compatibility, migration and rollback design before implementation. Reuse installed-upgrade and four-platform gates before #715 accepts 0.5.1. Preserve 0.5.0 user databases and authored state.
+No schema change or public route removal is required by this plan. Source admission adds the canonical `cap-std` and `cap-fs-ext` dependencies and the Windows `winx` backend in the filesystem owner. The licensed, repository-owned patch to canonical `ignore` records consumed policy inputs while preserving its matching semantics; dependency provenance and release notices remain part of the release gates. Introduce each proven improvement in its existing shared owner with causal tests and exact fallback. If storage or a persistent component becomes necessary, review its concrete compatibility, migration and rollback design before implementation. Reuse installed-upgrade and four-platform gates before #715 accepts 0.5.1. Preserve 0.5.0 user databases and authored state.
 
 ## Dependencies / Cross-Issue Impact
 
@@ -744,7 +744,26 @@ nonregular files and cancellation, followed by the same shipping-profile
 four-CPU comparison and installed-platform targets. No new dependency, unsafe
 code, worker, schema or persisted state is needed. This is an experiment until
 the measurements establish a benefit; other platforms retain the verified
-component opener.
+component opener unless their native all-component contract is separately proved.
+
+On macOS, evaluate root-relative `openat` with `O_NOFOLLOW_ANY` from the locked
+`nix` crate's libc constants. Apple introduced this all-component restriction in
+Darwin 20; older kernels may ignore unknown open flags, so a successful open or
+`F_GETFL` cannot establish support. Select it only after the safe `uname` API
+positively identifies Darwin with release major at least 20; unknown, malformed,
+older or unavailable identification retains the secure component route. Enable
+the existing nix dependency's `feature` feature for that API. Replace leaf-only
+`O_NOFOLLOW` with `O_NOFOLLOW_ANY`: Apple rejects their combination. Preserve
+all other source flags, native normal descendant components, selected root
+capability, opened-file device/inode/regular-file validation, cooperative control
+and exact publication checks. Do not interpret a real source permission, alias,
+missing-path or I/O failure as backend unavailability. The explicit uncached
+single-target route stays unchanged. Reuse native kernel-backend compatibility
+controls on both Mac architectures, including same-object leaf and ancestor
+aliases, supported native names, selected root aliases, hardlinks, atomic saves,
+root replacement, FIFO and stopped work; separately prove conservative version
+selection. Native shipping-profile timings must establish a benefit before this
+experiment is accepted; Linux and other platforms retain their existing paths.
 
 Kernel resolution checks cooperative control before and after the complete
 path-resolution syscall; the component backend checks between ancestor opens.

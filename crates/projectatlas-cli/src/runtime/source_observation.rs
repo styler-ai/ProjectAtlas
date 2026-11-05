@@ -50,6 +50,14 @@ const MAX_POLICY_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
 /// Fixed SQLite sidecar names belonging to one captured database namespace.
 const DATABASE_RUNTIME_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
+#[cfg(test)]
+thread_local! {
+    /// Actual runtime namespace classifications in one synchronous callback test.
+    static RUNTIME_EVENT_PATH_CLASSIFICATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Send test-only native observer evidence through libtest's captured diagnostics.
 #[cfg(test)]
 #[expect(
@@ -517,6 +525,8 @@ impl SourceBinding {
 
     /// Recognize only captured literal names, without consulting the filesystem in a callback.
     fn has_database_path(&self, event: &Event) -> bool {
+        #[cfg(test)]
+        RUNTIME_EVENT_PATH_CLASSIFICATIONS.with(|count| count.set(count.get().saturating_add(1)));
         event.paths.iter().any(|path| {
             let candidate = super::absolute_watch_path(&self.root, path);
             [
@@ -2163,6 +2173,14 @@ fn selected_watcher_callback(
     );
     let runtime = runtime.clone();
     move |result| {
+        // Source reads emit access notifications on native backends. Discard
+        // irrelevant kinds before allocating paths for runtime classification.
+        if let Ok(event) = &result
+            && !super::event_kind_affects_index(event.kind)
+            && !event.need_rescan()
+        {
+            return;
+        }
         if let Ok(event) = &result
             && !selection.may_affect(event)
             && !runtime.may_affect(event)
@@ -4771,6 +4789,52 @@ mod tests {
                 .lock()
                 .is_ok_and(|receiver| receiver.try_recv().is_ok())
         );
+    }
+
+    #[test]
+    fn selected_watcher_callback_ignores_access_before_path_routing() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        let runtime =
+            RuntimeEventIngress::new(SourceBinding::new(&root.join("unused.db"), &root, None)?);
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut callback = selected_watcher_callback(
+            &runtime,
+            selection,
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+            None,
+        );
+        RUNTIME_EVENT_PATH_CLASSIFICATIONS.with(|count| count.set(0));
+        for kind in [
+            AccessKind::Any,
+            AccessKind::Open(notify::event::AccessMode::Any),
+            AccessKind::Close(notify::event::AccessMode::Read),
+            AccessKind::Close(notify::event::AccessMode::Write),
+        ] {
+            for path in [root.join("source.rs"), root.join("unused.db-wal")] {
+                callback(Ok(Event::new(EventKind::Access(kind)).add_path(path)));
+            }
+        }
+        require(
+            RUNTIME_EVENT_PATH_CLASSIFICATIONS.with(std::cell::Cell::get) == 0,
+            "irrelevant access notifications reached runtime path allocation and routing",
+        )?;
+        require(
+            sequence.load(Ordering::Acquire) == 0
+                && !lost.load(Ordering::Acquire)
+                && receiver
+                    .lock()
+                    .is_ok_and(|receiver| receiver.try_recv().is_err()),
+            "ignored access notifications changed observer ingress",
+        )
     }
 
     #[test]

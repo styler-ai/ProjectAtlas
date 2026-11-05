@@ -1,4 +1,4 @@
-//! Linux all-component source resolution and secure-backend compatibility proof.
+//! Native all-component source resolution and secure-backend compatibility proof.
 
 use super::*;
 use projectatlas_core::IndexCancellation;
@@ -23,9 +23,6 @@ fn read(reader: &mut SourceFileReader<'_>, path: &Path) -> FsResult<Vec<u8>> {
 #[test]
 fn kernel_source_resolution_does_not_retain_a_userspace_ancestor_chain()
 -> Result<(), Box<dyn Error>> {
-    use nix::errno::Errno;
-    use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
-
     let temp = tempfile::tempdir()?;
     fs::create_dir_all(temp.path().join("src/group"))?;
     let path = temp.path().join("src/group/source.rs");
@@ -33,16 +30,29 @@ fn kernel_source_resolution_does_not_retain_a_userspace_ancestor_chain()
     let root = SourceRootReader::open(temp.path())?;
     // The product must also work on older kernels or syscall-restricted hosts.
     // Those hosts exercise the existing component backend, not this native proof.
-    match openat2(
-        &root.directory,
-        Path::new("."),
-        OpenHow::new()
-            .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
-            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
-    ) {
-        Ok(file) => drop(file),
-        Err(Errno::ENOSYS | Errno::EPERM | Errno::EACCES | Errno::ENOENT) => return Ok(()),
-        Err(error) => return Err(error.into()),
+    #[cfg(target_os = "linux")]
+    {
+        use nix::errno::Errno;
+        use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
+        match openat2(
+            &root.directory,
+            Path::new("."),
+            OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+                .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+        ) {
+            Ok(file) => drop(file),
+            Err(Errno::ENOSYS | Errno::EPERM | Errno::EACCES | Errno::ENOENT) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let system = nix::sys::utsname::uname()?;
+        if !darwin_supports_no_follow_any(system.sysname().to_str().zip(system.release().to_str()))
+        {
+            return Ok(());
+        }
     }
     for limit in [0, DIRECTORY_HANDLE_CEILING] {
         let mut reader = SourceFileReader {
@@ -62,6 +72,7 @@ fn kernel_source_resolution_does_not_retain_a_userspace_ancestor_chain()
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn kernel_availability_fallback_is_local_and_keeps_real_path_errors_strict()
 -> Result<(), Box<dyn Error>> {
@@ -191,7 +202,12 @@ fn kernel_source_keeps_flags_native_names_root_aliases_hardlinks_and_saves()
     let temp = tempfile::tempdir()?;
     let directory = temp.path().join("repo/src λ/group");
     fs::create_dir_all(&directory)?;
+    #[cfg(target_os = "linux")]
     let native = OsStr::from_bytes(b"source-\xff.rs");
+    // APFS admits UTF-8 names; the separate native-creation test retains its
+    // EILSEQ compatibility control without turning a read error into success.
+    #[cfg(target_os = "macos")]
+    let native = OsStr::from_bytes("source-λ.rs".as_bytes());
     let path = directory.join(native);
     fs::write(&path, b"before save")?;
     fs::hard_link(&path, directory.join("hardlink.rs"))?;
@@ -204,11 +220,15 @@ fn kernel_source_keeps_flags_native_names_root_aliases_hardlinks_and_saves()
     let (mut retained, _) = reader.open_file(&path, &fs::symlink_metadata(&path)?, &control)?;
     let flags = OFlag::from_bits_truncate(fcntl(&retained, FcntlArg::F_GETFL)?);
     let descriptor = FdFlag::from_bits_truncate(fcntl(&retained, FcntlArg::F_GETFD)?);
-    if !flags.contains(OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW)
+    if !flags.contains(OFlag::O_NONBLOCK)
         || flags.intersects(OFlag::O_WRONLY | OFlag::O_RDWR)
         || !descriptor.contains(FdFlag::FD_CLOEXEC)
     {
         return Err("kernel source changed read-only, nonblocking or descriptor flags".into());
+    }
+    #[cfg(target_os = "linux")]
+    if !flags.contains(OFlag::O_NOFOLLOW) {
+        return Err("Linux kernel source lost its leaf no-follow flag".into());
     }
     let pending = directory.join("pending.rs");
     fs::write(&pending, b"after save")?;
@@ -353,8 +373,11 @@ fn kernel_source_binds_walker_metadata_and_preserves_control_and_nonregular_refu
 fn kernel_selection_checks_paths_and_control_and_leaves_single_targets_uncached()
 -> Result<(), Box<dyn Error>> {
     use nix::errno::Errno;
+    #[cfg(target_os = "linux")]
     use nix::unistd::dup;
+    #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::MetadataExt;
 
     let temp = tempfile::tempdir()?;
@@ -400,59 +423,107 @@ fn kernel_selection_checks_paths_and_control_and_leaves_single_targets_uncached(
     {
         return Err("single-target source unexpectedly selected a cached or kernel backend".into());
     }
-    let cancellation = IndexCancellation::new();
-    let control = IndexWorkControl::new(cancellation.clone(), None);
-    let mut reader = root.reader();
-    let mut calls = 0;
-    let result = reader.try_kernel_open(
-        relative,
-        &path,
-        &metadata,
-        &control,
-        |directory, name, _| {
-            calls += 1;
-            if name == Path::new(".") {
+    #[cfg(target_os = "linux")]
+    {
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut reader = root.reader();
+        let mut calls = 0;
+        let result = reader.try_kernel_open(
+            relative,
+            &path,
+            &metadata,
+            &control,
+            |directory, name, _| {
+                calls += 1;
+                if name == Path::new(".") {
+                    cancellation.cancel();
+                    dup(directory)
+                } else {
+                    Err(Errno::EIO)
+                }
+            },
+        );
+        if !matches!(result, Err(FsError::IndexWork(_))) || calls != 1 || reader.cursor.is_some() {
+            return Err("cancelled availability probe continued into a source open".into());
+        }
+        let source = File::open(&path)?;
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut reader = root.reader();
+        let mut returned_descriptor = None;
+        let result = reader.try_kernel_open(
+            relative,
+            &path,
+            &metadata,
+            &control,
+            |directory, name, _| {
+                if name == Path::new(".") {
+                    return dup(directory);
+                }
+                let opened = dup(&source)?;
+                returned_descriptor = Some(opened.as_raw_fd());
                 cancellation.cancel();
-                dup(directory)
-            } else {
-                Err(Errno::EIO)
-            }
-        },
-    );
-    if !matches!(result, Err(FsError::IndexWork(_))) || calls != 1 || reader.cursor.is_some() {
-        return Err("cancelled availability probe continued into a source open".into());
+                Ok(opened)
+            },
+        );
+        if !matches!(result, Err(FsError::IndexWork(_))) {
+            return Err("source opened during cancellation escaped the post-open check".into());
+        }
+        let descriptor = returned_descriptor.ok_or("source opener was not reached")?;
+        match fs::metadata(format!("/proc/self/fd/{descriptor}")) {
+            // Parallel tests may already reuse the descriptor number for another
+            // object; none can name this test's private, still-live source inode.
+            Ok(current) if current.dev() != metadata.dev() || current.ino() != metadata.ino() => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err("cancelled source open leaked its returned descriptor".into()),
+        }
     }
-    let source = File::open(&path)?;
-    let cancellation = IndexCancellation::new();
-    let control = IndexWorkControl::new(cancellation.clone(), None);
-    let mut reader = root.reader();
-    let mut returned_descriptor = None;
-    let result = reader.try_kernel_open(
-        relative,
-        &path,
-        &metadata,
-        &control,
-        |directory, name, _| {
-            if name == Path::new(".") {
-                return dup(directory);
-            }
-            let opened = dup(&source)?;
-            returned_descriptor = Some(opened.as_raw_fd());
-            cancellation.cancel();
-            Ok(opened)
-        },
-    );
-    if !matches!(result, Err(FsError::IndexWork(_))) {
-        return Err("source opened during cancellation escaped the post-open check".into());
-    }
-    let descriptor = returned_descriptor.ok_or("source opener was not reached")?;
-    match fs::metadata(format!("/proc/self/fd/{descriptor}")) {
-        // Parallel tests may already reuse the descriptor number for another
-        // object; none can name this test's private, still-live source inode.
-        Ok(current) if current.dev() != metadata.dev() || current.ino() != metadata.ino() => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("cancelled source open leaked its returned descriptor".into()),
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_source_open_errors_remain_strict_after_support_selection() -> Result<(), Box<dyn Error>> {
+    use nix::errno::Errno;
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("source.rs");
+    fs::write(&path, b"direct source")?;
+    let metadata = fs::metadata(&path)?;
+    let root = SourceRootReader::open(temp.path())?;
+    let control = IndexWorkControl::new(IndexCancellation::new(), None);
+    for refused in [
+        Errno::EPERM,
+        Errno::EACCES,
+        Errno::EINVAL,
+        Errno::EAGAIN,
+        Errno::ELOOP,
+        Errno::EXDEV,
+        Errno::EIO,
+        Errno::ENOENT,
+        Errno::ENOSYS,
+    ] {
+        let mut reader = root.reader();
+        reader.resolver = SourceResolver::Kernel;
+        let mut calls = 0;
+        let result = reader.try_kernel_open(
+            Path::new("source.rs"),
+            &path,
+            &metadata,
+            &control,
+            |_, _, _| {
+                calls += 1;
+                Err(refused)
+            },
+        );
+        if !matches!(result, Err(FsError::Io { source, .. }) if source.raw_os_error() == Some(refused as i32))
+            || calls != 1
+            || reader.resolver != SourceResolver::Kernel
+        {
+            return Err("Darwin source error selected an optional-backend fallback".into());
+        }
     }
     Ok(())
 }
