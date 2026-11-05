@@ -131,6 +131,21 @@ def inventory_contains(expected: str, output: str | None) -> bool:
     )
 
 
+def inventory_active(output: str | None) -> str | None:
+    """Read Rustup's selected installed row, including its older override label."""
+
+    active = []
+    for line in (output or "").splitlines():
+        labels = {
+            label.strip()
+            for group in re.findall(r"\(([^)]*)\)", line)
+            for label in group.split(",")
+        }
+        if labels & {"active", "override"}:
+            active.append(line.split(maxsplit=1)[0])
+    return active[0] if len(active) == 1 else None
+
+
 def commits_match(first: str | None, second: str | None) -> bool:
     """Return whether two full or abbreviated commit identities agree."""
 
@@ -242,12 +257,18 @@ def command_failure_output(stdout: str | bytes | None, stderr: str | bytes | Non
 def run(
     command: list[str], root: Path, *, timeout: int = 20
 ) -> subprocess.CompletedProcess[str] | None:
-    """Run one bounded identity probe without mutating repository state."""
+    """Run a bounded command with Rustup's automatic-install policy disabled."""
 
+    environment = os.environ.copy()
+    # Inventory and version probes must not start an installation under their
+    # short timeout. Older managers also need the installed-selection guard in
+    # preflight(). Explicit install still owns its separate budget.
+    environment["RUSTUP_AUTO_INSTALL"] = "0"
     try:
         return subprocess.run(
             command,
             cwd=root,
+            env=environment,
             check=False,
             capture_output=True,
             text=True,
@@ -271,11 +292,17 @@ def output_of(result: subprocess.CompletedProcess[str] | None) -> str | None:
 
 
 def evidence_for(
-    name: str, path: str | None, arguments: list[str], root: Path
+    name: str, path: str | None, arguments: list[str], root: Path,
+    *, rustup: str, toolchain: str,
 ) -> ToolEvidence:
-    """Capture one validated executable's bounded version output."""
+    """Read a validated tool's version through Rustup's non-installing run mode."""
 
-    output = output_of(run([path, *arguments], root)) if path else None
+    # Rustup run is non-installing unless --install is explicitly supplied.
+    # Use the selection already resolved in the actual project inventory;
+    # older show/proxy commands can install missing file-declared components.
+    executable = "cargo-clippy" if name == "clippy" else name
+    command = [rustup, "run", toolchain, executable, *arguments] if path else None
+    output = output_of(run(command, root)) if command else None
     release = None
     commit = None
     if output:
@@ -433,6 +460,14 @@ def preflight(root: Path, *, install: bool) -> int:
                     expected_installed = True
         else:
             expected_installed = True
+    if expected_installed:
+        # Old Rustup ignores AUTO_INSTALL=0. Its inventory resolves selection
+        # without installing; require the selected toolchain to be installed
+        # before invoking version commands. Do not resolve selection again via
+        # show/proxies, which may install file-declared missing components.
+        active = inventory_active(inventory_output)
+        if not version_matches(expected, active):
+            rustup_error = "the selected toolchain is not the installed repository pin"
     if (
         rustup_path
         and expected_installed
@@ -440,19 +475,18 @@ def preflight(root: Path, *, install: bool) -> int:
         and not rustup_error
         and not override_error
     ):
-        rustup_result = run([rustup_path, "show", "active-toolchain"], root)
-        active_output = output_of(rustup_result)
-        active = active_output.split()[0] if active_output else None
-        if rustup_result is None or rustup_result.returncode != 0:
-            rustup_error = "rustup did not report an active toolchain"
         evidence = (
-            evidence_for("rustc", paths["rustc"], ["-Vv"], root),
-            evidence_for("cargo", paths["cargo"], ["-Vv"], root),
+            evidence_for("rustc", paths["rustc"], ["-Vv"], root,
+                         rustup=rustup_path, toolchain=active),
+            evidence_for("cargo", paths["cargo"], ["-Vv"], root,
+                         rustup=rustup_path, toolchain=active),
             evidence_for(
-                "clippy", paths["cargo-clippy"], ["--version", "--verbose"], root
+                "clippy", paths["cargo-clippy"], ["--version", "--verbose"], root,
+                rustup=rustup_path, toolchain=active,
             ),
             evidence_for(
-                "rustfmt", paths["rustfmt"], ["--version", "--verbose"], root
+                "rustfmt", paths["rustfmt"], ["--version", "--verbose"], root,
+                rustup=rustup_path, toolchain=active,
             ),
         )
 
@@ -631,14 +665,14 @@ def package_native_self_test() -> None:
                 return subprocess.CompletedProcess(command, 0, value + "\n", "")
             assert Path(command[0]).parent == native, "package wrapper was executed"
             assert os.environ["RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS"] == state["expected_settings"]
-            name = Path(command[0]).name
+            name = Path(command[3]).name if command[1:2] == ["run"] else Path(command[0]).name
             if name == "rustup":
                 if command[1:3] == ["toolchain", "install"]:
                     return subprocess.CompletedProcess(
                         command, state["install_code"],
                         "rustup install stdout marker\n", "rustup install stderr marker\n",
                     )
-                text = expected + "-aarch64-apple-darwin (default)\n"
+                text = expected + "-aarch64-apple-darwin (default, active)\n"
             elif name == "rustc":
                 text = f"rustc {expected}\nrelease: {expected}\ncommit-hash: abcdef123456\n"
             elif name == "cargo":
@@ -744,6 +778,48 @@ def command_failure_self_test() -> None:
             assert len(detail) < 9_000, "timeout diagnostics retained unbounded output"
 
 
+def implicit_install_self_test() -> None:
+    """Keep probes non-installing without suppressing the explicit install command."""
+
+    expected = read_declared_channel(Path(__file__).resolve().parents[2] / "rust-toolchain.toml")
+    commands = [
+        (["rustup", "toolchain", "list"], 20),
+        (["rustup", "run", expected, "rustc", "-Vv"], 20),
+        (["rustup", "run", expected, "cargo", "-Vv"], 20),
+        (["rustup", "run", expected, "cargo-clippy", "--version", "--verbose"], 20),
+        (["rustup", "run", expected, "rustfmt", "--version", "--verbose"], 20),
+        (["rustup", "toolchain", "install", expected, "--profile", "minimal",
+          "--component", "clippy,rustfmt"], 120),
+    ]
+    calls = []
+
+    def inspect_child(command, **arguments):
+        environment = arguments.get("env", os.environ)
+        assert environment.get("RUSTUP_AUTO_INSTALL") == "0", (
+            "bounded toolchain command retained implicit installation"
+        )
+        assert environment.get("CARGO_HOME") == "owned cargo home"
+        assert environment.get("RUSTUP_HOME") == "owned rustup home"
+        calls.append((command, arguments["timeout"]))
+        return subprocess.CompletedProcess(command, 0, stdout="observed\n", stderr="")
+
+    for caller_policy in (None, "0", "1"):
+        calls.clear()
+        with patch.dict(os.environ, {
+            "CARGO_HOME": "owned cargo home", "RUSTUP_HOME": "owned rustup home",
+        }), patch(f"{__name__}.subprocess.run", side_effect=inspect_child):
+            if caller_policy is None:
+                os.environ.pop("RUSTUP_AUTO_INSTALL", None)
+            else:
+                os.environ["RUSTUP_AUTO_INSTALL"] = caller_policy
+            for command, timeout in commands:
+                assert run(command, Path.cwd(), timeout=timeout) is not None
+            assert os.environ.get("RUSTUP_AUTO_INSTALL") == caller_policy, (
+                "child policy mutated caller state"
+            )
+        assert calls == commands, "explicit installation or probe arguments/budgets changed"
+
+
 def self_test() -> None:
     """Exercise declaration and mismatch boundaries without invoking Rust."""
 
@@ -751,6 +827,14 @@ def self_test() -> None:
     historical = "1.93.1"
     expected_clippy = f"0.1.{expected.split('.')[1]}"
     historical_clippy = f"0.1.{historical.split('.')[1]}"
+    for label in ("(active)", "(default, active)", "(active, default)",
+                  "(override)", "(default) (override)"):
+        assert inventory_active(f"{expected}-x86_64-pc-windows-msvc {label}\n") == (
+            expected + "-x86_64-pc-windows-msvc"
+        )
+    assert inventory_active(f"{expected} (default)\n") is None
+    assert inventory_active(f"{expected} (active)\nstable (active)\n") is None
+    assert inventory_active(None) is None
     with __import__("tempfile").TemporaryDirectory() as temporary:
         toolchain = Path(temporary) / "rust-toolchain.toml"
         toolchain.write_text(f'channel = "{expected}"\n', encoding="utf-8")
@@ -958,6 +1042,8 @@ def self_test() -> None:
             "install_returncode": 0,
             "install_timeout": False,
             "inventory_returncodes": [],
+            "active_marker": True,
+            "missing_component": None,
         }
 
         def fake_which(command: str) -> str | None:
@@ -994,11 +1080,20 @@ def self_test() -> None:
                 if os.path.normcase(str(Path(path))) == executable
             )
             calls.append(command)
+            if command[1:2] == ["run"]:
+                assert command[2] == expected + "-x86_64-pc-windows-msvc"
+                assert "--install" not in command
+                name = command[3]
+                if name == manager_state["missing_component"]:
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout="", stderr="component is not installed\n"
+                    )
             if name in sentinels:
                 sentinels[name].write_text("invoked\n", encoding="utf-8")
             if name == "rustup" and command[1:3] == ["toolchain", "list"]:
                 inventory = (
-                    f"{expected}-x86_64-pc-windows-msvc (default)\n"
+                    f"{expected}-x86_64-pc-windows-msvc (default)"
+                    + (" (override)" if manager_state["active_marker"] else "") + "\n"
                     if manager_state["installed"]
                     else "stable-x86_64-pc-windows-msvc (default)\n"
                 )
@@ -1033,13 +1128,14 @@ def self_test() -> None:
             assert preflight(root, install=False) == 0
         assert set(requested) == set(executable_names)
         clippy_calls = [
-            call for call in calls if Path(call[0]).stem.lower() == "cargo-clippy"
+            call for call in calls if call[1:2] == ["run"] and call[3] == "cargo-clippy"
         ]
         assert clippy_calls == [
-            [valid_paths["cargo-clippy"], "--version", "--verbose"]
+            [valid_paths["rustup"], "run", expected + "-x86_64-pc-windows-msvc",
+             "cargo-clippy", "--version", "--verbose"]
         ]
         assert not any(
-            Path(call[0]).stem.lower() == "cargo" and "clippy" in call
+            call[1:2] == ["run"] and call[3] == "cargo" and "clippy" in call
             for call in calls
         )
 
@@ -1172,7 +1268,7 @@ def self_test() -> None:
         assert calls[1][1:3] == ["toolchain", "install"]
         assert calls[1][3] == expected
         assert calls[2][1:3] == ["toolchain", "list"]
-        assert calls[3][1:3] == ["show", "active-toolchain"]
+        assert calls[3][1:4] == ["run", expected + "-x86_64-pc-windows-msvc", "rustc"]
 
         manager_state["install_returncode"] = 1
         requested.clear()
@@ -1254,7 +1350,7 @@ def self_test() -> None:
         assert calls[1][1:3] == ["toolchain", "install"]
         assert calls[1][3] == expected
         assert calls[2][1:3] == ["toolchain", "list"]
-        assert calls[3][1:3] == ["show", "active-toolchain"]
+        assert calls[3][1:4] == ["run", expected + "-x86_64-pc-windows-msvc", "rustc"]
 
         manager_state["installed"] = False
         manager_state["inventory_returncodes"] = [1, 0]
@@ -1272,7 +1368,7 @@ def self_test() -> None:
             ["toolchain", "list"],
             ["toolchain", "install"],
             ["toolchain", "list"],
-            ["show", "active-toolchain"],
+            ["run", expected + "-x86_64-pc-windows-msvc"],
         ]
 
         manager_state["installed"] = False
@@ -1292,6 +1388,40 @@ def self_test() -> None:
             ["toolchain", "install"],
             ["toolchain", "list"],
         ]
+
+        # A missing directory-selected toolchain has no active inventory row.
+        # Older Rustup would install it from show/proxy identity commands.
+        manager_state["installed"] = True
+        manager_state["active_marker"] = False
+        calls.clear()
+        with patch.dict(
+            os.environ,
+            {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+            clear=False,
+        ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+            f"{__name__}.run", side_effect=tracking_run
+        ):
+            assert preflight(root, install=False) == 1
+        assert [call[1:3] for call in calls] == [["toolchain", "list"]], (
+            "uninstalled active selection reached potentially installing identity probes"
+        )
+        manager_state["active_marker"] = True
+
+        for missing_component in ("cargo-clippy", "rustfmt"):
+            manager_state["missing_component"] = missing_component
+            calls.clear()
+            with patch.dict(
+                os.environ,
+                {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+                clear=False,
+            ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+                f"{__name__}.run", side_effect=tracking_run
+            ):
+                assert preflight(root, install=False) == 1
+            assert calls[0][1:3] == ["toolchain", "list"]
+            assert all(call[1:2] == ["run"] and "--install" not in call
+                       for call in calls[1:]), "partial installation reached installing probes"
+        manager_state["missing_component"] = None
 
         manager_state["installed"] = False
         manager_state["install_returncode"] = 1
@@ -1426,6 +1556,7 @@ def self_test() -> None:
         assert not calls, "missing rustup was probed"
     package_native_self_test()
     command_failure_self_test()
+    implicit_install_self_test()
     print("Rust toolchain preflight self-test passed")
 
 

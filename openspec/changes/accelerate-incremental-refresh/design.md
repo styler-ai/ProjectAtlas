@@ -400,6 +400,41 @@ hardlink fixtures use `os.link`, preserving the same inode evidence on Python 3.
 This improves failure evidence; it does not identify the cause of an earlier
 installation failure whose command output was discarded.
 
+The retained Intel Mac failure subsequently showed the supposedly read-only
+`rustup toolchain list` probe syncing and downloading the missing pinned toolchain
+under its 20-second identity timeout. The following explicit install then met
+partial-toolchain rollback conflicts; the log does not prove that every conflict
+was caused solely by the timed-out probe. At the shared verifier subprocess
+boundary, copy the caller environment and set `RUSTUP_AUTO_INSTALL=0`, as defined
+by the [Rustup environment contract](https://rust-lang.github.io/rustup/environment-variables.html).
+Older Rustup 1.27.1 ignores that environment setting. Its inventory is
+non-installing, but `show active-toolchain` and proxy commands can install a
+missing directory-selected toolchain. Before those commands, require exactly
+one installed selection from Rustup's inventory, accepting its older `override`
+and current `active` labels, and require that selection to match the repository
+pin. A default row alone is insufficient: a missing directory override must
+fail without downloading. Use the validated inventory selection directly and
+run version probes with `rustup run <selected-toolchain> <tool> ...`, without
+`--install`. Skip `show active-toolchain` and proxy execution: on the older
+manager those can also install missing file-declared components in an existing
+toolchain. Keep Rustup responsible for project selection rather than parsing
+its override database ourselves; retain validation of every selected proxy's
+exact backing before executing the manager.
+
+The explicit install command, its arguments and 120-second budget remain intact.
+Preserve caller homes, executable provenance, project selection, version and
+commit checks, diagnostics and global environment. Offline boundary controls cover
+unset, disabled and enabled caller settings, inventory label variants, ambiguous
+or absent selections, and explicit installation. A real Rustup 1.27.1 smoke using
+isolated homes and a loopback-only intentional-404 mirror reproduces the missing
+directory-override download before the guard and confirms zero requests afterward;
+healthy installed verification succeeds, missing-pin read-only verification
+refuses without requests, and explicit bootstrap still requests the mirror. A
+partial installation missing Clippy and rustfmt also reproduces unwanted
+requests before the fix and refuses without requests afterward. No toolchain is
+installed by that smoke. Native replay through the corrected workflow remains
+required.
+
 Cold external-policy coverage uses the existing `notify::Watcher::paths_mut`
 batch API. Remove and re-add every selected parent, and retire removed parents,
 before explicitly committing once. This preserves same-path replacement handling
