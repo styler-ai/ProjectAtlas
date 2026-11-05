@@ -632,46 +632,71 @@ establishes the delayed hint; it does not establish before/after inode equality.
 A deterministic same-object callback reproduction protects the common mechanism.
 
 Retain optional physical database identity at the existing storage boundary. On
-supported Unix filesystems, a retained `File` supplies device/inode identity and
-SQLite's `SQLITE_FCNTL_HAS_MOVED` checks the actual opened connection against its
-pathname. Both are needed: a replacement can preserve project ID and generation,
-and a pathname restored to the original file can conceal a connection still open
-on the replacement. Reuse the existing VFS check used by legacy-root adoption;
-preserve its typed refusal and all existing connection, schema and WAL settings.
-Unsupported native/VFS identity, including the current Windows implementation,
-retains conservative namespace-event handling rather than using an incomplete
-identifier.
+supported Unix filesystems, retain the original SQLite-owned connection through
+a lazy shared lease rather than opening a separate `File`. Independent descriptor
+closes cancel the process's POSIX locks, including locks SQLite still believes it
+holds. This affects both transient path-validation opens and final retirement of
+a retained raw descriptor. Separate-process tests reproduce loss of WAL main-file
+shared locks and rollback-journal reserved locks at capture, validation and final
+witness drop. The ordinary WAL write/close visibility case did not fail on the
+bundled SQLite; it is positive compatibility evidence, not a reproduced outcome.
+
+Path checks use metadata only, following supported database aliases, and require
+a valid lease plus the complete native device/inode key. Keep SQLite's
+`SQLITE_FCNTL_HAS_MOVED` check against the actual opened connection: a replacement
+can preserve project ID/generation, and a restored pathname can conceal a handle
+still open on the replacement. Captured-key equality is not current admission
+authority; all consumers use the live path/store checks. Unsupported native/VFS
+identity, including the current Windows implementation, retains conservative
+namespace handling. Other-platform connection ownership remains unchanged.
+
+An internal Unix connection owner preserves the existing store access shape,
+`Send`/non-`Sync` properties and exclusive mutation. Native identities share one
+lazy `Arc<Mutex<...>>` lease per captured store. Store retirement first invalidates
+the lease, rolls back any unfinished transaction, flushes the prepared-statement
+cache and releases unused SQLite page-cache memory. Only successful cleanup may
+transfer the idle original connection to the lease. Failed cleanup leaves the
+witness invalid and closes through SQLite. This preserves implicit rollback and
+prevents a retained identity from holding a read snapshot or uncommitted write.
+A narrow take-once `ManuallyDrop` boundary transfers ownership during destruction;
+it introduces neither a second path open nor an unsafe thread-safety assertion.
+Final release remains SQLite/VFS-owned so another connection's locks survive.
 
 Keep this witness outside the path-based registry key. Preserve the last accepted
-file object across epoch invalidation, and carry an exact-read candidate during
-cold admission. The callback performs no filesystem or SQLite I/O: it queues an
-exact canonical-target `Create(File)` hint without coalescing it away. Controlled
-drain may ignore that hint only when the retained object and selected canonical
-target still match. Selected-link creation, removal, rename, rescan, unknown
-identity and continuity loss retain their existing refusal or exact-repair path.
-Actual reader/writer connection identity is checked during admission and inside
-the final callback-receiver fence; mutation verification receives the real writer,
-including the exact fallback. Source, policy, root, generation, cancellation and
-transaction rollback checks remain independent requirements. This adds no native
-delivery fence and does not authorize zero-source-work freshness.
+file object across epoch invalidation and carry an exact-read candidate during
+cold admission. Callbacks perform no filesystem/SQLite I/O: they queue exact
+canonical-target creation hints. Controlled drain may ignore a hint only while
+the live retained object and selected target still match. Selected-link creation,
+removal, rename, rescan, unknown identity and continuity loss retain existing
+refusal or exact repair. Reader/writer identity is checked during admission and
+inside the final receiver fence, including exact mutation fallback. Source,
+policy, root, generation, cancellation and rollback remain independent. This
+adds no native delivery fence and does not permit zero-source-work freshness.
 
-The registry remains bounded to sixteen entries. Each accepted entry retains one
-file object shared with live operation witnesses; RAII releases it when replaced
-or the entry/witness is dropped. A renamed or unlinked database can remain pinned
-for that lifetime. There is no added thread, connection pool, persistent cache,
-schema change or new dependency version. The filesystem crate owns a shared
-regular-file opener using its existing Unix `nix` dependency for nonblocking
-opens without controlling-terminal acquisition, then validates descriptor type.
-The database fixture reuses the workspace's portable Unix `nix` API. A FIFO
-substituted before opening cannot wait for a writer while holding the receiver
-fence. Supported database symlinks remain
-followed, subject to the separate canonical-target and selection checks. Coverage
-includes FIFO replacement at capture and path validation, same-object delayed hints with a
-successful purpose commit; copied replacements preserving project/generation;
-replacement-open/path-restore races; recreated selected symlinks; replacement
-while callback delivery waits behind the acceptance fence; and the existing
-source/policy/continuity/cancellation controls. Optimized native installed proof
-and unchanged four-platform performance targets remain acceptance requirements.
+The registry remains bounded to sixteen entries; accepted entry identities share
+one lease with operation witnesses. Older leases survive only while bounded live
+operations retain them. Each lease can retain the original SQLite connection and
+its idle WAL/SHM resources, so release page/statement caches and measure the
+actual resource effect. There is no extra connection open, pool, thread, global
+lifetime registry, persistent schema or dependency change. Clones share the same
+retained connection, and last-clone drop coordinates its close through the VFS.
+A renamed/unlinked database may remain pinned for that lifetime. The bundled
+SQLite close path checks whether its main file moved before WAL cleanup;
+replacement-WAL preservation is also covered directly.
+
+Metadata-only database checks do not wait for a FIFO writer and preserve
+follow-symlink alias semantics. Other source/control readers retain their shared
+nonblocking regular-file opener. Production database raw-open search found only
+the two corrected identity paths; hydration candidate-file I/O occurs after its
+private store is dropped and parent-directory opens are fsync operations. Coverage
+includes all six separate-process lock cases, real-store retirement/clones,
+authorizer-denied rollback, read/write transaction cleanup with a checkpoint
+oracle, replacement WAL survival, FIFO, copied replacements via SQLite backup,
+replacement-open/path-restore, database aliases and the existing source/policy/
+continuity/cancellation controls. Checkpoint controls prove an active read blocks
+cleanup and finished/rejected reads do not; idle identity connections are not
+misclassified as leaked transactions. Installed native proof and every unchanged
+four-platform performance target remain required.
 
 ## Regular-file races across source and control readers
 
@@ -1026,41 +1051,18 @@ cost, but cannot establish a product speedup, explain an RSS miss, replace the
 registered installed measurements or waive their limits. Keep previous failed
 cohorts intact while investigating their owning paths.
 
-## Fresh Windows policy-directory attributes
+## Windows policy-directory attribute trial
 
-The optimized native owner profile on the unchanged Windows source attributes
-10.61 ms of a 64.21 ms median admission to two policy-discovery passes. This is
-test-only attribution on the smaller fixture, not installed MCP acceptance or
-proof that one particular syscall accounts for the complete regression.
-
-The ancestor-classification loop needs to distinguish an ordinary directory from
-an alias or other entry. Requesting complete metadata for each ordinary ancestor
-also collects fields that this decision never consumes. Use the existing native
-Windows filesystem boundary and locked official `windows-sys` bindings for one
-fresh attribute query. Only a successful directory result with no reparse flag
-can select the ordinary-directory branch. All other results, including errors,
-go through the existing `symlink_metadata` branch and its original diagnostics.
-Relative, parent-component, wildcard and alternate-stream selectors also retain
-that fallback, as do trailing separators and dot/space components whose native
-lookup rules must remain with the established backend. Keep UTF-16/NUL validation
-in the existing native-path owner.
-
-This is an operation-local query, not a metadata or identity cache. Keep both
-fresh policy discoveries, all selected binding/alias canonicalizations, bytes,
-watch rebinding, ordinary-directory namespace memo bounds, source comparisons
-and pre/post acceptance fences. Do not change source-reader handles, sharing,
-reparse compatibility or legitimate Cloud Files behavior. Unix keeps its existing
-metadata path. Native query errors are not ignored as successful inspection: the
-standard backend must still classify the entry or return its original failure.
-
-Compare the complete selection against the original full-metadata control on
-Windows, recording actual attribute and complete-metadata calls. Cover fresh
-directory replacement, aliases, ordinary/non-directory and missing parents,
-verbatim/native selectors and fallback errors; retain existing retarget, A/B/A,
-capacity, cancellation, observer, CLI/MCP and Cloud Files controls. The native
-optimized owner profile and genuine corrected packaged measurements must justify
-retaining this change. No latency/RSS limit, diagnostic-only number or failed
-cohort is substituted for the registered installed acceptance.
+The optional fresh `GetFileAttributesW` branch was tested and removed. Its native
+paired policy fixture measured full-metadata versus attribute medians of 6.2003
+and 6.1113 ms (1.44% less), with only three of five pairs faster. Full-metadata
+calls fell from 158 to 60, but 130 attribute probes raised total measured lookup
+API invocations to 190. These counters do not measure physical I/O. The small,
+noisy timing difference does not justify the added selector/reparse/fallback
+surface or explain the installed Windows warm-MCP miss. Keep the established
+full-metadata path and the separately justified bounded directory resolver memo.
+The original diagnostic remains in the archived source-CI run and implementation handoff;
+no target or failure is discarded. Continue investigating the actual owning work.
 
 ## Supplemental native navigation memory attribution
 

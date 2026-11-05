@@ -3059,6 +3059,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         const CHILD_ROOT: &str = "PROJECTATLAS_TEST_POLICY_FINAL_ACCEPTANCE_ROOT";
         const CHILD_MODE: &str = "PROJECTATLAS_TEST_POLICY_FINAL_ACCEPTANCE_MODE";
+        const CHECKPOINT: &str = "PRAGMA wal_checkpoint(TRUNCATE)";
         const SELECTED: &str = ".ignore\n";
         const TEMPORARY: &str = ".ignore\nnew.rs\n";
         let Some(root) = std::env::var_os(CHILD_ROOT) else {
@@ -3150,12 +3151,27 @@ mod tests {
             )?;
         }
 
+        // Idle identity pins intentionally keep SQLite connections alive. Use
+        // a checkpoint oracle that distinguishes active read snapshots from
+        // idle connections, and keep committed WAL frames for every participant.
+        let mut snapshot_oracles = Vec::new();
         // Both adapters must still admit a legitimate stable selection. Keep
-        // the real primary snapshot open to prove the cleanup oracle detects it.
+        // each real snapshot open to prove the cleanup oracle detects it.
         if mode == "direct-read" || mode == "federated-read" {
             fs::write(&rules, TEMPORARY)?;
-            let oracle = rusqlite::Connection::open(&database)?;
-            oracle.busy_timeout(Duration::ZERO)?;
+            let mut databases = vec![database.clone()];
+            if let Some(peer) = peer.as_ref() {
+                databases.push(peer.join(".projectatlas/projectatlas.db"));
+            }
+            for database in databases {
+                let oracle = rusqlite::Connection::open(database)?;
+                oracle.busy_timeout(Duration::ZERO)?;
+                oracle.execute(
+                    "INSERT INTO metadata(key,value) VALUES('test-policy-snapshot-cleanup','1')",
+                    [],
+                )?;
+                snapshot_oracles.push(oracle);
+            }
             if let Some(peer) = peer.as_ref() {
                 let stores = super::super::open_federated_atlas_stores_for_project(
                     &database,
@@ -3165,12 +3181,13 @@ mod tests {
                     None,
                     &test_control(),
                 )?;
-                require(
-                    oracle
-                        .pragma_update(None, "journal_mode", "DELETE")
-                        .is_err(),
-                    "cleanup oracle missed an active federated read snapshot",
-                )?;
+                for oracle in &snapshot_oracles {
+                    let busy: i64 = oracle.query_row(CHECKPOINT, [], |row| row.get(0))?;
+                    require(
+                        busy != 0,
+                        "cleanup oracle missed an active federated read snapshot",
+                    )?;
+                }
                 for store in stores {
                     store.finish()?;
                 }
@@ -3181,15 +3198,26 @@ mod tests {
                     None,
                     &test_control(),
                 )?;
+                let oracle = snapshot_oracles
+                    .first()
+                    .ok_or("missing primary checkpoint oracle")?;
+                let busy: i64 = oracle.query_row(CHECKPOINT, [], |row| row.get(0))?;
                 require(
-                    oracle
-                        .pragma_update(None, "journal_mode", "DELETE")
-                        .is_err(),
+                    busy != 0,
                     "cleanup oracle missed an active direct read snapshot",
                 )?;
                 store.finish_index_read_snapshot()?;
             }
-            drop(oracle);
+            for oracle in &snapshot_oracles {
+                let busy: i64 = oracle.query_row(CHECKPOINT, [], |row| row.get(0))?;
+                require(busy == 0, "finished positive read retained a snapshot")?;
+                // A new frame makes the later failed-admission cleanup check
+                // sensitive to a leaked snapshot even after this checkpoint.
+                oracle.execute(
+                    "UPDATE metadata SET value='2' WHERE key='test-policy-snapshot-cleanup'",
+                    [],
+                )?;
+            }
             fs::write(&rules, SELECTED)?;
         }
 
@@ -3332,17 +3360,9 @@ mod tests {
             fs::read_to_string(&rules)? == SELECTED,
             "final policy acceptance failed to restore selected rules",
         )?;
-        if mode == "direct-read" || mode == "federated-read" {
-            let mut databases = vec![database.clone()];
-            if let Some(peer) = peer {
-                databases.push(peer.join(".projectatlas/projectatlas.db"));
-            }
-            for database in databases {
-                let oracle = rusqlite::Connection::open(database)?;
-                oracle.busy_timeout(Duration::ZERO)?;
-                oracle.pragma_update(None, "journal_mode", "DELETE")?;
-                oracle.pragma_update(None, "journal_mode", "WAL")?;
-            }
+        for oracle in &snapshot_oracles {
+            let busy: i64 = oracle.query_row(CHECKPOINT, [], |row| row.get(0))?;
+            require(busy == 0, "failed admission retained a read snapshot")?;
         }
         if mode == "query" || mode.starts_with("observed-") {
             let binding = SourceBinding::new(&database, &root, None)?;

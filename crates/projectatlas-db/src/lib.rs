@@ -17,6 +17,7 @@ pub use content_classification::{
     FileContentClassification, FileContentClassificationPage,
     MAX_FILE_CONTENT_CLASSIFICATION_PAGE_ROWS, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
 };
+use database_file_identity::DatabaseConnection;
 pub use database_file_identity::DatabaseFileIdentity;
 pub use derived_snapshot::{
     DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
@@ -1020,7 +1021,7 @@ pub struct IndexPublicationGuard<'store> {
 /// `SQLite`-backed `ProjectAtlas` index store.
 pub struct AtlasStore {
     /// Active database connection for index reads and writes.
-    connection: Connection,
+    connection: DatabaseConnection,
     /// Whether normal reads currently share one explicit `SQLite` snapshot.
     read_snapshot_active: Cell<bool>,
     /// Durable database path when the store is file-backed.
@@ -1968,7 +1969,7 @@ impl AtlasStore {
                     validated_project_root_identity,
                     validated_project_instance_id,
                 )) => Ok(Self {
-                    connection,
+                    connection: database_file_identity::own_connection(connection),
                     read_snapshot_active: Cell::new(false),
                     database_path: Some(path.to_path_buf()),
                     database_location: Some(database_location),
@@ -1988,7 +1989,7 @@ impl AtlasStore {
                 validated_project_instance_id,
             ) = opened?;
             Ok(Self {
-                connection,
+                connection: database_file_identity::own_connection(connection),
                 read_snapshot_active: Cell::new(false),
                 database_path: Some(path.to_path_buf()),
                 database_location: Some(database_location),
@@ -2066,7 +2067,7 @@ impl AtlasStore {
         };
         let database_location = sqlite_profile::inspect_database_location(path)?;
         Ok(Self {
-            connection,
+            connection: database_file_identity::own_connection(connection),
             read_snapshot_active: Cell::new(true),
             database_path: Some(path.to_path_buf()),
             database_location: Some(database_location),
@@ -2085,7 +2086,7 @@ impl AtlasStore {
     /// Returns an error if schema setup fails.
     pub fn in_memory() -> DbResult<Self> {
         let store = Self {
-            connection: Connection::open_in_memory()?,
+            connection: database_file_identity::own_connection(Connection::open_in_memory()?),
             read_snapshot_active: Cell::new(false),
             database_path: None,
             database_location: None,

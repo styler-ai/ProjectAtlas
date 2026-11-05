@@ -98,6 +98,13 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 - **WHEN** a targeted refresh receives a symlink leaf or ancestor whose target is otherwise an admitted source inside the selected root
 - **THEN** it excludes the source alias without canonicalizing it into an admitted direct path
 
+#### Scenario: Native database identity preserves SQLite lock ownership
+- **WHEN** database identity is captured, checked or retired while SQLite connections use that file
+- **THEN** the witness does not open or close independent database descriptors outside SQLite's VFS, and locks held by other live connections remain effective
+- **AND** the original file object remains pinned across store retirement and shared identity clones without opening a replacement path or blocking on a FIFO
+- **AND** retirement ends active read/write transactions and releases unused caches before retaining only an idle connection; failed cleanup invalidates witness authority and closes through SQLite
+- **AND** final release preserves aliases, replacement detection and a replacement database's WAL/SHM state while retaining bounded resources
+
 #### Scenario: Cancellation or failed write
 - **WHEN** refresh is cancelled, reaches its deadline or fails while staging or publishing
 - **THEN** the prior valid index, native identity and approved purposes remain intact and an adequate retry can succeed

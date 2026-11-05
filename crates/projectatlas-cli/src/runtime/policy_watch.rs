@@ -58,37 +58,6 @@ thread_local! {
     static POLICY_NATIVE_RESOLUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Replace one empty fixture directory between metadata and namespace checks.
     static POLICY_BINDING_TRANSITION: std::cell::RefCell<Option<(PathBuf, Option<PathBuf>)>> = const { std::cell::RefCell::new(None) };
-    /// Compare the original complete-metadata path with native directory probes.
-    #[cfg(windows)]
-    static POLICY_FORCE_FULL_ANCESTOR_METADATA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Actual complete ancestor metadata calls on this owning test thread.
-    #[cfg(windows)]
-    static POLICY_ANCESTOR_METADATA_QUERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// A fresh optional query can prove an ordinary Windows directory, never an alias.
-fn ordinary_policy_directory_attributes(path: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        #[cfg(test)]
-        {
-            if POLICY_FORCE_FULL_ANCESTOR_METADATA.get() {
-                return false;
-            }
-        }
-        // Every nonpositive result, including a lookup error, goes through
-        // symlink_metadata below. That preserves native error classification,
-        // long/share paths and the standard backend's reparse/Cloud Files rules.
-        matches!(
-            crate::project_state::windows_filesystem::has_ordinary_directory_attributes(path),
-            Ok(true)
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        false
-    }
 }
 
 /// Count actual native policy canonicalization without attributing elapsed time.
@@ -321,99 +290,82 @@ impl PolicyWatchInputs {
             for ancestor in path.ancestors() {
                 control.check(IndexWorkStage::RepositoryTraversal)?;
                 let mut ordinary_directory = false;
-                let is_directory = if ordinary_policy_directory_attributes(ancestor) {
-                    ordinary_directory = true;
-                    true
-                } else {
-                    #[cfg(all(test, windows))]
-                    POLICY_ANCESTOR_METADATA_QUERIES
-                        .set(POLICY_ANCESTOR_METADATA_QUERIES.get().saturating_add(1));
-                    match fs::symlink_metadata(ancestor) {
-                        Ok(metadata) if metadata.file_type().is_symlink() => {
-                            // The alias entry itself is a control. Its target directory's
-                            // metadata is not an event on this entry's namespace.
-                            self.paths.insert(ancestor.to_path_buf());
-                            self.bindings.insert(
-                                ancestor.to_path_buf(),
-                                canonical_policy_binding(ancestor)?,
-                            );
-                            if let Some(Some(target)) = self.bindings.get(ancestor) {
-                                self.record_binding_scope(ancestor, target.clone());
-                            }
-                            let target =
-                                fs::read_link(ancestor).map_err(|source| CliError::Io {
-                                    path: ancestor.to_path_buf(),
-                                    source,
-                                })?;
-                            let target = if target.is_absolute() {
+                let is_directory = match fs::symlink_metadata(ancestor) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        // The alias entry itself is a control. Its target directory's
+                        // metadata is not an event on this entry's namespace.
+                        self.paths.insert(ancestor.to_path_buf());
+                        self.bindings
+                            .insert(ancestor.to_path_buf(), canonical_policy_binding(ancestor)?);
+                        if let Some(Some(target)) = self.bindings.get(ancestor) {
+                            self.record_binding_scope(ancestor, target.clone());
+                        }
+                        let target = fs::read_link(ancestor).map_err(|source| CliError::Io {
+                            path: ancestor.to_path_buf(),
+                            source,
+                        })?;
+                        let target = if target.is_absolute() {
+                            target
+                        } else {
+                            ancestor.parent().unwrap_or(root).join(target)
+                        };
+                        if let Ok(suffix) = path.strip_prefix(ancestor) {
+                            // Joining an empty suffix appends a separator and
+                            // turns a regular-file target into a directory lookup.
+                            pending.push(if suffix.as_os_str().is_empty() {
                                 target
                             } else {
-                                ancestor.parent().unwrap_or(root).join(target)
-                            };
-                            if let Ok(suffix) = path.strip_prefix(ancestor) {
-                                // Joining an empty suffix appends a separator and
-                                // turns a regular-file target into a directory lookup.
-                                pending.push(if suffix.as_os_str().is_empty() {
-                                    target
-                                } else {
-                                    target.join(suffix)
-                                });
+                                target.join(suffix)
+                            });
+                        }
+                        if let Some(parent) = ancestor.parent() {
+                            #[cfg(test)]
+                            record_policy_resolution();
+                            let canonical =
+                                parent.canonicalize().map_err(|source| CliError::Io {
+                                    path: parent.to_path_buf(),
+                                    source,
+                                })?;
+                            if !canonical.starts_with(root) {
+                                // A real outside alias remains independently
+                                // replaceable even when its target is in-root.
+                                external_namespace = true;
+                                self.record_parent(root, canonical.clone(), ancestor.file_name())?;
                             }
-                            if let Some(parent) = ancestor.parent() {
-                                #[cfg(test)]
-                                record_policy_resolution();
-                                let canonical =
-                                    parent.canonicalize().map_err(|source| CliError::Io {
-                                        path: parent.to_path_buf(),
-                                        source,
-                                    })?;
-                                if !canonical.starts_with(root) {
-                                    // A real outside alias remains independently
-                                    // replaceable even when its target is in-root.
-                                    external_namespace = true;
-                                    self.record_parent(
-                                        root,
-                                        canonical.clone(),
-                                        ancestor.file_name(),
-                                    )?;
-                                }
-                                let namespace = policy_event_namespace(ancestor)?.ok_or_else(|| CliError::Io {
+                            let namespace = policy_event_namespace(ancestor)?.ok_or_else(|| CliError::Io {
                                 path: ancestor.to_path_buf(),
                                 source: std::io::Error::new(std::io::ErrorKind::NotFound,
                                     "external policy control parent disappeared during selection"),
                             })?;
-                                self.paths.insert(namespace.clone());
-                                self.record_binding_scope(ancestor, namespace);
-                            }
-                            ancestor.is_dir()
+                            self.paths.insert(namespace.clone());
+                            self.record_binding_scope(ancestor, namespace);
                         }
-                        Ok(metadata)
-                            if ancestor != path
-                                && !nearest_directory_found
-                                && !metadata.is_dir() =>
-                        {
-                            // Windows can report a child of a file as NotFound.
-                            // A closer resolved directory already proves traversal;
-                            // earlier lexical components may be canceled by Win32 `..`.
-                            return Err(CliError::Io {
-                                path: ancestor.to_path_buf(),
-                                source: std::io::Error::new(
-                                    std::io::ErrorKind::NotADirectory,
-                                    "external policy parent is not a directory",
-                                ),
-                            });
-                        }
-                        Ok(metadata) => {
-                            ordinary_directory = metadata.is_dir();
-                            metadata.is_dir()
-                        }
-                        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
-                        Err(source) => {
-                            return Err(CliError::Io {
-                                path: ancestor.to_path_buf(),
-                                source,
-                            });
-                        }
+                        ancestor.is_dir()
+                    }
+                    Ok(metadata)
+                        if ancestor != path && !nearest_directory_found && !metadata.is_dir() =>
+                    {
+                        // Windows can report a child of a file as NotFound.
+                        // A closer resolved directory already proves traversal;
+                        // earlier lexical components may be canceled by Win32 `..`.
+                        return Err(CliError::Io {
+                            path: ancestor.to_path_buf(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::NotADirectory,
+                                "external policy parent is not a directory",
+                            ),
+                        });
+                    }
+                    Ok(metadata) => {
+                        ordinary_directory = metadata.is_dir();
+                        metadata.is_dir()
+                    }
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(source) => {
+                        return Err(CliError::Io {
+                            path: ancestor.to_path_buf(),
+                            source,
+                        });
                     }
                 };
                 if (!nearest_directory_found || external_namespace) && is_directory {
@@ -1513,111 +1465,6 @@ mod tests {
     /// Select fixture paths without mutating process-wide Git environment.
     fn selected(root: &Path, paths: &[PathBuf]) -> Result<PolicyWatchInputs, CliError> {
         selected_with_resolver(root, paths, PolicyDirectoryResolver::default())
-    }
-
-    /// The original full-metadata control and native probe select identical policy.
-    #[cfg(windows)]
-    #[test]
-    fn ordinary_policy_directory_attributes_preserve_selection_with_less_full_metadata()
-    -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().join("repo");
-        fs::create_dir_all(root.join(".projectatlas"))?;
-        let root = root.canonicalize()?;
-        fs::write(root.join(".gitignore"), "ignored/\n")?;
-        let config = root.join(".projectatlas/config.toml");
-        fs::write(&config, "[project]\nroot = \".\"\n")?;
-        let sample = |full_metadata: bool| -> Result<_, CliError> {
-            struct Restore(bool);
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    POLICY_FORCE_FULL_ANCESTOR_METADATA.set(self.0);
-                }
-            }
-            let _restore = Restore(POLICY_FORCE_FULL_ANCESTOR_METADATA.replace(full_metadata));
-            let metadata_before = POLICY_ANCESTOR_METADATA_QUERIES.get();
-            let attributes_before =
-                crate::project_state::windows_filesystem::directory_attribute_query_count();
-            let control = super::super::standalone_index_work_control();
-            let started = std::time::Instant::now();
-            let inputs = PolicyWatchInputs::discover(&root, Some(&config), &control)?;
-            Ok((
-                inputs,
-                POLICY_ANCESTOR_METADATA_QUERIES.get() - metadata_before,
-                crate::project_state::windows_filesystem::directory_attribute_query_count()
-                    - attributes_before,
-                started.elapsed(),
-            ))
-        };
-        let warmed_full = sample(true)?;
-        let warmed_attributes = sample(false)?;
-        require(
-            warmed_full.0 == warmed_attributes.0,
-            "ordinary directory probing changed the warmed policy selection",
-        )?;
-        for round in 0..5 {
-            let (full, attributes) = if round % 2 == 0 {
-                (sample(true)?, sample(false)?)
-            } else {
-                let attributes = sample(false)?;
-                (sample(true)?, attributes)
-            };
-            require(
-                full.0 == attributes.0 && full.2 == 0 && attributes.2 > 0,
-                "directory attribute control changed policy or bypassed the real native query",
-            )?;
-            require(
-                attributes.1 < full.1,
-                "ordinary policy directories still requested complete metadata at every ancestor",
-            )?;
-            super::super::source_observation::report_observation_test_diagnostic(format_args!(
-                "native policy-directory round={round} full_metadata_calls={} attribute_metadata_calls={} native_attribute_calls={} full_elapsed={:?} attribute_elapsed={:?}; diagnostic-only alternating pairs, no latency threshold",
-                full.1, attributes.1, attributes.2, full.3, attributes.3,
-            ));
-        }
-        Ok(())
-    }
-
-    /// Alias and error branches retain the original complete-metadata classification.
-    #[cfg(windows)]
-    #[test]
-    fn policy_directory_attribute_fallback_preserves_aliases_and_missing_parents()
-    -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        let root = base.join("repo");
-        let target = base.join("target");
-        let alias = base.join("alias");
-        fs::create_dir(&root)?;
-        fs::create_dir(&target)?;
-        create_policy_directory_alias(&target, &alias)?;
-        require(
-            !ordinary_policy_directory_attributes(&alias),
-            "reparse directory bypassed the canonical metadata branch",
-        )?;
-        let paths = [
-            alias.join("missing.ignore"),
-            base.join("absent/child.ignore"),
-        ];
-        let original = POLICY_FORCE_FULL_ANCESTOR_METADATA.replace(true);
-        let full = selected(&root, &paths);
-        POLICY_FORCE_FULL_ANCESTOR_METADATA.set(original);
-        require(
-            full? == selected(&root, &paths)?,
-            "attribute fallback lost alias targets or absent parent namespaces",
-        )?;
-        fs::write(base.join("parent-file"), "not a directory")?;
-        let refused = [base.join("parent-file/child.ignore")];
-        for full_metadata in [true, false] {
-            let original = POLICY_FORCE_FULL_ANCESTOR_METADATA.replace(full_metadata);
-            let result = selected(&root, &refused);
-            POLICY_FORCE_FULL_ANCESTOR_METADATA.set(original);
-            require(
-                matches!(result, Err(CliError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotADirectory),
-                "native directory probe weakened a non-directory parent refusal",
-            )?;
-        }
-        Ok(())
     }
 
     /// Exercise the same namespace construction with a bounded or disabled memo.
