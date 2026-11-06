@@ -272,6 +272,7 @@ mod tests {
     use std::time::Duration;
 
     /// Execute one real peer connection without sharing this process's VFS state.
+    #[track_caller]
     fn peer_connection(
         path: &std::path::Path,
         mode: &str,
@@ -292,9 +293,41 @@ mod tests {
             .output()?;
         if !output.status.success() {
             return Err(format!(
-                "SQLite peer {mode} failed: {} {}",
+                "SQLite peer {mode} failed at {}: {} {}",
+                std::panic::Location::caller(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Report SQLite's own lock state if the independent kernel probe disagrees.
+    #[track_caller]
+    #[allow(
+        unsafe_code,
+        reason = "Test diagnostics borrow SQLite's main-file lock state without opening another database descriptor"
+    )]
+    fn verify_shared_lock(
+        path: &std::path::Path,
+        connection: &Connection,
+    ) -> Result<(), Box<dyn Error>> {
+        if let Err(source) = peer_connection(path, "shared-lock", i64::from(std::process::id())) {
+            let mut state: std::ffi::c_int = -1;
+            // SAFETY: this synchronous diagnostic borrows a live connection,
+            // a static schema name and writable c_int for only this call.
+            // SQLITE_FCNTL_LOCKSTATE neither retains nor frees those pointers.
+            let result = unsafe {
+                rusqlite::ffi::sqlite3_file_control(
+                    connection.handle(),
+                    c"main".as_ptr(),
+                    rusqlite::ffi::SQLITE_FCNTL_LOCKSTATE,
+                    std::ptr::from_mut(&mut state).cast(),
+                )
+            };
+            return Err(format!(
+                "{source}; SQLite main-file lock state={state}, file-control result={result}"
             )
             .into());
         }
@@ -503,6 +536,16 @@ mod tests {
     #[test]
     fn store_identity_clones_preserve_locks_after_store_and_final_clone_drop()
     -> Result<(), Box<dyn Error>> {
+        verify_store_identity_clones(false)
+    }
+
+    #[test]
+    fn store_identity_clones_preserve_active_read_locks() -> Result<(), Box<dyn Error>> {
+        verify_store_identity_clones(true)
+    }
+
+    /// Exercise idle WAL and active-read lock lifetimes as separate required cases.
+    fn verify_store_identity_clones(hold_read_transaction: bool) -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("selected.db");
         let alias = temp.path().join("alias.db");
@@ -511,6 +554,15 @@ mod tests {
             "INSERT INTO metadata(key,value) VALUES('identity-lease-test','1')",
             [],
         )?;
+        let active_reader = if hold_read_transaction {
+            let other = Connection::open(&path)?;
+            other.execute_batch("BEGIN")?;
+            let _: i64 = other.query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))?;
+            verify_shared_lock(&path, &other)?;
+            Some(other)
+        } else {
+            None
+        };
         std::os::unix::fs::symlink(&path, &alias)?;
         let identity = store
             .database_file_identity()
@@ -526,17 +578,35 @@ mod tests {
             return Err("store identities did not share their original connection/alias".into());
         }
         drop(store);
-        peer_connection(&path, "shared-lock", i64::from(std::process::id()))?;
+        {
+            let lease = identity
+                .lease
+                .lock()
+                .map_err(|source| format!("identity lease lock failed: {source}"))?;
+            if let super::ConnectionLeaseState::Retained(connection) = &*lease {
+                verify_shared_lock(&path, connection)?;
+            } else {
+                return Err("store retirement did not retain its SQLite connection".into());
+            }
+        }
         if !clone.matches_path(&alias) || identity != clone {
             return Err("store retirement lost retained native identity".into());
         }
-        let other = Connection::open(&path)?;
-        let _: i64 = other.query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))?;
+        let other = if let Some(other) = active_reader {
+            other
+        } else {
+            let other = Connection::open(&path)?;
+            let _: i64 = other.query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))?;
+            other
+        };
         drop(identity);
         drop(second);
-        peer_connection(&path, "shared-lock", i64::from(std::process::id()))?;
+        verify_shared_lock(&path, &other)?;
         drop(clone);
-        peer_connection(&path, "shared-lock", i64::from(std::process::id()))?;
+        verify_shared_lock(&path, &other)?;
+        if hold_read_transaction {
+            other.execute_batch("ROLLBACK")?;
+        }
         peer_connection(&path, "metadata-write", 1)?;
         let value: i64 = other.query_row(
             "SELECT CAST(value AS INTEGER) FROM metadata WHERE key='identity-lease-test'",
