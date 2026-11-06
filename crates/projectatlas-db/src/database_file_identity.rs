@@ -303,33 +303,70 @@ mod tests {
         Ok(())
     }
 
-    /// Report SQLite's own lock state if the independent kernel probe disagrees.
-    #[track_caller]
+    /// Read SQLite's own main-file lock state without touching its pathname.
     #[allow(
         unsafe_code,
         reason = "Test diagnostics borrow SQLite's main-file lock state without opening another database descriptor"
     )]
+    fn sqlite_lock_state(connection: &Connection) -> (std::ffi::c_int, std::ffi::c_int) {
+        let mut state: std::ffi::c_int = -1;
+        // SAFETY: this synchronous diagnostic borrows a live connection,
+        // a static schema name and writable c_int for only this call.
+        // SQLITE_FCNTL_LOCKSTATE neither retains nor frees those pointers.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                connection.handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_LOCKSTATE,
+                std::ptr::from_mut(&mut state).cast(),
+            )
+        };
+        (result, state)
+    }
+
+    /// Report SQLite's own lock state if the independent kernel probe disagrees.
+    #[track_caller]
     fn verify_shared_lock(
         path: &std::path::Path,
         connection: &Connection,
     ) -> Result<(), Box<dyn Error>> {
         if let Err(source) = peer_connection(path, "shared-lock", i64::from(std::process::id())) {
-            let mut state: std::ffi::c_int = -1;
-            // SAFETY: this synchronous diagnostic borrows a live connection,
-            // a static schema name and writable c_int for only this call.
-            // SQLITE_FCNTL_LOCKSTATE neither retains nor frees those pointers.
-            let result = unsafe {
-                rusqlite::ffi::sqlite3_file_control(
-                    connection.handle(),
-                    c"main".as_ptr(),
-                    rusqlite::ffi::SQLITE_FCNTL_LOCKSTATE,
-                    std::ptr::from_mut(&mut state).cast(),
-                )
-            };
+            let (result, state) = sqlite_lock_state(connection);
             return Err(format!(
                 "{source}; SQLite main-file lock state={state}, file-control result={result}"
             )
             .into());
+        }
+        Ok(())
+    }
+
+    /// Check the kernel whenever one of the named connections reports a held lock.
+    #[track_caller]
+    fn verify_reported_lock_stage(
+        path: &std::path::Path,
+        stage: &str,
+        connections: &[(&str, &Connection)],
+    ) -> Result<(), Box<dyn Error>> {
+        let states: Vec<_> = connections
+            .iter()
+            .map(|(name, connection)| (*name, sqlite_lock_state(connection)))
+            .collect();
+        if states
+            .iter()
+            .any(|(_, (result, _))| *result != rusqlite::ffi::SQLITE_OK)
+        {
+            return Err(
+                format!("{stage}: SQLite lock-state control unavailable: {states:?}").into(),
+            );
+        }
+        if states
+            .iter()
+            .any(|(_, (_, state))| *state >= rusqlite::ffi::SQLITE_LOCK_SHARED)
+            && let Err(source) = peer_connection(path, "shared-lock", i64::from(std::process::id()))
+        {
+            return Err(
+                format!("{source}; stage={stage}; SQLite connection states={states:?}").into(),
+            );
         }
         Ok(())
     }
@@ -621,6 +658,85 @@ mod tests {
             [],
         )?;
         peer_connection(&path, "metadata-read", 3)?;
+        Ok(())
+    }
+
+    /// Isolate the write, peer open and peer transaction boundaries before identity capture.
+    fn verify_connection_open_sequence(
+        path: &std::path::Path,
+        writer: &Connection,
+    ) -> Result<(), Box<dyn Error>> {
+        verify_reported_lock_stage(path, "after writer setup", &[("writer", writer)])?;
+        writer.execute(
+            "INSERT INTO metadata(key,value) VALUES('identity-open-sequence','1')",
+            [],
+        )?;
+        verify_reported_lock_stage(path, "after writer insert", &[("writer", writer)])?;
+        let reader = Connection::open(path)?;
+        verify_reported_lock_stage(
+            path,
+            "after peer open",
+            &[("writer", writer), ("reader", &reader)],
+        )?;
+        reader.execute_batch("BEGIN")?;
+        verify_reported_lock_stage(
+            path,
+            "after peer begin",
+            &[("writer", writer), ("reader", &reader)],
+        )?;
+        let _: i64 = reader.query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))?;
+        verify_reported_lock_stage(
+            path,
+            "after peer read",
+            &[("writer", writer), ("reader", &reader)],
+        )?;
+        reader.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    #[test]
+    fn store_open_sequence_preserves_reported_sqlite_locks() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("selected.db");
+        let store = crate::AtlasStore::open(&path)?;
+        verify_connection_open_sequence(&path, &store.connection)
+    }
+
+    #[test]
+    fn plain_wal_open_sequence_preserves_reported_sqlite_locks() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("selected.db");
+        let connection = Connection::open(&path)?;
+        crate::sqlite_profile::configure_writable_connection(&connection)?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);")?;
+        verify_connection_open_sequence(&path, &connection)
+    }
+
+    #[test]
+    fn database_location_checks_preserve_active_sqlite_locks() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("selected.db");
+        drop(crate::AtlasStore::open(&path)?);
+        let reader = Connection::open(&path)?;
+        reader.execute_batch("PRAGMA journal_mode=WAL; INSERT INTO metadata(key,value) VALUES('identity-location-probe','1'); BEGIN;")?;
+        let _: i64 = reader.query_row("SELECT COUNT(*) FROM metadata", [], |row| row.get(0))?;
+        verify_shared_lock(&path, &reader)?;
+        let connections = [("reader", &reader)];
+        let _canonical = fs::canonicalize(&path)?;
+        verify_reported_lock_stage(&path, "after canonicalize", &connections)?;
+        let _metadata = fs::metadata(&path)?;
+        verify_reported_lock_stage(&path, "after metadata", &connections)?;
+        let _namespace = fs::symlink_metadata(&path)?;
+        verify_reported_lock_stage(&path, "after symlink metadata", &connections)?;
+        let _volume = whichdisk::resolve(&path)?;
+        verify_reported_lock_stage(&path, "after filesystem resolution", &connections)?;
+        let _location = crate::sqlite_profile::inspect_database_location(&path)?;
+        verify_reported_lock_stage(&path, "after database location", &connections)?;
+        let store = crate::AtlasStore::open(&path)?;
+        verify_reported_lock_stage(&path, "after store reopen", &connections)?;
+        drop(store);
+        verify_reported_lock_stage(&path, "after reopened store close", &connections)?;
+        reader.execute_batch("ROLLBACK")?;
         Ok(())
     }
 
