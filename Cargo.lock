@@ -2556,6 +2556,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "whichdisk",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

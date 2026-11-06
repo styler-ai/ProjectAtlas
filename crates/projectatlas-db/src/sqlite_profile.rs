@@ -577,14 +577,32 @@ fn reject_unsupported_windows_prefix(path: &Path) -> DbResult<()> {
             ));
         }
     };
+    let native_source = match windows_local_volume_root(drive) {
+        Ok(volume) => {
+            return if windows_volume_guid_is_complete(&volume) {
+                Ok(())
+            } else {
+                Err(filesystem_uncertain(
+                    path,
+                    None,
+                    None,
+                    "Windows volume-root query returned an incomplete volume GUID".to_string(),
+                ))
+            };
+        }
+        Err(source) => source,
+    };
+    // Volume-management APIs do not support every accepted filesystem (notably
+    // ReFS). Preserve the existing inventory proof when the direct query fails.
     let volumes = whichdisk::list().map_err(|source| {
         filesystem_uncertain(
             path,
             None,
             None,
             format!(
-                "local Windows volume inventory failed: {}",
-                bounded_reason(&source)
+                "local Windows volume inventory failed: {}; direct root query: {}",
+                bounded_reason(&source),
+                bounded_reason(&native_source)
             ),
         )
     })?;
@@ -599,10 +617,72 @@ fn reject_unsupported_windows_prefix(path: &Path) -> DbResult<()> {
             path,
             None,
             None,
-            "Windows drive is not present in the local fixed/removable volume inventory"
-                .to_string(),
+            format!(
+                "Windows drive is not present in the local volume inventory; direct root query: {}",
+                bounded_reason(&native_source)
+            ),
         ))
     }
+}
+
+/// Query one drive root without opening the database or enumerating other volumes.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "canonical Win32 queries borrow bounded stack UTF-16 buffers only"
+)]
+fn windows_local_volume_root(drive: u8) -> io::Result<[u16; 50]> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetVolumeNameForVolumeMountPointW,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        DRIVE_CDROM, DRIVE_FIXED, DRIVE_REMOVABLE,
+    };
+
+    if !drive.is_ascii_alphabetic() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid Windows drive letter",
+        ));
+    }
+    let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: root is a live, NUL-terminated UTF-16 drive root. The API only
+    // borrows it for this call and returns a drive-kind value, not a handle.
+    let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+    if !matches!(kind, DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_CDROM) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("Windows drive kind {kind} is not local disk or optical storage"),
+        ));
+    }
+    let mut volume = [0_u16; 50];
+    let capacity = u32::try_from(volume.len()).map_err(io::Error::other)?;
+    // SAFETY: root remains NUL-terminated and valid. volume is writable for
+    // exactly capacity UTF-16 units; neither pointer escapes this call. This
+    // query opens no application-owned file handle. Validate all output below.
+    if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), volume.as_mut_ptr(), capacity) }
+        == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(volume)
+}
+
+/// Require the complete documented volume GUID root, including its terminator.
+#[cfg(any(windows, test))]
+fn windows_volume_guid_is_complete(volume: &[u16; 50]) -> bool {
+    volume[..11]
+        .iter()
+        .copied()
+        .eq(r"\\?\Volume{".encode_utf16())
+        && volume[47..] == [u16::from(b'}'), u16::from(b'\\'), 0]
+        && volume[11..47].iter().enumerate().all(|(index, &unit)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                unit == u16::from(b'-')
+            } else {
+                u8::try_from(unit).is_ok_and(|byte| byte.is_ascii_hexdigit())
+            }
+        })
 }
 
 /// Return the Windows drive letter from a mounted local volume path.
@@ -713,6 +793,90 @@ fn bounded_reason(source: &io::Error) -> String {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn windows_volume_guid_requires_complete_native_root() -> Result<(), Box<dyn Error>> {
+        let mut valid = [0_u16; 50];
+        for (slot, unit) in valid
+            .iter_mut()
+            .zip(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\".encode_utf16())
+        {
+            *slot = unit;
+        }
+        if !windows_volume_guid_is_complete(&valid) {
+            return Err(io::Error::other("complete native volume GUID was refused").into());
+        }
+        for (index, unit) in [
+            (0, 0),
+            (11, 0),
+            (19, 120),
+            (30, 0xffff),
+            (47, 0),
+            (48, 0),
+            (49, 1),
+        ] {
+            let mut incomplete = valid;
+            incomplete[index] = unit;
+            if windows_volume_guid_is_complete(&incomplete) {
+                return Err(io::Error::other("malformed native volume GUID was accepted").into());
+            }
+        }
+        if windows_volume_guid_is_complete(&[0; 50]) {
+            return Err(io::Error::other("empty native volume GUID was accepted").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(
+        clippy::print_stderr,
+        reason = "native guard attribution is diagnostic, with no timing assertion"
+    )]
+    fn windows_drive_admission_matches_local_inventory() -> Result<(), Box<dyn Error>> {
+        let volumes = whichdisk::list()?;
+        for drive in b'A'..=b'Z' {
+            let expected = volumes.iter().any(|volume| {
+                windows_drive_letter(volume.mount_point())
+                    .is_some_and(|letter| letter.eq_ignore_ascii_case(&drive))
+            });
+            let root = PathBuf::from(format!("{}:\\", char::from(drive)));
+            if reject_unsupported_windows_prefix(&root).is_ok() != expected {
+                return Err(io::Error::other(format!(
+                    "drive admission differs from local volume inventory: {}",
+                    root.display()
+                ))
+                .into());
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let canonical = temp.path().canonicalize()?;
+        let drive = windows_drive_letter(&canonical)
+            .ok_or_else(|| io::Error::other("temporary directory has no drive letter"))?;
+        windows_local_volume_root(drive)?;
+        let mut inventory_samples = Vec::new();
+        let mut direct_samples = Vec::new();
+        for round in 0..6 {
+            for direct in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = Instant::now();
+                if direct {
+                    windows_local_volume_root(drive)?;
+                    direct_samples.push(started.elapsed().as_nanos());
+                } else {
+                    drop(whichdisk::list()?);
+                    inventory_samples.push(started.elapsed().as_nanos());
+                }
+            }
+        }
+        eprintln!(
+            "Windows drive-root guard diagnostic (ns): inventory={inventory_samples:?}; direct={direct_samples:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn kernel_filesystem_fields_preserve_native_bytes_and_require_complete_values()
@@ -988,10 +1152,83 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn unc_database_path_is_rejected_before_resolution() {
-        let database = PathBuf::from(r"\\server\share\projectatlas.db");
-        assert!(matches!(
-            reject_unsupported_windows_prefix(&database),
-            Err(DbError::DatabaseFilesystemUnsupported { .. })
-        ));
+        for database in [
+            r"\\server\share\projectatlas.db",
+            r"\\?\UNC\server\share\projectatlas.db",
+        ] {
+            assert!(matches!(
+                reject_unsupported_windows_prefix(Path::new(database)),
+                Err(DbError::DatabaseFilesystemUnsupported { .. })
+            ));
+        }
+        for database in [
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\atlas.db",
+        ] {
+            assert!(matches!(
+                reject_unsupported_windows_prefix(Path::new(database)),
+                Err(DbError::DatabaseFilesystemUncertain { .. })
+            ));
+        }
+    }
+
+    /// Own a temporary DOS alias and remove only that alias on every exit path.
+    #[cfg(windows)]
+    struct SubstitutedDrive(String);
+
+    #[cfg(windows)]
+    impl Drop for SubstitutedDrive {
+        fn drop(&mut self) {
+            if !self.0.is_empty() {
+                drop(
+                    std::process::Command::new("subst.exe")
+                        .args([self.0.as_str(), "/D"])
+                        .status(),
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn substituted_directory_is_not_admitted_as_a_local_volume() -> Result<(), Box<dyn Error>> {
+        use std::process::{Command, Stdio};
+        let temp = tempfile::tempdir()?;
+        let mut alias = None;
+        for letter in (b'D'..=b'Z').rev() {
+            let drive = format!("{}:", char::from(letter));
+            if Path::new(&format!(r"{drive}\")).exists() {
+                continue;
+            }
+            // subst refuses an occupied DOS drive; never delete an alias we did
+            // not create. Match the CLI's existing native alias-fixture policy.
+            if Command::new("subst.exe")
+                .arg(&drive)
+                .arg(temp.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
+                alias = Some(SubstitutedDrive(drive));
+                break;
+            }
+        }
+        let mut alias = alias.ok_or_else(|| io::Error::other("no free substituted test drive"))?;
+        let path = PathBuf::from(format!(r"{}\atlas.db", alias.0));
+        let admitted = reject_unsupported_windows_prefix(&path).is_ok();
+        let released = Command::new("subst.exe")
+            .args([alias.0.as_str(), "/D"])
+            .status()?;
+        if !released.success() {
+            return Err(io::Error::other("substituted test drive cleanup failed").into());
+        }
+        alias.0.clear();
+        if admitted {
+            return Err(
+                io::Error::other("substituted directory admitted as a local volume").into(),
+            );
+        }
+        Ok(())
     }
 }

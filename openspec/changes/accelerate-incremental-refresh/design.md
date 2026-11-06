@@ -724,6 +724,22 @@ store reopen/retirement. The diagnostic's direct unsafe dependency probe is
 replaced by the public product validation boundary; its failing native original
 is retained as causal evidence, not invoked inside a passing product workflow.
 
+The cross-platform contract is preservation of every live SQLite connection's
+locks. Descriptor-free inspection is required where an independent close can
+release those locks. Linux's existing resolver uses `O_PATH`; the
+[kernel close path](https://github.com/torvalds/linux/blob/v6.12/fs/open.c#L1516-L1533)
+does not remove POSIX record locks for that capability, and the Unix
+separate-process tests exercise public and internal location inspection on Linux
+and macOS. Windows's resolver opens independent file objects while SQLite retains
+its own locking handle. Microsoft's [file-handle model](https://learn.microsoft.com/en-us/windows/win32/fileio/file-handles),
+[byte-range lock contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
+and [filesystem behavior, sections 3.3 and 3.4.4](https://download.microsoft.com/download/4/3/8/43889780-8d45-4b2e-9d3a-c696a890309f/file%20system%20behavior%20overview.pdf)
+support the inference that closing the resolver's independent handle preserves
+SQLite's still-open handle's locks. This is platform-semantic and source evidence;
+the native Windows profile/lifecycle tests provide ordinary compatibility proof,
+not a Windows separate-process lock oracle. The exact-path, alias, filesystem
+classification and invalid-parent requirements remain unchanged.
+
 The remaining Apple dependency call belongs to managed-name case classification,
 which queries a containing directory's volume capabilities. A case-aliased
 database name beneath a regular-file `.projectatlas` parent could reach that
@@ -735,6 +751,32 @@ SQLite reserved lock on that parent. Valid directory/case/Unicode and external
 path behavior retain the existing native controls. This is a type check for
 ordinary invalid inputs; it does not introduce an atomic namespace guarantee
 against unsupported adversarial replacement of the lookup parent during probing.
+
+## Windows drive-root admission cost
+
+The Windows prefix guard materializes `whichdisk::list()` only to check one
+drive letter. In the locked 0.7 dependency this also reads every volume's facts
+and physical-device/removal metadata; ordinary read-only opens repeat the guard
+at three existing validation boundaries. Query the selected drive root afresh
+with canonical `windows-sys` bindings instead: `GetDriveTypeW` must identify local
+fixed/removable/optical storage, and `GetVolumeNameForVolumeMountPointW` must return
+a complete, bounded volume GUID root. Reject malformed successful output. These
+queries borrow stack buffers and open no application-owned database handle; keep
+the unsafe exception confined to that two-call helper with explicit buffer and
+lifetime invariants.
+
+[Microsoft's volume-root API contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumenameforvolumemountpointw)
+does not guarantee ReFS support. On a failed native query retain the original
+fresh inventory membership check, including its error/refusal behavior; do not
+drop accepted ReFS locations or interpret an unsupported query as local evidence.
+Keep the full exact-file resolver, filesystem classification, device/mount
+coherence and every pre/post-open revalidation unchanged. UNC/device prefixes
+remain refused before selected-path resolution; substituted directories remain
+outside volume membership. No cache, full-resolver replacement, schema change,
+new package/version or acceptance-threshold change is needed. Compare native
+admission with the original inventory across drive letters, exercise aliases and
+refusals, and measure guard cost separately. Only a fresh complete installed
+campaign can establish whether either Windows regression is repaired.
 
 ## Regular-file races across source and control readers
 

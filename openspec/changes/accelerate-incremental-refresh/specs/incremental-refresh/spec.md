@@ -107,10 +107,17 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 
 #### Scenario: Database-location inspection preserves active SQLite locks
 - **WHEN** initial store setup, writable/read-only reopen, snapshot admission or public validation inspects the selected database's filesystem while a SQLite connection uses that file
-- **THEN** location inspection does not open or close an independent database descriptor, including inside a filesystem dependency, and the connection's kernel locks remain effective
+- **THEN** location inspection preserves the locks held by every live SQLite connection on all supported platforms
+- **AND** it does not independently open or close a database-file descriptor or handle outside SQLite's VFS when that operation can disturb those locks, including through a filesystem dependency; any platform-specific handle-based inspection requires evidence that it is lock-neutral
 - **AND** the exact canonical file's filesystem is inspected without inferring its volume from its parent, device number or lexical mount ancestry; aliases and native pathname bytes remain supported
 - **AND** missing databases retain nearest-existing-parent inspection, while known network filesystems remain unsupported and incomplete or unknown filesystem evidence remains uncertain before mutation
 - **AND** managed-name case classification rejects an existing non-directory lookup parent before probing its filesystem capabilities, preserving SQLite locks on a refused regular-file parent during ordinary admission and reset
+
+#### Scenario: Windows local drive admission avoids unrelated volume work
+- **WHEN** a Windows database path has a drive-letter prefix and fresh native root queries establish a local fixed, removable or optical volume with a complete volume GUID
+- **THEN** prefix admission avoids enumerating unrelated volumes, while the exact-file filesystem resolver and every location revalidation still run
+- **AND** a failed native query retains the existing fresh inventory proof for supported locations, including ReFS; malformed successful output remains uncertain
+- **AND** UNC/device paths, mapped remote drives and substituted directories retain their existing refusal behavior before selected database probing
 
 #### Scenario: Cancellation or failed write
 - **WHEN** refresh is cancelled, reaches its deadline or fails while staging or publishing
