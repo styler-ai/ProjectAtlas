@@ -522,7 +522,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked -p projectatlas-fs --lib --all-features
-          cargo test --locked -p projectatlas-db --lib --all-features sqlite_profile::tests::
+          cargo test --locked -p projectatlas-db --lib --all-features sqlite_profile::tests:: -- --nocapture
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             cargo test --locked -p projectatlas-db --lib --all-features database_file_identity::tests:: -- --nocapture
           fi
