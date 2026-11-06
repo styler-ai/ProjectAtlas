@@ -505,17 +505,29 @@ jobs:
 
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
-        # Includes cold compilation of the symbol, CLI, and navigation test targets.
+        # Each native target owns its cold compilation and regression budget.
         timeout-minutes: 20
         shell: bash
         run: |
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
+
+      - name: PHP graph projection platform regression
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 20
+        shell: bash
+        run: |
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
+
+      - name: PHP CLI and MCP platform regression
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 20
+        shell: bash
+        run: |
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
 
       - name: Native source-policy unit regressions
         if: contains(matrix.contracts, 'compile')
-        # Reuse shared cold dependencies built by the preceding PHP regression.
+        # Reuse shared cold dependencies built by the preceding PHP regressions.
         # All-feature-specific compilation and execution retain this separate cap.
         timeout-minutes: 10
         shell: bash

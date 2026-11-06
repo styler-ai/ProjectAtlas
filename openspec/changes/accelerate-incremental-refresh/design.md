@@ -1200,3 +1200,23 @@ features, compatibility and resource limits remain binding. Keep the existing
 60-minute package budget and original registered matrix unchanged. Release DB
 and CLI unit checks, actual executable wire compatibility, mandatory push gates
 and independent review precede the new native candidate campaign.
+
+## Native PHP regression construction boundaries
+
+The Intel Mac source job exhausted the combined 20-minute PHP step while
+compiling its second test target. The symbol-library target took 9m02s to build
+and its PHP assertion passed in 0.66s; the following CLI unit target was still
+compiling dependencies when the shared step expired. These were unoptimized
+test-profile builds, so this log does not establish a release-codegen runtime
+regression. The full Mac route has no preceding target-compilation step.
+
+Give the symbol-library, CLI graph-projection and CLI/MCP navigation targets
+separate native steps, each retaining the existing 20-minute bound. Keep their
+commands, order, compile condition, features, ignored-test admission and assertion
+filters unchanged across all four platforms. Cargo reuses the same target tree
+between steps; the later native source-policy and document controls retain their
+existing budgets and dependencies. This separates three cold construction and
+test boundaries without weakening a product deadline or a registered performance
+limit. Preserve the failed original and require corrected native source proof;
+the shipping profile, package construction budget and installed matrix are
+unchanged.
