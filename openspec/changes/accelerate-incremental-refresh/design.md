@@ -1220,3 +1220,45 @@ test boundaries without weakening a product deadline or a registered performance
 limit. Preserve the failed original and require corrected native source proof;
 the shipping profile, package construction budget and installed matrix are
 unchanged.
+
+## Selected CLI serialization boundary
+
+The remaining eager renderers passed an already-built TOON string to a formatter
+that discarded it for JSON. Defer that work with a native `FnOnce() -> String`
+at the existing CLI serializer: the closed output-format match invokes only the
+selected encoder. Apply the same boundary to ordinary commands, tracked source
+and candidate-set output, legacy/detailed relations, coverage stabilization and
+slice fitting. Keep the existing wire envelopes, newline behavior, final byte
+bounds and telemetry baselines. Return the selected owned string directly;
+there is no renderer registry, new dependency, dynamic dispatch or cache.
+
+Directory-walk telemetry consumes the selected serialized output, including the
+already stabilized coverage response, rather than encoding it again. Preserve
+the distinct directory and candidate-set accounting policies. MCP's intentional
+TOON envelopes and cooperative analysis encoders already select their format;
+they retain their existing bounds and cancellation behavior. No source, policy,
+database identity, reload or publication safeguard changes.
+
+The initial watch-only Linux screen used two frozen ordinary shipping binaries
+against one unchanged 1,024-source reference fixture with normal telemetry. One
+warmup pair and 31 alternating measured pairs produced medians of 45.724523 and
+44.422684 ms; all 203 controls passed, with byte-identical JSON and TOON and
+unchanged source, publication and approved purposes. Sampled maximum RSS rose
+from 20,140,032 to 20,484,096 bytes. These local results justify investigating the
+shared mechanism, not a claim about the Apple Silicon miss or final all-route
+performance. Require independent source review, causal encoder-selection tests,
+positive real CLI formatting/budget/telemetry proof and the unchanged complete
+native installed matrix before acceptance. Preserve the C1 cohort's sole
+cold-no-op failure and every older failed cohort.
+
+The subsequent complete shared-serializer screen recorded median watch latency
+45.043716 to 45.763497 ms (+1.60%) and maximum sampled RSS from 19,656,704 to
+18,866,176 bytes (-4.02%). It does not establish a watch speedup. Preserve that
+screen as failed because its legacy positive control requested ten rows from a
+twelve-row fixture and the original binary correctly refused. Retain all 62
+timing samples and twenty completed wire comparisons. An independently reviewed
+wire-only continuation verifies the same byte-exact refusal in the candidate,
+uses twenty rows for the positive legacy read and finishes detailed/coverage
+checks without repeating timings. All 26 positive JSON/TOON comparisons across
+thirteen read commands preserve exact output and state. Native numerical
+acceptance remains required, and the failed Apple Silicon cohort is unwaived.

@@ -13,6 +13,14 @@ This is the target behavior for 0.5.1 issue #708: faster initial indexing, full 
 
 The focused baseline and draft results are in [the indexing reference](benchmarks/v0.5.1-indexing.md). A read-oriented observer or empty callback queue does not safely authorize bypassing exact reconciliation.
 
+CLI serialization chooses JSON or TOON before invoking the corresponding
+renderer. Ordinary commands and tracked outputs share that boundary; coverage
+and slice fitting measure the selected format's exact bytes. Directory telemetry
+consumes the accepted serialized response without encoding it a second time.
+This removes discarded formatting work while preserving wire schemas, output
+bounds and accounting. MCP's intentional TOON responses and controlled analysis
+encoders retain their existing behavior.
+
 ## Target refresh flow
 
 ```mermaid

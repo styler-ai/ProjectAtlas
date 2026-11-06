@@ -1759,9 +1759,8 @@ fn run_health_report(
             },
         )?;
         let mut coverage_report = load_coverage_discovery(&store, query)?;
-        let toon = finalize_coverage_output(cli.format, &mut coverage_report)?;
-        print_tracked_directory_output_estimate(
-            cli.format,
+        let output = finalize_coverage_output(cli.format, &mut coverage_report)?;
+        print_tracked_serialized_directory_output_estimate(
             &store,
             usage_instance,
             &cli.session,
@@ -1769,8 +1768,7 @@ fn run_health_report(
             None,
             None,
             || estimated_source_tokens_for_indexed_files(&store, None, None),
-            &toon,
-            &coverage_report,
+            &output,
         )?;
         return Ok(());
     }
@@ -1789,9 +1787,8 @@ fn run_health_report(
         },
     );
     let page = store.unresolved_health_findings_page_current(&query)?;
-    let toon = render_health_page(&page, &query);
-    print_tracked_directory_output_estimate(
-        cli.format,
+    let output = serialized_output(cli.format, || render_health_page(&page, &query), &page)?;
+    print_tracked_serialized_directory_output_estimate(
         &store,
         usage_instance,
         &cli.session,
@@ -1799,8 +1796,7 @@ fn run_health_report(
         None,
         None,
         || estimated_source_tokens_for_indexed_files(&store, None, None),
-        &toon,
-        &page,
+        &output,
     )?;
     Ok(())
 }
@@ -1848,7 +1844,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             );
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "init": report })),
+                || encode_agent_payload(&json!({ "init": report })),
                 &report,
             )?;
             if !report.ok {
@@ -1887,16 +1883,15 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 run_scan_pipeline_controlled(&mut store, &plan, &symbol_options, &control)?;
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "scan": report })),
+                || encode_agent_payload(&json!({ "scan": report })),
                 &report,
             )?;
         }
         Command::Overview => {
             let store = open_index_for_read(cli)?;
             let overview = store.overview()?;
-            let toon = render_overview(&overview);
-            print_tracked_directory_output_estimate(
-                cli.format,
+            let output = serialized_output(cli.format, || render_overview(&overview), &overview)?;
+            print_tracked_serialized_directory_output_estimate(
                 &store,
                 usage_instance,
                 &cli.session,
@@ -1904,17 +1899,19 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 None,
                 None,
                 || estimated_source_tokens_for_indexed_files(&store, None, None),
-                &toon,
-                &overview,
+                &output,
             )?;
         }
         Command::Folders { query, limit } => {
             let store = open_index_for_read(cli)?;
             let selected = ranked_folder_nodes_with_reasons(&store, query, *limit)?;
-            let toon = render_ranked_nodes("folders", &selected);
             let payload = render_ranked_node_rows("folders", &selected);
-            print_tracked_directory_output_estimate(
+            let output = serialized_output(
                 cli.format,
+                || render_ranked_nodes("folders", &selected),
+                &payload,
+            )?;
+            print_tracked_serialized_directory_output_estimate(
                 &store,
                 usage_instance,
                 &cli.session,
@@ -1922,8 +1919,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 None,
                 Some(query.clone()),
                 || estimated_source_tokens_for_indexed_files(&store, None, None),
-                &toon,
-                &payload,
+                &output,
             )?;
         }
         Command::Files {
@@ -1950,7 +1946,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 content_selection.unwrap_or_default(),
             )?;
             let payload = render_classified_ranked_file_rows(&selected);
-            let toon = encode_agent_payload(&json!({ "files": &payload }));
+            let render_toon = || encode_agent_payload(&json!({ "files": &payload }));
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -1966,7 +1962,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         file_pattern.as_deref(),
                     )
                 },
-                &toon,
+                render_toon,
                 &payload,
             )?;
         }
@@ -1983,9 +1979,12 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 content_selection.unwrap_or_default(),
             )?;
             let payload = next_step_report_payload(&report);
-            let toon = encode_agent_payload(&json!({ "next": payload }));
-            print_tracked_directory_output_estimate(
+            let output = serialized_output(
                 cli.format,
+                || encode_agent_payload(&json!({ "next": payload })),
+                &payload,
+            )?;
+            print_tracked_serialized_directory_output_estimate(
                 &store,
                 usage_instance,
                 &cli.session,
@@ -1993,8 +1992,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 None,
                 Some(query.clone()),
                 || estimated_source_tokens_for_indexed_files(&store, None, None),
-                &toon,
-                &payload,
+                &output,
             )?;
         }
         Command::Outline { file, lines } => {
@@ -2005,7 +2003,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 .load_node_by_path(&file_key)?
                 .and_then(|node| node.node.language);
             let outline = build_outline(&file_key, language, &content, *lines);
-            let toon = render_outline(&outline);
+            let render_toon = || render_outline(&outline);
             print_tracked_output_text(
                 cli.format,
                 &store,
@@ -2015,7 +2013,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 Some(file_key),
                 None,
                 &content,
-                &toon,
+                render_toon,
                 &outline,
             )?;
         }
@@ -2034,7 +2032,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 &content,
                 content_selection.unwrap_or_default(),
             )?;
-            let toon = render_file_summary(&report);
+            let render_toon = || render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,
                 &store,
@@ -2044,7 +2042,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 Some(report.file_path.clone()),
                 None,
                 &content,
-                &toon,
+                render_toon,
                 &report,
             )?;
         }
@@ -2077,7 +2075,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 },
                 None,
             )?;
-            let toon = render_search_report(&report);
+            let render_toon = || render_search_report(&report);
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -2087,7 +2085,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 file_pattern.clone(),
                 Some(pattern.clone()),
                 || Ok(byte_count_to_tokens(report.searched_bytes)),
-                &toon,
+                render_toon,
                 &report,
             )?;
         }
@@ -2184,7 +2182,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 )?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "symbols_build": report })),
+                    || encode_agent_payload(&json!({ "symbols_build": report })),
                     &report,
                 )?;
             }
@@ -2202,9 +2200,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     *limit,
                 )?;
                 let symbol_rows = render_classified_symbol_rows(&symbols);
-                let toon = encode_agent_payload(&json!({
-                    "symbols": &symbol_rows,
-                }));
+                let render_toon = || {
+                    encode_agent_payload(&json!({
+                        "symbols": &symbol_rows,
+                    }))
+                };
                 print_tracked_output_estimate(
                     cli.format,
                     &store,
@@ -2221,7 +2221,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                 .map(|classified| classified.symbol.path.as_str()),
                         )
                     },
-                    &toon,
+                    render_toon,
                     &symbol_rows,
                 )?;
             }
@@ -2395,12 +2395,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             &control,
                         )?
                         .relations;
-                    let toon = if cli.format == OutputFormat::Toon {
-                        render_symbol_relations(&relations)
-                    } else {
-                        String::new()
-                    };
-                    let output = serialized_output(cli.format, &toon, &relations)?;
+                    let output = serialized_output(
+                        cli.format,
+                        || render_symbol_relations(&relations),
+                        &relations,
+                    )?;
                     projectatlas_service::check_legacy_relation_output(&output, output_limit)?;
                     print_tracked_serialized_output_estimate(
                         store,
@@ -2554,12 +2553,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             )?;
                             let (_report, output) = draft.fit_output(Some(control), |report| {
                                 let payload = json!({ "symbol_relations": report });
-                                let toon = if cli.format == OutputFormat::Toon {
-                                    encode_agent_payload(&payload)
-                                } else {
-                                    String::new()
-                                };
-                                serialized_output(cli.format, &toon, &payload)
+                                serialized_output(
+                                    cli.format,
+                                    || encode_agent_payload(&payload),
+                                    &payload,
+                                )
                             })?;
                             output
                         } else {
@@ -2574,12 +2572,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             )?;
                             let (_report, output) = draft.fit_output(None, |report| {
                                 let payload = json!({ "symbol_relations": report });
-                                let toon = if cli.format == OutputFormat::Toon {
-                                    encode_agent_payload(&payload)
-                                } else {
-                                    String::new()
-                                };
-                                serialized_output(cli.format, &toon, &payload)
+                                serialized_output(
+                                    cli.format,
+                                    || encode_agent_payload(&payload),
+                                    &payload,
+                                )
                             })?;
                             output
                         }
@@ -2741,8 +2738,8 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
         Command::Settings => {
             cli.preflight_implicit_project_root()?;
             let report = build_settings_report(&cli.db, cli.config.as_deref(), cli.format)?;
-            let toon = render_settings_report(&report);
-            print_output(cli.format, &toon, &report)?;
+            let render_toon = || render_settings_report(&report);
+            print_output(cli.format, render_toon, &report)?;
         }
         #[cfg(feature = "derived-snapshot")]
         Command::Snapshot {
@@ -2776,7 +2773,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 store.finish_index_read_snapshot()?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "snapshot_export": report })),
+                    || encode_agent_payload(&json!({ "snapshot_export": report })),
                     &report,
                 )?;
             }
@@ -2800,7 +2797,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 )?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "snapshot_import": report })),
+                    || encode_agent_payload(&json!({ "snapshot_import": report })),
                     &report,
                 )?;
             }
@@ -2818,18 +2815,18 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             }) => {
                 let root = canonical_project_root(path)?;
                 let report = bind_project_root(&root, *transition, *nearest_project)?;
-                print_output(cli.format, &render_root_report(&report), &report)?;
+                print_output(cli.format, || render_root_report(&report), &report)?;
             }
             None | Some(RootCommand::Show) => {
                 cli.preflight_implicit_project_root()?;
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
-                print_output(cli.format, &render_root_report(&report), &report)?;
+                print_output(cli.format, || render_root_report(&report), &report)?;
             }
             Some(RootCommand::Status { path }) => {
                 let report = build_repository_control_report(path)?;
                 print_output(
                     cli.format,
-                    &render_repository_control_report(&report),
+                    || render_repository_control_report(&report),
                     &report,
                 )?;
             }
@@ -2858,7 +2855,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     }
                     print_output(
                         cli.format,
-                        "binding_verified: true",
+                        || "binding_verified: true".to_string(),
                         &json!({ "binding_verified": true }),
                     )?;
                 } else {
@@ -2872,7 +2869,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             &root,
                         )?;
                     }
-                    print_output(cli.format, &render_root_report(&report), &report)?;
+                    print_output(cli.format, || render_root_report(&report), &report)?;
                     if !verified {
                         std::process::exit(1);
                     }
@@ -2885,7 +2882,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             let report = effective_config_report(&config);
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "config": report })),
+                || encode_agent_payload(&json!({ "config": report })),
                 &report,
             )?;
         }
@@ -2895,7 +2892,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 let report = list_ignore_entries(cli.config.as_deref(), &project_root)?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "ignore": report })),
+                    || encode_agent_payload(&json!({ "ignore": report })),
                     &report,
                 )?;
             }
@@ -2904,7 +2901,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 let report = init_gitignore(cli.config.as_deref(), &project_root)?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "gitignore": report })),
+                    || encode_agent_payload(&json!({ "gitignore": report })),
                     &report,
                 )?;
             }
@@ -2914,7 +2911,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     add_ignore_entry(cli.config.as_deref(), &project_root, (*kind).into(), value)?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "ignore": report })),
+                    || encode_agent_payload(&json!({ "ignore": report })),
                     &report,
                 )?;
             }
@@ -2928,15 +2925,15 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 )?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "ignore": report })),
+                    || encode_agent_payload(&json!({ "ignore": report })),
                     &report,
                 )?;
             }
         },
         Command::WatchStatus => {
             let report = watcher_status_report(false);
-            let toon = render_watch_status(&report);
-            print_output(cli.format, &toon, &report)?;
+            let render_toon = || render_watch_status(&report);
+            print_output(cli.format, render_toon, &report)?;
         }
         Command::Watch {
             path,
@@ -2981,7 +2978,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             };
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "watch": report })),
+                || encode_agent_payload(&json!({ "watch": report })),
                 &report,
             )?;
         }
@@ -3007,7 +3004,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 store.resolve_health_finding(&resolution)?;
                 print_output(
                     cli.format,
-                    &encode_agent_payload(&json!({ "health_resolution": resolution })),
+                    || encode_agent_payload(&json!({ "health_resolution": resolution })),
                     &resolution,
                 )?;
             }
@@ -3097,7 +3094,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 };
                 match view {
                     TokenView::Agent => {
-                        print_output(cli.format, &render_token_trends(&report), &report)?;
+                        print_output(cli.format, || render_token_trends(&report), &report)?;
                     }
                     TokenView::Tui => {
                         let dashboard =
@@ -3128,7 +3125,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 }
                 match view {
                     TokenView::Agent => {
-                        print_output(cli.format, &render_token_overview(&overview), &overview)?;
+                        print_output(cli.format, || render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
                         let viewport = capture_token_dashboard_viewport();
@@ -3157,7 +3154,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             let store = open_index_for_read(cli)?;
             let report = build_parity_report(&store, profile)?;
             let ok = report.ok;
-            print_output(cli.format, &render_parity_report(&report), &report)?;
+            print_output(cli.format, || render_parity_report(&report), &report)?;
             if !ok {
                 std::process::exit(1);
             }
@@ -3178,7 +3175,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             )?;
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "legacy_purpose_migration": report })),
+                || encode_agent_payload(&json!({ "legacy_purpose_migration": report })),
                 &report,
             )?;
         }
@@ -3203,7 +3200,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             )?;
             print_output(
                 cli.format,
-                &encode_agent_payload(&json!({ "reset_index": report })),
+                || encode_agent_payload(&json!({ "reset_index": report })),
                 &report,
             )?;
         }
@@ -3229,11 +3226,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 cli.config.as_deref(),
                 *nearest_project,
             )?;
-            print_output(cli.format, &render_mcp_config_report(&report), &report)?;
+            print_output(cli.format, || render_mcp_config_report(&report), &report)?;
         }
         Command::RuntimeInfo => {
             let report = build_runtime_info();
-            print_output(cli.format, &render_runtime_info(&report), &report)?;
+            print_output(cli.format, || render_runtime_info(&report), &report)?;
         }
         #[cfg(unix)]
         Command::AcquireInstallerLock {
@@ -3290,7 +3287,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         },
                     })
                 })?;
-                print_output(cli.format, &encode_agent_payload(&report), &report)?;
+                print_output(cli.format, || encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
                 let requests = load_purpose_review_requests(from_file)?;
@@ -3303,7 +3300,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     let store = open_index_for_read(cli)?;
                     review_purposes(&store, &requests, false)?
                 };
-                print_output(cli.format, &render_purpose_review_report(&report), &report)?;
+                print_output(
+                    cli.format,
+                    || render_purpose_review_report(&report),
+                    &report,
+                )?;
                 if report.failed > 0 {
                     std::process::exit(1);
                 }
@@ -3334,9 +3335,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     &query,
                     task.as_deref().unwrap_or("purpose-curation"),
                 )?;
-                let toon = render_purpose_curation_page(&page);
+                let render_toon = || render_purpose_curation_page(&page);
                 store.finish_index_read_snapshot()?;
-                print_output(cli.format, &toon, &page)?;
+                print_output(cli.format, render_toon, &page)?;
             }
         },
     }
@@ -3380,8 +3381,8 @@ fn run_parser_pack_command(
         ParserPackCommand::Remove => lifecycle.remove()?,
         ParserPackCommand::Status => lifecycle.status()?,
     };
-    let toon = encode_agent_payload(&json!({ "parser_pack": report }));
-    print_output(format, &toon, &report)
+    let render_toon = || encode_agent_payload(&json!({ "parser_pack": report }));
+    print_output(format, render_toon, &report)
 }
 
 /// Shared CLI/MCP envelope for a complete-array resource refusal.
@@ -4262,20 +4263,20 @@ fn truthy_env(name: &str) -> bool {
 /// Emit either TOON or JSON to stdout.
 fn print_output<T: serde::Serialize>(
     format: OutputFormat,
-    toon: &str,
+    render_toon: impl FnOnce() -> String,
     payload: &T,
 ) -> Result<(), CliError> {
-    write_stdout(&serialized_output(format, toon, payload)?)
+    write_stdout(&serialized_output(format, render_toon, payload)?)
 }
 
-/// Serialize output exactly as the CLI will emit it.
+/// Serialize only the selected format, deferring every TOON allocation and render.
 fn serialized_output<T: serde::Serialize>(
     format: OutputFormat,
-    toon: &str,
+    render_toon: impl FnOnce() -> String,
     payload: &T,
 ) -> Result<String, CliError> {
     match format {
-        OutputFormat::Toon => Ok(toon.to_string()),
+        OutputFormat::Toon => Ok(render_toon()),
         OutputFormat::Json => Ok(format!("{}\n", serde_json::to_string_pretty(payload)?)),
     }
 }
@@ -4529,8 +4530,7 @@ fn finalize_coverage_output(
     report: &mut CoverageDiscoveryReport,
 ) -> Result<String, CliError> {
     for _ in 0..4 {
-        let toon = render_coverage_report(report);
-        let rendered = serialized_output(format, &toon, report)?;
+        let rendered = serialized_output(format, || render_coverage_report(report), report)?;
         let output_bytes = u32::try_from(rendered.len()).map_err(|error| {
             CliError::InvalidInput(format!("coverage output size did not fit u32: {error}"))
         })?;
@@ -4569,8 +4569,7 @@ fn trimmed_cli_filter(value: Option<&str>) -> Option<String> {
 }
 
 /// Record estimated-token telemetry for the exact emitted CLI payload.
-fn print_tracked_directory_output_estimate<T, F>(
-    format: OutputFormat,
+fn print_tracked_serialized_directory_output_estimate<F>(
     store: &AtlasStore,
     usage_instance: Option<UsageRuntimeInstance>,
     session: &str,
@@ -4578,15 +4577,12 @@ fn print_tracked_directory_output_estimate<T, F>(
     path: Option<String>,
     query: Option<String>,
     estimate_without_projectatlas: F,
-    toon: &str,
-    payload: &T,
+    output: &str,
 ) -> Result<(), CliError>
 where
-    T: serde::Serialize,
     F: FnOnce() -> Result<usize, CliError>,
 {
-    let output = serialized_output(format, toon, payload)?;
-    write_stdout(&output)?;
+    write_stdout(output)?;
     if usage_instance.is_none() || runtime::telemetry_disabled() {
         return Ok(());
     }
@@ -4601,7 +4597,7 @@ where
         path,
         query,
         estimated_without_projectatlas,
-        &output,
+        output,
     ));
     Ok(())
 }
@@ -4616,14 +4612,14 @@ fn print_tracked_output_estimate<T, F>(
     path: Option<String>,
     query: Option<String>,
     estimate_without_projectatlas: F,
-    toon: &str,
+    render_toon: impl FnOnce() -> String,
     payload: &T,
 ) -> Result<(), CliError>
 where
     T: serde::Serialize,
     F: FnOnce() -> Result<usize, CliError>,
 {
-    let output = serialized_output(format, toon, payload)?;
+    let output = serialized_output(format, render_toon, payload)?;
     print_tracked_serialized_output_estimate(
         store,
         usage_instance,
@@ -4680,10 +4676,10 @@ fn print_tracked_output_text<T: serde::Serialize>(
     path: Option<String>,
     query: Option<String>,
     baseline_text: &str,
-    toon: &str,
+    render_toon: impl FnOnce() -> String,
     payload: &T,
 ) -> Result<(), CliError> {
-    let output = serialized_output(format, toon, payload)?;
+    let output = serialized_output(format, render_toon, payload)?;
     write_stdout(&output)?;
     drop(record_usage_text(
         store,
@@ -4710,10 +4706,8 @@ fn print_tracked_slice_output(
     baseline_text: &str,
     report: &CodeSliceDraft,
 ) -> Result<(), CliError> {
-    let output = report.fit_output(|report| {
-        let toon = render_code_slice(report);
-        serialized_output(format, &toon, report)
-    })?;
+    let output = report
+        .fit_output(|report| serialized_output(format, || render_code_slice(report), report))?;
     write_stdout(&output)?;
     drop(record_usage_text(
         store,
@@ -5885,6 +5879,7 @@ mod tests {
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
     };
     use projectatlas_core::telemetry::TokenOverview;
+    use projectatlas_core::toon::encode_agent_payload;
     use projectatlas_core::{
         IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
         Node, NodeKind, normalize_native_path_display,
@@ -7822,7 +7817,7 @@ mod tests {
     fn json_output_serialization_is_measurable_for_telemetry() -> Result<(), Box<dyn Error>> {
         let payload = serde_json::json!({ "path": "src/main.rs", "lines": [1, 2, 3] });
         let toon = "path: src/main.rs\n";
-        let json = serialized_output(OutputFormat::Json, toon, &payload)?;
+        let json = serialized_output(OutputFormat::Json, || toon.to_string(), &payload)?;
 
         if !json.contains("\"path\": \"src/main.rs\"") {
             return Err(io::Error::other("json output did not contain path").into());
@@ -7833,6 +7828,62 @@ mod tests {
         if json.len() <= toon.len() {
             return Err(io::Error::other("json output was not larger than toon fixture").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn output_serialization_invokes_only_the_selected_encoder() -> Result<(), Box<dyn Error>> {
+        let payload = json!({ "path": "src/main.rs", "lines": [1, 2, 3] });
+        let calls = std::cell::Cell::new(0);
+        let render_toon = || {
+            calls.set(calls.get() + 1);
+            encode_agent_payload(&payload)
+        };
+
+        let json_output = serialized_output(OutputFormat::Json, render_toon, &payload)?;
+        assert_eq!(calls.get(), 0, "JSON must not allocate or render TOON");
+        assert_eq!(
+            json_output,
+            format!("{}\n", serde_json::to_string_pretty(&payload)?)
+        );
+
+        let toon_output = serialized_output(OutputFormat::Toon, render_toon, &payload)?;
+        assert_eq!(calls.get(), 1, "TOON must invoke its renderer exactly once");
+        assert_eq!(toon_output, encode_agent_payload(&payload));
+        Ok(())
+    }
+
+    #[test]
+    fn selected_encoding_preserves_json_errors_and_toon_ownership() -> Result<(), Box<dyn Error>> {
+        struct RefusedPayload;
+
+        impl serde::Serialize for RefusedPayload {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("payload serialization refused"))
+            }
+        }
+
+        let calls = std::cell::Cell::new(0);
+        let render_toon = || {
+            calls.set(calls.get() + 1);
+            "selected: toon\n".to_string()
+        };
+        let result = serialized_output(OutputFormat::Json, render_toon, &RefusedPayload);
+        assert!(matches!(result, Err(CliError::Json(_))));
+        assert_eq!(
+            calls.get(),
+            0,
+            "JSON errors must not invoke the TOON renderer"
+        );
+
+        // A TOON renderer can move its owned result and never serializes JSON.
+        let toon = render_toon();
+        let output = serialized_output(OutputFormat::Toon, move || toon, &RefusedPayload)?;
+        assert_eq!(output, "selected: toon\n");
+        assert_eq!(calls.get(), 1);
         Ok(())
     }
 
