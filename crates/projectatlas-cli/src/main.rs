@@ -7841,15 +7841,16 @@ mod tests {
         };
 
         let json_output = serialized_output(OutputFormat::Json, render_toon, &payload)?;
-        assert_eq!(calls.get(), 0, "JSON must not allocate or render TOON");
-        assert_eq!(
-            json_output,
-            format!("{}\n", serde_json::to_string_pretty(&payload)?)
-        );
+        if calls.get() != 0
+            || json_output != format!("{}\n", serde_json::to_string_pretty(&payload)?)
+        {
+            return Err(io::Error::other("JSON invoked TOON or changed its wire format").into());
+        }
 
         let toon_output = serialized_output(OutputFormat::Toon, render_toon, &payload)?;
-        assert_eq!(calls.get(), 1, "TOON must invoke its renderer exactly once");
-        assert_eq!(toon_output, encode_agent_payload(&payload));
+        if calls.get() != 1 || toon_output != encode_agent_payload(&payload) {
+            return Err(io::Error::other("TOON changed its wire format or renderer count").into());
+        }
         Ok(())
     }
 
@@ -7872,18 +7873,16 @@ mod tests {
             "selected: toon\n".to_string()
         };
         let result = serialized_output(OutputFormat::Json, render_toon, &RefusedPayload);
-        assert!(matches!(result, Err(CliError::Json(_))));
-        assert_eq!(
-            calls.get(),
-            0,
-            "JSON errors must not invoke the TOON renderer"
-        );
+        if !matches!(result, Err(CliError::Json(_))) || calls.get() != 0 {
+            return Err(io::Error::other("JSON error propagation invoked TOON or changed").into());
+        }
 
         // A TOON renderer can move its owned result and never serializes JSON.
         let toon = render_toon();
         let output = serialized_output(OutputFormat::Toon, move || toon, &RefusedPayload)?;
-        assert_eq!(output, "selected: toon\n");
-        assert_eq!(calls.get(), 1);
+        if output != "selected: toon\n" || calls.get() != 1 {
+            return Err(io::Error::other("owned TOON output or renderer count changed").into());
+        }
         Ok(())
     }
 
