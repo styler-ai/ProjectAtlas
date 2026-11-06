@@ -483,13 +483,18 @@ pub(crate) struct IndexRefreshRequired {
     pub(crate) reason: IndexRefreshReason,
     /// Safe recovery scope.
     pub(crate) scope: IndexRefreshScope,
-    /// Total added, removed, or modified paths.
+    /// Total added, removed, or modified paths for an ordinary source delta.
+    ///
+    /// A dependency-closure refusal instead counts known affected source paths;
+    /// truncated inbound evidence is a lower bound on the complete closure.
     pub(crate) changed: usize,
-    /// Newly visible paths.
+    /// Newly visible paths; zero/unclassified for a dependency-closure refusal.
     pub(crate) added: usize,
-    /// Paths no longer visible under current source and ignore policy.
+    /// Paths no longer visible; zero/unclassified for a dependency-closure refusal.
     pub(crate) removed: usize,
     /// Existing paths whose source or structural identity changed.
+    /// Zero/unclassified for a dependency-closure refusal, which may include
+    /// dependents whose source did not change.
     pub(crate) modified: usize,
     /// Deterministic bounded path sample for agent recovery.
     pub(crate) sample_paths: Vec<String>,

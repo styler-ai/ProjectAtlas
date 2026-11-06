@@ -12,6 +12,7 @@ Indexing and refreshing a large project can take too long and hit a deadline. Ve
 - Reconcile uncertain history, offline edits and relevant configuration changes exactly. Preserve the complete results and force/rebuild semantics of initial and full indexing.
 - Choose bounded default work budgets from the work required. Preserve explicit caller limits, cancellation, atomic publication, authored purposes, native identity and safe retry.
 - Preserve exact schema admission in the shared metadata owner: match SQLite's reserved internal namespace literally, refuse foreign or unsupported user objects before initialization or migration, and retain genuine engine statistics and permitted extension indexes. Apply the same complete user-object inventory to compatibility and rollback proofs.
+- Keep bounded-refusal counters in path units. A dependency-closure refusal reports known affected source paths, rather than graph rows or canonical keys; its source-change categories remain unclassified. Preserve the existing schema, limits, scan recovery and prior publication.
 - Prove each improvement with the optimized installed product, normal telemetry, realistic large-project fixtures, work counts and resource measurements on supported platforms.
 
 ## Capabilities

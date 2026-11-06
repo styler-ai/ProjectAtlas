@@ -1782,8 +1782,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             identity_admission
                 .incomplete_reused_rejection_paths()
                 .iter()
-                .cloned(),
-            identity_admission.incomplete_reused_rejection_paths().len(),
+                .map(String::as_str),
         ));
     }
     identity_admission.merge(
@@ -1980,8 +1979,7 @@ impl<'a> ResolutionKeyWorkspace<'a> {
         if self.keys.len() >= self.row_limit {
             return Err(dependency_closure_limit(
                 self.root,
-                self.paths.iter().cloned(),
-                self.keys.len().saturating_add(1),
+                self.paths.iter().map(String::as_str),
             ));
         }
         let next = self
@@ -2001,8 +1999,7 @@ impl<'a> ResolutionKeyWorkspace<'a> {
         if self.keys.len() >= self.row_limit {
             return Err(dependency_closure_limit(
                 self.root,
-                self.paths.iter().cloned(),
-                self.keys.len().saturating_add(1),
+                self.paths.iter().map(String::as_str),
             ));
         }
         let next = self
@@ -2217,8 +2214,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
     if old_exports.page.truncated {
         return Err(dependency_closure_limit(
             root,
-            direct_paths.iter().cloned(),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+            direct_paths.iter().map(String::as_str),
         ));
     }
     let mut changed_keys = ResolutionKeyWorkspace::new(
@@ -2299,8 +2295,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
                 .page
                 .rows
                 .iter()
-                .map(|path| path.as_str().to_string()),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+                .map(projectatlas_core::graph::RepositoryFilePath::as_str),
         ));
     }
     let mut affected_paths = direct_paths;
@@ -2357,10 +2352,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
             affected_identity_admission
                 .incomplete_reused_rejection_paths()
                 .iter()
-                .cloned(),
-            affected_identity_admission
-                .incomplete_reused_rejection_paths()
-                .len(),
+                .map(String::as_str),
         ));
     }
     let admitted_graphs = direct_graphs
@@ -2491,8 +2483,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
     if persisted.page.truncated {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+            affected_paths.iter().map(String::as_str),
         ));
     }
     let mut candidates = resolution_registry_from_persisted(
@@ -9079,20 +9070,16 @@ fn enforce_key_binding_limit(count: usize) -> Result<(), CliError> {
 }
 
 /// Enforce one path/key count before incremental graph work expands further.
-fn enforce_incremental_count<T>(
+fn enforce_incremental_count(
     root: &Path,
     _context: &'static str,
     count: usize,
-    sample: &BTreeSet<T>,
-) -> Result<(), CliError>
-where
-    T: ToString + Ord,
-{
+    affected_paths: &BTreeSet<String>,
+) -> Result<(), CliError> {
     if count > MAX_INCREMENTAL_RESOLUTION_ITEMS as usize {
         return Err(dependency_closure_limit(
             root,
-            sample.iter().map(ToString::to_string),
-            count,
+            affected_paths.iter().map(String::as_str),
         ));
     }
     Ok(())
@@ -9116,8 +9103,7 @@ fn admitted_persisted_footprint(
     if footprint.truncated {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            usize::try_from(footprint.rows).unwrap_or(usize::MAX),
+            affected_paths.iter().map(String::as_str),
         ));
     }
     enforce_incremental_projection_budget(
@@ -9170,32 +9156,35 @@ fn enforce_incremental_projection_budget(
     if rows > MAX_INCREMENTAL_GRAPH_ROWS || retained_bytes > MAX_INCREMENTAL_GRAPH_BYTES {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            affected_paths.len(),
+            affected_paths.iter().map(String::as_str),
         ));
     }
     Ok(())
 }
 
-/// Construct deterministic full-refresh guidance for an oversized dependency closure.
-fn dependency_closure_limit(
+/// Report observed affected paths independently of the exhausted graph-work unit.
+///
+/// A truncated inbound cursor provides only a lower bound on the complete closure.
+/// Source-change categories are unclassified here: affected dependents need not
+/// have changed source. Only the bounded path sample is copied.
+fn dependency_closure_limit<'paths>(
     root: &Path,
-    sample: impl IntoIterator<Item = String>,
-    observed: usize,
+    paths: impl ExactSizeIterator<Item = &'paths str>,
 ) -> CliError {
+    let changed = paths.len();
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
         project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::DependencyClosureLimit,
         scope: IndexRefreshScope::Full,
-        changed: observed,
+        changed,
         added: 0,
         removed: 0,
-        modified: observed,
-        sample_paths: sample
-            .into_iter()
+        modified: 0,
+        sample_paths: paths
             .take(INDEX_FRESHNESS_SAMPLE_LIMIT)
+            .map(str::to_owned)
             .collect(),
     }))
 }
@@ -11039,6 +11028,40 @@ mod tests {
     }
 
     #[test]
+    fn incremental_count_refusal_reports_paths_without_classifying_source_changes()
+    -> Result<(), Box<dyn Error>> {
+        let root = Path::new("repository");
+        let paths = (0..65)
+            .map(|index| format!("src/dependent_{index:02}.rs"))
+            .collect::<BTreeSet<_>>();
+        let work_items = usize::try_from(super::MAX_INCREMENTAL_RESOLUTION_ITEMS)? + 1;
+        let error = super::enforce_incremental_count(root, "canonical keys", work_items, &paths)
+            .err()
+            .ok_or_else(|| io::Error::other("oversized key count reached publication"))?;
+        let CliError::RefreshRequired(report) = error else {
+            return Err(
+                io::Error::other(format!("expected closure refusal, found {error:?}")).into(),
+            );
+        };
+        require_eq(&report.changed, &paths.len(), "affected path count")?;
+        require_eq(
+            &(report.added, report.removed, report.modified),
+            &(0, 0, 0),
+            "closure source categories remain unclassified",
+        )?;
+        require_eq(
+            &report.sample_paths,
+            &paths
+                .iter()
+                .take(super::INDEX_FRESHNESS_SAMPLE_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>(),
+            "bounded affected path sample",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn incremental_projection_budget_requests_one_complete_refresh() -> Result<(), Box<dyn Error>> {
         let root = Path::new("repository");
         let affected_paths = BTreeSet::from(["src/lib.rs".to_string()]);
@@ -11068,9 +11091,56 @@ mod tests {
             )?;
             require_eq(&report.changed, &1, "incremental changed paths")?;
             require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "incremental closure categories remain unclassified",
+            )?;
+            require_eq(
                 &report.sample_paths,
                 &vec!["src/lib.rs".to_string()],
                 "incremental sample paths",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn closure_refusal_counts_the_observed_path_prefix_without_exhausting_it()
+    -> Result<(), Box<dyn Error>> {
+        let paths = (0..12)
+            .map(|index| format!("src/dependent_{index:02}.rs"))
+            .collect::<Vec<_>>();
+        for observed in [0, 3, 12] {
+            let sampled = std::cell::Cell::new(0);
+            let error = super::dependency_closure_limit(
+                Path::new("repository"),
+                paths[..observed]
+                    .iter()
+                    .map(String::as_str)
+                    .inspect(|_| sampled.set(sampled.get() + 1)),
+            );
+            let CliError::RefreshRequired(report) = error else {
+                return Err(io::Error::other("path evidence lost typed closure recovery").into());
+            };
+            require_eq(&report.changed, &observed, "observed path-prefix count")?;
+            require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "partial closure source categories remain unclassified",
+            )?;
+            require_eq(
+                &report.sample_paths,
+                &paths[..observed.min(super::INDEX_FRESHNESS_SAMPLE_LIMIT)].to_vec(),
+                "observed path-prefix sample",
+            )?;
+            require_eq(
+                &sampled.get(),
+                &observed.min(super::INDEX_FRESHNESS_SAMPLE_LIMIT),
+                "path evidence is counted without walking beyond the bounded sample",
+            )?;
+            require(
+                report.requires_explicit_scan(),
+                "partial closure lost explicit scan recovery",
             )?;
         }
         Ok(())
@@ -15302,7 +15372,7 @@ function helper() {}
         let key = test_resolution_key(project, &"x".repeat(1_000))?;
         let other = test_resolution_key(project, &"y".repeat(1_000))?;
         let one_owner = super::resolution_workspace_key_bytes(&key);
-        let paths = BTreeSet::new();
+        let paths = BTreeSet::from(["src/lib.rs".to_string()]);
         let root = Path::new(".");
         let mut exact = super::ResolutionKeyWorkspace::new(one_owner, root, &paths);
         exact.insert(&key)?;
@@ -15344,14 +15414,27 @@ function helper() {}
         one_row.row_limit = 1;
         one_row.insert(&key)?;
         one_row.insert_owned(key.clone())?;
+        for result in [one_row.insert(&other), one_row.insert_owned(other.clone())] {
+            let CliError::RefreshRequired(report) = result
+                .err()
+                .ok_or_else(|| io::Error::other("distinct-key cap admitted another owner"))?
+            else {
+                return Err(io::Error::other("key cap lost typed closure refusal").into());
+            };
+            require_eq(&report.changed, &1, "key cap reports source-path units")?;
+            require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "key cap source categories remain unclassified",
+            )?;
+            require_eq(
+                &report.sample_paths,
+                &vec!["src/lib.rs".to_string()],
+                "key cap source path sample",
+            )?;
+        }
         require(
-            matches!(one_row.insert(&other), Err(CliError::RefreshRequired(_)))
-                && matches!(
-                    one_row.insert_owned(other.clone()),
-                    Err(CliError::RefreshRequired(_))
-                )
-                && one_row.keys.len() == 1
-                && one_row.retained_bytes == one_owner,
+            one_row.keys.len() == 1 && one_row.retained_bytes == one_owner,
             "distinct-key row refusal retained another owner or charged a duplicate",
         )?;
         let mut expected = vec![key, other];
@@ -18604,6 +18687,12 @@ function helper() {}
             &report.scope,
             &IndexRefreshScope::Full,
             "persisted overflow scope",
+        )?;
+        require_eq(&report.changed, &1, "persisted rows report affected paths")?;
+        require_eq(
+            &(report.added, report.removed, report.modified),
+            &(0, 0, 0),
+            "persisted rows do not classify source changes",
         )?;
         require_eq(
             &store.index_publication()?,

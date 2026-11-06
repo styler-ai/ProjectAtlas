@@ -45,6 +45,29 @@ watch-once. Preserve exact project/worktree routing and existing payload schemas
 This repair belongs to task 2.4's retry and exact-fallback behavior; it changes no
 publication, closure limit or accepted performance target.
 
+The dependency-closure report must also keep source-path evidence separate from
+the work that exhausted a bound. Stable 0.5.0 passes graph-row and canonical-key
+counts into `changed` and `modified`; a real 67-file read fixture therefore
+reports 10,001 modified paths when its persisted graph exceeds 10,000 rows.
+At the existing private refusal constructor, derive `changed` from the known
+unique affected paths instead. A truncated inbound cursor or early stop while
+expanding keys or candidates makes this a lower bound on the complete affected
+set. The graph owner cannot classify
+these paths as added, removed or modified source: unchanged dependents can need
+reconciliation too. Keep those three category fields zero and explicitly
+unclassified for `DependencyClosureLimit`; ordinary source-delta categories
+retain their meaning and values.
+
+Borrow the existing unique path collections through an exact-size iterator and
+copy only the bounded diagnostic sample. This removes the arbitrary observed-work
+scalar without cloning a whole path set, adding a counter framework or threading
+source deltas through unrelated graph stages. Key, row and byte counts still
+govern their original refusal checks. Preserve the schema, explicit scan route,
+root/worktree selector, cancellation and publication boundaries. Owning tests
+cover key, row, byte and truncated-path evidence, and corrected real CLI JSON,
+TOON and MCP reads must retain the prior publication and recover by a complete
+scan. This belongs to tasks 2.4 and 3.2.
+
 CLI/MCP init, scan and symbol-build adapters keep their existing shared pipeline owners; one-shot and continuous watch keep the shared refresh owner. Improve their common filesystem, parsing, comparison and atomic-publication work rather than introducing separate fast implementations per adapter. Known changes describe additions, modifications, deletions and renames of any size. Include affected text, symbols, summaries, relations and configuration-dependent data; one changed file can affect many graph rows.
 
 Reuse `WatchChangeSet`, the existing source observer, source verification and store transaction boundaries. Do not add parallel adapter implementations or a second source-of-truth index. Keep native project/worktree identity captured throughout the operation.
@@ -1059,10 +1082,16 @@ host conditions; retain their observed failures and require corrected-protocol
 proof before acceptance, without attributing those failures to a product cause.
 
 Native packaging retains independent optimized shipping and contract target trees
-and the shipping-runtime digest guard. Its 60-minute job budget accounts for both
-builds: the Intel Mac shipping build consumed 16 minutes before contract compilation
-exhausted the previous 30-minute combined budget. This construction budget changes
-neither indexing deadlines nor any installed performance acceptance threshold.
+and the shipping-runtime digest guard. Intel Mac has a 90-minute job budget;
+Linux, Apple Silicon and Windows retain 60 minutes. The retained Intel failure
+completed its shipping build in 25m29s and its integration-test executable build
+in 23m32s, then reached the old one-hour limit while compiling the separate CLI
+unit-test executable. The capacity must cover these serial build stages and the
+remaining optimized tests and helper, not only the first two compilations.
+Keep every command, release profile, feature selection, test and digest guard.
+The larger Intel construction budget changes neither indexing deadlines nor any
+installed performance acceptance threshold. Preserve the cancelled original;
+all four platforms still require complete native and numerical proof.
 
 For Windows regular files, the parallel walker reuses the locked `ignore` crate's
 native directory-entry metadata only for preliminary admission. The existing
@@ -1197,7 +1226,7 @@ decreasing 2.28%. These observations support native validation, not acceptance
 against published 0.5.0 or a claim that executable pages alone explain every RSS
 sample. Native build time, all indexing paths, positive CLI/MCP workflows,
 features, compatibility and resource limits remain binding. Keep the existing
-60-minute package budget and original registered matrix unchanged. Release DB
+bounded platform construction budgets and original registered matrix. Release DB
 and CLI unit checks, actual executable wire compatibility, mandatory push gates
 and independent review precede the new native candidate campaign.
 

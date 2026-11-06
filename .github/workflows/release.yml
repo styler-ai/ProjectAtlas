@@ -250,8 +250,8 @@ jobs:
     name: package ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
-    # Allow both independent optimized trees: shipping runtime and test contracts.
-    timeout-minutes: 60
+    # Intel needs time for shipping, integration-test and CLI unit-test compilation.
+    timeout-minutes: ${{ matrix.label == 'macos-x64' && 90 || 60 }}
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
       RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}

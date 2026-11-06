@@ -102,6 +102,15 @@ For an explicit cross-worktree graph question, pass two to eight registered alia
 
 Follow typed recovery: choose one returned selector after `ambiguous`; run the returned alias-preserving init after `init_required`; refresh only the named target after `refresh_required`; select an exact active checkout after `worktree_required`; and never reset, substitute, or silently rebuild an incompatible database. See [Worktree atlas continuity](worktree-lifecycle.md) for ownership and sequence diagrams.
 
+For `refresh_required` with reason `dependency_closure_limit`, follow the returned
+`scan` / `atlas_scan` call. Its `changed` counter describes known affected source
+paths. If a key, candidate or path limit stops dependency expansion early, this
+is a lower bound rather than the total closure size. Graph rows, canonical keys
+and bytes are separate work units and are not changed-file counts. This refusal
+does not classify source edits:
+`added`, `removed` and `modified` are zero and unclassified. Other source-change
+reasons retain their exact added, removed and modified path counts.
+
 ## MCP Server
 
 Prefer the `projectatlas init` or installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`

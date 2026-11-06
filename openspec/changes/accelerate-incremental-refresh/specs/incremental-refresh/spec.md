@@ -155,6 +155,8 @@ CLI and MCP SHALL use the explicitly selected project/worktree and its existing 
 - **WHEN** a read refuses because the dependency-aware incremental closure exceeded its safe limit
 - **THEN** CLI JSON/TOON and MCP typed recovery select `scan` / `atlas_scan`, consistently with the human diagnostic, and preserve the exact project or registered worktree selector
 - **AND** source, path and policy changes that the ordinary one-shot refresh can reconcile continue to select `watch --once` / `atlas_watch_once`, including a full reconciliation scope
+- **AND** a dependency-closure refusal reports known affected source-path cardinality in `changed`, never graph-row, canonical-key or byte counts; an incomplete inbound path cursor or early stop during dependency expansion provides only a lower bound on the complete affected set
+- **AND** `added`, `removed` and `modified` remain zero and unclassified for this refusal reason, while ordinary source-delta reports retain their exact change categories
 
 ### Requirement: Default work budget fits planned work
 Without an explicit caller timeout, indexing/rebuilding/refresh SHALL select a documented bounded cooperative budget from reliable work estimates, including required discovery. Explicit limits SHALL take precedence. Cancellation and resource bounds SHALL remain effective; estimating work SHALL not add an unbudgeted full walk, and retries SHALL not reset the clock.
