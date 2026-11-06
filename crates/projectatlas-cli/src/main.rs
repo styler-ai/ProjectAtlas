@@ -2554,7 +2554,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             )?;
                             let (_report, output) = draft.fit_output(Some(control), |report| {
                                 let payload = json!({ "symbol_relations": report });
-                                let toon = encode_agent_payload(&payload);
+                                let toon = if cli.format == OutputFormat::Toon {
+                                    encode_agent_payload(&payload)
+                                } else {
+                                    String::new()
+                                };
                                 serialized_output(cli.format, &toon, &payload)
                             })?;
                             output
@@ -2570,7 +2574,11 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             )?;
                             let (_report, output) = draft.fit_output(None, |report| {
                                 let payload = json!({ "symbol_relations": report });
-                                let toon = encode_agent_payload(&payload);
+                                let toon = if cli.format == OutputFormat::Toon {
+                                    encode_agent_payload(&payload)
+                                } else {
+                                    String::new()
+                                };
                                 serialized_output(cli.format, &toon, &payload)
                             })?;
                             output

@@ -22,6 +22,9 @@ license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
 homepage = "https://styler-ai.github.io/ProjectAtlas/"
 
+[profile.release]
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "deny"

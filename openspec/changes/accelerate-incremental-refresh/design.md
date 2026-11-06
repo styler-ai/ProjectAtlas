@@ -1170,3 +1170,33 @@ These supplemental counters have different accounting from the registered
 targets, establish an inequality between counters, or waive an original failure.
 Native timing is diagnostic only. Linux execution verifies the helper's method;
 Apple Silicon attribution requires actual Apple Silicon execution.
+
+## Selected output encoding and shipping code generation
+
+Detailed CLI relation fitting previously built TOON even for JSON, then discarded
+it at the existing serializer. Guard that encoder at both the single-project and
+federated callbacks with the closed `OutputFormat::Toon` variant, matching the
+legacy route. Retain the JSON value, fitting owner, output accounting and schemas.
+No new strategy, abstraction or encoding dependency is necessary. Actual CLI
+breakpoints prove removal of three discarded encoder calls in the selected JSON
+case; positive JSON/TOON single/federated output checks protect compatibility.
+
+The remaining detailed-navigation resource misses concern process memory, beyond
+SQLite statement allocations alone. A causal statement-cache flush removed
+compiled statements but reduced sampled RSS by only 4 KiB and increased median
+latency by 7.29%; it was removed. A shipping ThinLTO trial increased ELF `.text`
+by 3.38% and was rejected before runtime measurements. Neither trial changes the
+retained schema, statement-cache behavior or default LTO setting.
+
+Use one actual workspace release profile, `codegen-units = 1`, for ordinary
+shipping builds and all native packages. This is source configuration rather than
+a benchmark-only profile or environment override. The local shipping build
+reduced `.text` by 8.50%; the scoped paired screen reduced detailed maximum sampled
+RSS by 15.85%, with summary latency increasing 3.61% and compatible-open latency
+decreasing 2.28%. These observations support native validation, not acceptance
+against published 0.5.0 or a claim that executable pages alone explain every RSS
+sample. Native build time, all indexing paths, positive CLI/MCP workflows,
+features, compatibility and resource limits remain binding. Keep the existing
+60-minute package budget and original registered matrix unchanged. Release DB
+and CLI unit checks, actual executable wire compatibility, mandatory push gates
+and independent review precede the new native candidate campaign.
