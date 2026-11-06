@@ -21,6 +21,13 @@ This removes discarded formatting work while preserving wire schemas, output
 bounds and accounting. MCP's intentional TOON responses and controlled analysis
 encoders retain their existing behavior.
 
+The CLI registers its closed command tree with Clap's deferred argument
+construction at each subcommand enum. Parsing builds arguments only for the
+selected command path; names, descriptions and aliases remain registered for
+parent help. Consumers inspecting the complete argument tree call
+`Command::build` first. This avoids unused command construction before the
+existing runtime pipeline without changing command semantics or freshness.
+
 ## Target refresh flow
 
 ```mermaid
@@ -52,6 +59,17 @@ Validation, cancellation or failure at any phase refuses unsafe publication and 
 ## Ownership and safeguards
 
 Keep the existing filesystem, source-observation, work-control and SQLite/publication owners. Capture root, native project identity, policy and generation consistently. Integrate observation with writer checks before reusing it for publication. Do not transfer another project's database or trust size/mtime alone.
+
+A `DependencyClosureLimit` refusal reports known unique affected source paths in
+`changed`; that count is a lower bound when dependency expansion stops early.
+Its `added`, `removed` and `modified` fields stay zero and unclassified because
+affected dependents can have unchanged source. Graph keys, rows and bytes retain
+their existing work limits rather than becoming path counts. The shared refusal
+owner borrows the known paths and copies only a bounded diagnostic sample.
+CLI JSON/TOON and MCP preserve the prior publication and direct recovery to an
+explicit complete scan with the same root or worktree selector. Ordinary source,
+path and policy drift retains watch-once recovery; ordinary source-delta counters
+keep their existing categories.
 
 Use one operation plan for trusted no-op, affected work or a required full build. Compare lightweight ordered source records with stored hashes in a linear merge; do not decode the whole stored project just to learn which source changed. Reuse captured source bytes, compatible parse facts and valid verification evidence within that plan. This architecture preserves the planned work reduction; focused measurements confirm it, with broader platform proof at release acceptance.
 

@@ -595,7 +595,14 @@ impl From<RelationResolutionArg> for RelationResolutionFilter {
     }
 }
 
-/// Additive options used only by the detailed relation view.
+// Additive options used only by the detailed relation view.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct DetailedRelationArgs {
     /// Resume one exact generation- and purpose-bound detailed page.
@@ -618,7 +625,14 @@ struct DetailedRelationArgs {
     analysis: Box<RelationAnalysisArgs>,
 }
 
-/// Closed controls accepted only by `symbols relations --view analysis`.
+// Closed controls accepted only by `symbols relations --view analysis`.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct RelationAnalysisArgs {
     /// Closed analysis projection computed over the bounded relation traversal.
@@ -650,7 +664,14 @@ struct RelationAnalysisArgs {
     include_dead_code: bool,
 }
 
-/// Exact local anchor controls for detailed relation navigation.
+// Exact local anchor controls for detailed relation navigation.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct DetailedRelationAnchorArgs {
     /// Exact symbol name used as the detailed anchor; omit for a file anchor.
@@ -667,7 +688,14 @@ struct DetailedRelationAnchorArgs {
     symbol_signature: Option<String>,
 }
 
-/// Direction and trust filters for detailed relation navigation.
+// Direction and trust filters for detailed relation navigation.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct DetailedRelationFilterArgs {
     /// Optional classified-content selection: source, documentation, or both.
@@ -687,7 +715,14 @@ struct DetailedRelationFilterArgs {
     resolution: Option<RelationResolutionArg>,
 }
 
-/// Traversal and output ceilings for detailed relation navigation.
+// Traversal and output ceilings for detailed relation navigation.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct DetailedRelationLimitArgs {
     /// Maximum detailed traversal depth (default 1).
@@ -722,7 +757,14 @@ struct DetailedRelationLimitArgs {
     output_bytes: Option<u32>,
 }
 
-/// Optional exact symbol selector shared by the top-level slice command.
+// Optional exact symbol selector shared by the top-level slice command.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct OptionalSymbolSelectorArgs {
     /// Slice a symbol by name instead of passing line numbers.
@@ -745,7 +787,14 @@ struct OptionalSymbolSelectorArgs {
     output_bytes: u32,
 }
 
-/// Required exact symbol selector shared by the symbol slice command.
+// Required exact symbol selector shared by the symbol slice command.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Args, Debug)]
 struct RequiredSymbolSelectorArgs {
     /// Symbol name to locate.
@@ -1049,6 +1098,7 @@ impl Cli {
 
 /// Supported `ProjectAtlas` CLI commands.
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum Command {
     /// Initialize `ProjectAtlas` files in a repository.
     Init {
@@ -1416,9 +1466,17 @@ enum SnapshotAction {
     Import,
 }
 
-/// Explicit optional parser-pack lifecycle commands.
+// Explicit optional parser-pack lifecycle commands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[cfg(feature = "optional-parser-supervisor")]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum ParserPackCommand {
     /// Validate a local completed archive without installing it.
     Verify {
@@ -1454,8 +1512,16 @@ enum ParserPackCommand {
     Status,
 }
 
-/// Project root diagnostics and binding subcommands.
+// Project root diagnostics and binding subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum RootCommand {
     /// Bind a repository root and regenerate project-local MCP configs.
     Set {
@@ -1487,8 +1553,16 @@ enum RootCommand {
     },
 }
 
-/// Manual ignore management subcommands.
+// Manual ignore management subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum IgnoreCommand {
     /// List effective `ProjectAtlas` manual ignore policy.
     List,
@@ -1512,8 +1586,16 @@ enum IgnoreCommand {
     },
 }
 
-/// Purpose metadata subcommands.
+// Purpose metadata subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum PurposeCommand {
     /// Set an agent-approved purpose for an indexed path.
     Set {
@@ -1563,8 +1645,16 @@ enum PurposeCommand {
     },
 }
 
-/// Parity gate subcommands.
+// Parity gate subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum ParityCommand {
     /// Report whether the current index satisfies a parity profile.
     Report {
@@ -1574,8 +1664,16 @@ enum ParityCommand {
     },
 }
 
-/// Health metadata subcommands.
+// Health metadata subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum HealthCommand {
     /// Mark a deterministic finding as resolved for this project.
     Resolve {
@@ -1594,7 +1692,14 @@ enum HealthCommand {
     },
 }
 
-/// Read-only health report filters shared by `health` and `health-check`.
+// Read-only health report filters shared by `health` and `health-check`.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Args)]
 struct HealthReportArgs {
     /// Pagination start index after filters are applied.
@@ -1638,8 +1743,16 @@ struct HealthReportArgs {
     reason: Option<String>,
 }
 
-/// Symbol graph subcommands.
+// Symbol graph subcommands.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "Clap maps container rustdoc to command help; shared containers must preserve their owning command description"
+    )
+)]
 #[derive(Debug, Subcommand)]
+#[command(defer = true)]
 enum SymbolsCommand {
     /// Rebuild symbols for indexed files.
     Build {
@@ -5867,7 +5980,7 @@ mod tests {
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
     #[cfg(unix)]
     use super::{RootTransition, bind_project_root, build_repository_control_report};
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _};
     use notify::EventKind;
     #[cfg(unix)]
     use projectatlas_core::CanonicalProjectRoot;
@@ -6902,6 +7015,119 @@ mod tests {
                 "CLI did not return a private, actionable supported-migration handoff",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_defers_arguments_for_unselected_root_commands() -> Result<(), Box<dyn Error>> {
+        let definition = Cli::command();
+        let scan = definition
+            .find_subcommand("scan")
+            .ok_or_else(|| std::io::Error::other("scan command is missing"))?;
+        require_condition(
+            !scan
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("text-index-max-bytes")),
+            "CLI constructed arguments for an unselected root command",
+        )
+    }
+
+    #[test]
+    fn cli_defers_unused_nested_arguments_after_parsing() -> Result<(), Box<dyn Error>> {
+        let mut definition = Cli::command();
+        let matches = definition.try_get_matches_from_mut([
+            "projectatlas",
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--limit",
+            "7",
+        ])?;
+        let relations = matches
+            .subcommand_matches("symbols")
+            .and_then(|symbols| symbols.subcommand_matches("relations"))
+            .ok_or_else(|| std::io::Error::other("selected relations command is missing"))?;
+        require_condition(
+            relations.get_one::<usize>("limit") == Some(&7)
+                && relations.get_one::<String>("file").map(String::as_str) == Some("src/lib.rs"),
+            "selected nested command arguments were not parsed",
+        )?;
+        let list = definition
+            .find_subcommand("symbols")
+            .and_then(|symbols| symbols.find_subcommand("list"))
+            .ok_or_else(|| std::io::Error::other("symbols list command is missing"))?;
+        require_condition(
+            !list
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("limit")),
+            "CLI constructed arguments for an unselected nested command",
+        )
+    }
+
+    #[test]
+    fn cli_full_build_exposes_all_command_arguments() -> Result<(), Box<dyn Error>> {
+        let mut definition = Cli::command();
+        definition.build();
+        let scan = definition
+            .find_subcommand("scan")
+            .ok_or_else(|| std::io::Error::other("scan command is missing"))?;
+        require_condition(
+            scan.get_arguments()
+                .any(|argument| argument.get_long() == Some("text-index-max-bytes")),
+            "full CLI introspection omitted root command arguments",
+        )?;
+        let list = definition
+            .find_subcommand("symbols")
+            .and_then(|symbols| symbols.find_subcommand("list"))
+            .ok_or_else(|| std::io::Error::other("symbols list command is missing"))?;
+        require_condition(
+            list.get_arguments()
+                .any(|argument| argument.get_long() == Some("limit")),
+            "full CLI introspection omitted nested command arguments",
+        )?;
+        definition.debug_assert();
+        Ok(())
+    }
+
+    /// Check that building arguments retains each owning command's help metadata.
+    fn require_stable_command_descriptions<T: clap::Subcommand>() -> Result<(), Box<dyn Error>> {
+        let mut definition = T::augment_subcommands(clap::Command::new("projectatlas"));
+        let descriptions: Vec<_> = definition
+            .get_subcommands()
+            .map(|command| {
+                (
+                    command.get_name().to_owned(),
+                    command.get_about().cloned(),
+                    command.get_long_about().cloned(),
+                )
+            })
+            .collect();
+        definition.build();
+        for (name, about, long_about) in descriptions {
+            let command = definition
+                .find_subcommand(&name)
+                .ok_or_else(|| io::Error::other(format!("command {name} is missing")))?;
+            require_condition(
+                command.get_about() == about.as_ref()
+                    && command.get_long_about() == long_about.as_ref(),
+                &format!("argument construction replaced command {name} help metadata"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_argument_construction_preserves_command_descriptions() -> Result<(), Box<dyn Error>> {
+        require_stable_command_descriptions::<Command>()?;
+        require_stable_command_descriptions::<super::RootCommand>()?;
+        require_stable_command_descriptions::<super::IgnoreCommand>()?;
+        require_stable_command_descriptions::<super::PurposeCommand>()?;
+        require_stable_command_descriptions::<super::ParityCommand>()?;
+        require_stable_command_descriptions::<HealthCommand>()?;
+        require_stable_command_descriptions::<super::SymbolsCommand>()?;
+        #[cfg(feature = "optional-parser-supervisor")]
+        require_stable_command_descriptions::<ParserPackCommand>()?;
         Ok(())
     }
 

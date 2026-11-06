@@ -16,6 +16,44 @@ The one-shot cost is therefore tied to all entries and source bytes, with sortin
 
 ## Decisions
 
+### Construct arguments only for the selected CLI command
+
+The completed four-platform campaign on `242c23c` passed 1,440 of 1,441
+checks. Linux detailed-navigation sampled RSS exceeded the unchanged 1.10
+limit. Reconstructed local process maps showed extra file-image residency
+already after CLI parsing, with nearly equal heap usage. This narrows the
+investigation; it does not establish the hosted failure's mechanism.
+
+The CLI's closed command tree eagerly constructed argument definitions for
+unselected commands. Use the locked Clap version's native enum-level deferred
+construction consistently at the root and nested command enums. Keep names,
+descriptions and aliases registered; parsing constructs the selected argument
+subtree. Full schema introspection explicitly calls `Command::build`, which
+recursively constructs the complete tree. Existing parsing, help, defaults,
+required/conflicting arguments and explicit database selection must remain
+compatible. No custom parser, global schema cache, dependency, profile or
+feature change is needed.
+
+Clap also maps `Args` and nested `Subcommand` container rustdoc into command-level
+help. Deferred construction would apply that metadata after the owning variant's
+description. The private shared argument groups and nested registries therefore
+retain their source responsibility comments and field/variant rustdoc without
+container rustdoc. Each records a narrow expected private-documentation lint
+with its reason. The expectation is attached only to non-test builds because
+Clippy does not emit this check for test builds; this avoids an unfulfilled
+expectation there. The command
+variants remain the sole owners of public descriptions. A registry-derived regression
+checks every command enum's short and long descriptions before and after full
+construction. Clearing `about` on the groups would erase the owning description
+too; repeating descriptions or adding a parser wrapper would duplicate authority.
+
+Causal tests distinguish unselected root and nested argument construction and
+verify full schema inspection. Compare the ordinary shipping CLI's help tree
+and focused startup mapping evidence before and after this change, then require
+the unchanged full installed matrix. The prior failure stays binding until a
+genuinely changed candidate passes; local diagnostics cannot waive it. This
+work belongs to tasks 2.4, 3.1 and 3.2.
+
 ### Settle the architecture before expanding measurements
 
 Use one validated operation plan in the existing shared indexing owners. Reuse their current no-op, incremental and full-work states rather than adding a parallel framework. Capture root identity, policy, publication generation and trustworthy observation together, then select the required work once.
