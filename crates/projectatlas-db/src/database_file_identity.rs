@@ -728,8 +728,8 @@ mod tests {
         verify_reported_lock_stage(&path, "after metadata", &connections)?;
         let _namespace = fs::symlink_metadata(&path)?;
         verify_reported_lock_stage(&path, "after symlink metadata", &connections)?;
-        let _volume = whichdisk::resolve(&path)?;
-        verify_reported_lock_stage(&path, "after filesystem resolution", &connections)?;
+        crate::sqlite_profile::validate_database_location(&path)?;
+        verify_reported_lock_stage(&path, "after public location validation", &connections)?;
         let _location = crate::sqlite_profile::inspect_database_location(&path)?;
         verify_reported_lock_stage(&path, "after database location", &connections)?;
         let store = crate::AtlasStore::open(&path)?;

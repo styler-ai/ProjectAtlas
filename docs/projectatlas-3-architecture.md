@@ -1242,6 +1242,19 @@ or empty filesystem identities remain typed `uncertain`, and known network or
 distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
 back to a weaker journal or synchronous mode.
 
+Database-location checks must preserve locks held by every live SQLite connection.
+On macOS, the location owner uses the locked `rustix` pathname `statfs` API to read
+the exact canonical probe's mount, source and filesystem type together without
+opening a database descriptor. This avoids `whichdisk` 0.7's Apple regular-file
+pin: closing that independent descriptor releases the process's POSIX locks even
+while SQLite believes it still holds them. Existing aliases, missing-path parent
+inspection, native pathname bytes and filesystem refusal rules remain intact;
+the check does not infer the selected file's volume from its parent. Windows and
+Linux retain their existing resolution paths.
+Managed-name case classification on macOS queries directory volume capabilities;
+it rejects an existing non-directory lookup parent before that query, so refusing
+an invalid managed path does not open and close a regular-file parent.
+
 SQLite auto-checkpoint remains the engine baseline for structural publication.
 Introduced in schema 11 and preserved by schema 22, the telemetry lifecycle
 additionally counts committed telemetry writes and, after 1,024

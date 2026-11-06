@@ -105,6 +105,13 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 - **AND** retirement ends active read/write transactions and releases unused caches before retaining only an idle connection; failed cleanup invalidates witness authority and closes through SQLite
 - **AND** final release preserves aliases, replacement detection and a replacement database's WAL/SHM state while retaining bounded resources
 
+#### Scenario: Database-location inspection preserves active SQLite locks
+- **WHEN** initial store setup, writable/read-only reopen, snapshot admission or public validation inspects the selected database's filesystem while a SQLite connection uses that file
+- **THEN** location inspection does not open or close an independent database descriptor, including inside a filesystem dependency, and the connection's kernel locks remain effective
+- **AND** the exact canonical file's filesystem is inspected without inferring its volume from its parent, device number or lexical mount ancestry; aliases and native pathname bytes remain supported
+- **AND** missing databases retain nearest-existing-parent inspection, while known network filesystems remain unsupported and incomplete or unknown filesystem evidence remains uncertain before mutation
+- **AND** managed-name case classification rejects an existing non-directory lookup parent before probing its filesystem capabilities, preserving SQLite locks on a refused regular-file parent during ordinary admission and reset
+
 #### Scenario: Cancellation or failed write
 - **WHEN** refresh is cancelled, reaches its deadline or fails while staging or publishing
 - **THEN** the prior valid index, native identity and approved purposes remain intact and an adequate retry can succeed

@@ -686,8 +686,9 @@ replacement-WAL preservation is also covered directly.
 
 Metadata-only database checks do not wait for a FIFO writer and preserve
 follow-symlink alias semantics. Other source/control readers retain their shared
-nonblocking regular-file opener. Production database raw-open search found only
-the two corrected identity paths; hydration candidate-file I/O occurs after its
+nonblocking regular-file opener. The original production raw-open search found
+the two corrected identity paths; it did not establish the behavior of
+dependency-owned path probes. Hydration candidate-file I/O occurs after its
 private store is dropped and parent-directory opens are fsync operations. Coverage
 includes all six separate-process lock cases, real-store retirement/clones,
 authorizer-denied rollback, read/write transaction cleanup with a checkpoint
@@ -697,6 +698,43 @@ continuity/cancellation controls. Checkpoint controls prove an active read block
 cleanup and finished/rejected reads do not; idle identity connections are not
 misclassified as leaked transactions. Installed native proof and every unchanged
 four-platform performance target remain required.
+
+Native Mac staging subsequently proves another manifestation at database-location
+preflight: metadata and canonicalization preserve an active reader's kernel lock,
+but `whichdisk::resolve(database_file)` loses it while SQLite still reports
+SHARED. The plain-WAL sequence passes. The locked dependency is `whichdisk` 0.7.0;
+its Apple observation opens and closes the selected regular file. Earlier
+inspection of a cached 0.6.0 source did not describe this build. This affects new
+store post-initialization checks, existing writable/read-only opens, public
+location validation and read-snapshot admission while other connections are live.
+
+At the existing SQLite location owner, use the workspace's locked `rustix`
+pathname `statfs` on macOS. It returns mount point, mount source and filesystem
+type together without opening a database descriptor. Preserve the exact canonical
+probe, native pathname bytes, location comparison and local/network/unknown
+classification; do not infer a file's volume from its parent, a device number or
+lexical mount ancestry. Missing paths retain nearest-existing-parent inspection;
+aliases and APFS firmlinks retain the exact selected filesystem. Decode bounded
+kernel C strings completely, rejecting absent termination, empty values and an
+invalid filesystem-type encoding. Windows and Linux resolution, including the
+existing Btrfs fallback, remain unchanged. The direct locked `rustix` dependency
+is Apple-target-only; no new package, unsafe application code, schema or VFS is
+introduced. Native kernel-lock controls cover public/internal location checks and
+store reopen/retirement. The diagnostic's direct unsafe dependency probe is
+replaced by the public product validation boundary; its failing native original
+is retained as causal evidence, not invoked inside a passing product workflow.
+
+The remaining Apple dependency call belongs to managed-name case classification,
+which queries a containing directory's volume capabilities. A case-aliased
+database name beneath a regular-file `.projectatlas` parent could reach that
+query before admission rejected the invalid parent. Require the resolved lookup
+parent to be a directory before the capability query; do not open a regular-file
+parent merely to classify its child's name. A separate-process DELETE-journal
+writer proves that ordinary admission and reset refusals preserve an existing
+SQLite reserved lock on that parent. Valid directory/case/Unicode and external
+path behavior retain the existing native controls. This is a type check for
+ordinary invalid inputs; it does not introduce an atomic namespace guarantee
+against unsupported adversarial replacement of the lookup parent during probing.
 
 ## Regular-file races across source and control readers
 

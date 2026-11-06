@@ -157,6 +157,7 @@ pub(crate) fn inspect_database_location(path: &Path) -> DbResult<DatabaseLocatio
 }
 
 /// Resolve the canonical probe and its owning filesystem.
+#[cfg(not(target_os = "macos"))]
 fn resolve_filesystem_location(
     absolute: &Path,
     probe: &Path,
@@ -179,6 +180,74 @@ fn resolve_filesystem_location(
             format!("filesystem resolution failed: {}", bounded_reason(&source)),
         )),
     }
+}
+
+/// Inspect the exact Apple filesystem without opening a database descriptor.
+///
+/// `whichdisk` 0.7 pins regular files on Apple platforms. Closing that independent
+/// descriptor releases this process's SQLite POSIX locks. A pathname `statfs`
+/// returns all three fields this gate needs together, without opening the file or
+/// inferring its volume from its parent, device number or mount-path ancestry.
+#[cfg(target_os = "macos")]
+fn resolve_filesystem_location(
+    absolute: &Path,
+    probe: &Path,
+) -> DbResult<(PathBuf, PathBuf, OsString, String)> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let resolve = || -> io::Result<_> {
+        let canonical_probe = probe.canonicalize()?;
+        let filesystem = rustix::fs::statfs(&canonical_probe)?;
+        let mount_point = PathBuf::from(OsString::from_vec(kernel_filesystem_field(
+            &filesystem.f_mntonname,
+        )?));
+        let device = OsString::from_vec(kernel_filesystem_field(&filesystem.f_mntfromname)?);
+        let filesystem_type = kernel_filesystem_type(&filesystem.f_fstypename)?;
+        if !mount_point.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "filesystem mount point is not absolute",
+            ));
+        }
+        Ok((canonical_probe, mount_point, device, filesystem_type))
+    };
+    resolve().map_err(|source| {
+        filesystem_uncertain(
+            absolute,
+            None,
+            None,
+            format!("filesystem resolution failed: {}", bounded_reason(&source)),
+        )
+    })
+}
+
+/// Decode one bounded kernel C string without losing native pathname bytes.
+#[cfg(any(target_os = "macos", test))]
+fn kernel_filesystem_field(field: &[std::ffi::c_char]) -> io::Result<Vec<u8>> {
+    let length = field.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "filesystem field is not NUL terminated",
+        )
+    })?;
+    if length == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "filesystem field is empty",
+        ));
+    }
+    Ok(field[..length]
+        .iter()
+        .map(|byte| byte.to_ne_bytes()[0])
+        .collect())
+}
+
+/// Decode a filesystem classifier, rejecting invalid text instead of losing bytes.
+#[cfg(any(target_os = "macos", test))]
+fn kernel_filesystem_type(field: &[std::ffi::c_char]) -> io::Result<String> {
+    String::from_utf8(kernel_filesystem_field(field)?)
+        .map(|name| name.trim().to_ascii_lowercase())
+        .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))
 }
 
 /// One decoded mount-inventory row used to select the canonical path owner.
@@ -644,6 +713,52 @@ fn bounded_reason(source: &io::Error) -> String {
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn kernel_filesystem_fields_preserve_native_bytes_and_require_complete_values()
+    -> Result<(), Box<dyn Error>> {
+        let field = [b'/', 0xff, 0, b'x'].map(|byte| std::ffi::c_char::from_ne_bytes([byte]));
+        if kernel_filesystem_field(&field)? != [b'/', 0xff]
+            || kernel_filesystem_field(&[]).is_ok()
+            || kernel_filesystem_field(&[0]).is_ok()
+            || kernel_filesystem_field(&[1]).is_ok()
+        {
+            return Err(io::Error::other("incomplete or changed filesystem field accepted").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn kernel_filesystem_type_rejects_invalid_text_before_classification()
+    -> Result<(), Box<dyn Error>> {
+        let invalid = [0xff, 0].map(|byte| std::ffi::c_char::from_ne_bytes([byte]));
+        let valid = (*b" APFS\0").map(|byte| std::ffi::c_char::from_ne_bytes([byte]));
+        if kernel_filesystem_type(&invalid).is_ok() || kernel_filesystem_type(&valid)? != "apfs" {
+            return Err(io::Error::other("invalid filesystem classifier accepted").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_location_follows_aliases_to_the_exact_canonical_file() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("atlas-ü.db");
+        let alias = temp.path().join("selected.db");
+        fs::write(&database, [])?;
+        std::os::unix::fs::symlink(&database, &alias)?;
+        let direct = inspect_database_location(&database)?;
+        let selected = inspect_database_location(&alias)?;
+        if !selected.database_exists
+            || selected.canonical_probe != database.canonicalize()?
+            || selected != direct
+        {
+            return Err(io::Error::other("database alias changed the resolved location").into());
+        }
+        revalidate_database_location(&alias, &direct)?;
+        Ok(())
+    }
 
     #[test]
     fn filesystem_classification_distinguishes_local_remote_and_unknown() {
