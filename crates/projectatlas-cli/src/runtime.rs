@@ -11014,6 +11014,12 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("source");
         fs::create_dir(&root)?;
+        #[cfg(unix)]
+        let root = {
+            let alias = temp.path().join("source-alias");
+            std::os::unix::fs::symlink(&root, &alias)?;
+            alias
+        };
         fs::create_dir(root.join(".projectatlas"))?;
         let database = root.join(".projectatlas/projectatlas.db");
         drop(AtlasStore::open_for_project(&database, &root)?);
@@ -11038,7 +11044,7 @@ mod tests {
         fs::write(&config, "[project]\nroot = \".\"\n")?;
         require_eq(
             &resolved_mcp_config_path(&database, None)?,
-            &Some(absolute_path(&config)?),
+            &Some(expected.join("projectatlas.toml")),
             "current flat configuration discovery",
         )?;
         require_eq(
