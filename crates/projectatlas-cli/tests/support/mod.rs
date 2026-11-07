@@ -8,6 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
@@ -16,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub(super) const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
+pub(super) const MCP_DIAGNOSTIC_DIR_ENV: &str = "PROJECTATLAS_MCP_DIAGNOSTIC_DIR";
 pub(super) const PARSER_PACK_RELEASE_VERIFIER_ENV: &str =
     "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER";
 pub(super) const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
@@ -113,7 +115,7 @@ pub(super) fn run_mcp_stdio_with_env(
 pub(super) struct McpStdioCleanupPacket {
     pub(super) child: Child,
     pub(super) stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-    pub(super) stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    pub(super) stderr_reader: thread::JoinHandle<io::Result<McpStderrCapture>>,
 }
 
 /// Reap one test-owned MCP stdio packet after the observer has returned.
@@ -204,7 +206,7 @@ pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         &mut dyn FnMut(
             Child,
             thread::JoinHandle<io::Result<Vec<u8>>>,
-            thread::JoinHandle<io::Result<Vec<u8>>>,
+            thread::JoinHandle<io::Result<McpStderrCapture>>,
         ),
     >,
 ) -> Result<String, Box<dyn Error>> {
@@ -250,7 +252,7 @@ pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("mcp stdout was not piped"))?;
-    let mut stderr_pipe = child
+    let stderr_pipe = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("mcp stderr was not piped"))?;
@@ -268,11 +270,7 @@ pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         }
         Ok(output)
     });
-    let stderr_reader = thread::spawn(move || -> io::Result<Vec<u8>> {
-        let mut output = Vec::new();
-        stderr_pipe.read_to_end(&mut output)?;
-        Ok(output)
-    });
+    let stderr_reader = thread::spawn(move || McpStderrCapture::read(stderr_pipe));
 
     let response_result = (|| -> Result<(), Box<dyn Error>> {
         let stdin = stdin
@@ -320,130 +318,152 @@ pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
         }
         Ok(())
     })();
-    if !hold_stdin_until_observation {
-        stdin.take();
-    }
-    drop(response_receiver);
+    let shutdown_result = (|| -> Result<(Vec<u8>, McpShutdownReport), Box<dyn Error>> {
+        if !hold_stdin_until_observation {
+            stdin.take();
+        }
+        drop(response_receiver);
 
-    if observer_delay.is_some()
-        && (!hold_stdin_until_observation || exit_probe_error.is_some())
-        && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
-            &mut child,
-            "projectatlas mcp",
-            exit_probe_error.take(),
-        )
-    {
-        let kill_result = kill_child(&mut child);
-        stdin.take();
-        let status_after_kill = child.try_wait();
-        if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
-            if let Some(handoff) = handoff_live_child {
-                handoff(child, stdout_reader, stderr_reader);
-            } else {
-                drop(child);
-                drop(stdout_reader);
-                drop(stderr_reader);
+        if observer_delay.is_some()
+            && (!hold_stdin_until_observation || exit_probe_error.is_some())
+            && let Err(error) = synchronize_prompt_exit_before_delayed_observation(
+                &mut child,
+                "projectatlas mcp",
+                exit_probe_error.take(),
+            )
+        {
+            let kill_result = kill_child(&mut child);
+            stdin.take();
+            let status_after_kill = child.try_wait();
+            if kill_result.is_err() && !matches!(&status_after_kill, Ok(Some(_))) {
+                if let Some(handoff) = handoff_live_child {
+                    handoff(child, stdout_reader, stderr_reader);
+                } else {
+                    drop(child);
+                    drop(stdout_reader);
+                    drop(stderr_reader);
+                }
+                let mut diagnostic = format!(
+                    "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+                );
+                if let Some(kill_error) = kill_result.as_ref().err() {
+                    diagnostic.push_str("; termination failed: ");
+                    diagnostic.push_str(&kill_error.to_string());
+                }
+                if let Err(probe_error) = status_after_kill {
+                    diagnostic.push_str("; re-probe failed after termination attempt: ");
+                    diagnostic.push_str(&probe_error.to_string());
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
             }
-            let mut diagnostic = format!(
-                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup incomplete: child/readers detached"
+            let status = child.wait()?;
+            let _stdout = stdout_reader
+                .join()
+                .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+            let diagnostic = format!(
+                "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}, {stderr}"
             );
-            if let Some(kill_error) = kill_result.as_ref().err() {
-                diagnostic.push_str("; termination failed: ");
-                diagnostic.push_str(&kill_error.to_string());
-            }
-            if let Err(probe_error) = status_after_kill {
-                diagnostic.push_str("; re-probe failed after termination attempt: ");
-                diagnostic.push_str(&probe_error.to_string());
-            }
             return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
-        let status = child.wait()?;
-        let stdout = stdout_reader
-            .join()
-            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
-        let diagnostic = format!(
-            "projectatlas mcp exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
-        );
-        let _ = (stdout, stderr);
-        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-    }
 
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
-    if let Some(delay) = observer_delay {
-        thread::sleep(delay);
-    }
-    let mut timeout_reason = None;
-    let mut accepted_completion = false;
-    let mut pre_termination_probe_error = None;
-    let mut post_termination_probe_error = None;
-    loop {
-        if Instant::now() >= deadline {
-            timeout_reason = Some("still running at deadline".to_string());
-            break;
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| io::Error::other("MCP process deadline overflowed"))?;
+        if let Some(delay) = observer_delay {
+            thread::sleep(delay);
         }
-        let (status, observed_at) = {
-            let status = child.try_wait()?;
-            let observed_at = Instant::now();
-            (status, observed_at)
-        };
-        match status {
-            Some(_) if observed_at < deadline => {
-                accepted_completion = true;
+        let mut timeout_reason = None;
+        let mut accepted_completion = false;
+        let mut pre_termination_probe_error = None;
+        let mut post_termination_probe_error = None;
+        loop {
+            if Instant::now() >= deadline {
+                timeout_reason = Some("still running at deadline".to_string());
                 break;
             }
-            Some(_) => {
-                timeout_reason = Some(format!(
-                    "completed after deadline (observed_at={observed_at:?})"
-                ));
-                break;
-            }
-            None => {
-                let remaining = deadline.saturating_duration_since(observed_at);
-                if remaining.is_zero() {
-                    timeout_reason = Some("still running at deadline".to_string());
+            let (status, observed_at) = {
+                let status = child.try_wait()?;
+                let observed_at = Instant::now();
+                (status, observed_at)
+            };
+            match status {
+                Some(_) if observed_at < deadline => {
+                    accepted_completion = true;
                     break;
                 }
-                thread::sleep(Duration::from_millis(100).min(remaining));
+                Some(_) => {
+                    timeout_reason = Some(format!(
+                        "completed after deadline (observed_at={observed_at:?})"
+                    ));
+                    break;
+                }
+                None => {
+                    let remaining = deadline.saturating_duration_since(observed_at);
+                    if remaining.is_zero() {
+                        timeout_reason = Some("still running at deadline".to_string());
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100).min(remaining));
+                }
             }
         }
-    }
 
-    if timeout_reason.is_some() {
-        let (status, observed_at) = {
-            let status = match cleanup_probe_error.take() {
-                Some(error) => {
-                    pre_termination_probe_error = Some(error);
-                    None
-                }
-                None => match child.try_wait() {
-                    Ok(status) => status,
-                    Err(error) => {
+        if timeout_reason.is_some() {
+            let (status, observed_at) = {
+                let status = match cleanup_probe_error.take() {
+                    Some(error) => {
                         pre_termination_probe_error = Some(error);
                         None
                     }
-                },
+                    None => match child.try_wait() {
+                        Ok(status) => status,
+                        Err(error) => {
+                            pre_termination_probe_error = Some(error);
+                            None
+                        }
+                    },
+                };
+                let observed_at = Instant::now();
+                (status, observed_at)
             };
-            let observed_at = Instant::now();
-            (status, observed_at)
-        };
-        if status.is_none() {
-            let kill_result = kill_child(&mut child);
-            let status_after_kill = match exit_probe_error.take() {
-                Some(error) => Err(error),
-                None => child.try_wait(),
-            };
-            let status_after_kill = match status_after_kill {
-                Ok(status) => status,
-                Err(error) if kill_result.is_ok() => {
-                    post_termination_probe_error = Some(error);
-                    None
-                }
-                Err(error) => {
+            if status.is_none() {
+                let kill_result = kill_child(&mut child);
+                let status_after_kill = match exit_probe_error.take() {
+                    Some(error) => Err(error),
+                    None => child.try_wait(),
+                };
+                let status_after_kill = match status_after_kill {
+                    Ok(status) => status,
+                    Err(error) if kill_result.is_ok() => {
+                        post_termination_probe_error = Some(error);
+                        None
+                    }
+                    Err(error) => {
+                        stdin.take();
+                        if let Some(handoff) = handoff_live_child {
+                            handoff(child, stdout_reader, stderr_reader);
+                        } else {
+                            drop(child);
+                            drop(stdout_reader);
+                            drop(stderr_reader);
+                        }
+                        let mut diagnostic = format!(
+                            "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                            timeout_reason.as_deref().unwrap_or("timeout")
+                        );
+                        if let Some(kill_error) = kill_result.as_ref().err() {
+                            diagnostic.push_str("; termination failed: ");
+                            diagnostic.push_str(&kill_error.to_string());
+                        }
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+                    }
+                };
+                if let Err(error) = kill_result
+                    && status_after_kill.is_none()
+                {
                     stdin.take();
                     if let Some(handoff) = handoff_live_child {
                         handoff(child, stdout_reader, stderr_reader);
@@ -452,79 +472,70 @@ pub(super) fn run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
                         drop(stdout_reader);
                         drop(stderr_reader);
                     }
-                    let mut diagnostic = format!(
-                        "projectatlas mcp did not exit after stdin closed: {} status=unknown (re-probe failed after termination attempt: {error}; cleanup incomplete: child/readers detached)",
+                    let diagnostic = format!(
+                        "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
                         timeout_reason.as_deref().unwrap_or("timeout")
                     );
-                    if let Some(kill_error) = kill_result.as_ref().err() {
-                        diagnostic.push_str("; termination failed: ");
-                        diagnostic.push_str(&kill_error.to_string());
-                    }
                     return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
                 }
-            };
-            if let Err(error) = kill_result
-                && status_after_kill.is_none()
-            {
-                stdin.take();
-                if let Some(handoff) = handoff_live_child {
-                    handoff(child, stdout_reader, stderr_reader);
-                } else {
-                    drop(child);
-                    drop(stdout_reader);
-                    drop(stderr_reader);
-                }
-                let diagnostic = format!(
-                    "projectatlas mcp did not exit after stdin closed: {} status=still-running at deadline (termination failed: {error}; cleanup incomplete: operating system refused termination; child was not reaped; child/readers detached)",
-                    timeout_reason.as_deref().unwrap_or("timeout")
-                );
-                return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
+            } else if timeout_reason.as_deref() == Some("still running at deadline") {
+                timeout_reason = Some(format!(
+                    "completed after deadline (observed_at={observed_at:?})"
+                ));
             }
-        } else if timeout_reason.as_deref() == Some("still running at deadline") {
-            timeout_reason = Some(format!(
-                "completed after deadline (observed_at={observed_at:?})"
-            ));
         }
-    }
-    stdin.take();
-    let wait_result = child.wait();
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
-    if let Some(reason) = timeout_reason {
-        let mut diagnostic = format!("projectatlas mcp did not exit after stdin closed: {reason}");
-        if let Some(error) = pre_termination_probe_error {
-            diagnostic.push_str(" status=unknown (re-probe failed before termination attempt: ");
-            diagnostic.push_str(&error.to_string());
-            diagnostic.push(')');
+        stdin.take();
+        let wait_result = child.wait();
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stdout reader panicked"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_panic| io::Error::other("mcp stderr reader panicked"))??;
+        if let Some(reason) = timeout_reason {
+            let mut diagnostic =
+                format!("projectatlas mcp did not exit after stdin closed: {reason}");
+            if let Some(error) = pre_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed before termination attempt: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Some(error) = post_termination_probe_error {
+                diagnostic
+                    .push_str(" status=unknown (re-probe failed after successful termination: ");
+                diagnostic.push_str(&error.to_string());
+                diagnostic.push(')');
+            }
+            if let Ok(status) = &wait_result {
+                diagnostic.push_str(" status=");
+                diagnostic.push_str(&status.to_string());
+            }
+            write!(diagnostic, " {stderr}")?;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
-        if let Some(error) = post_termination_probe_error {
-            diagnostic.push_str(" status=unknown (re-probe failed after successful termination: ");
-            diagnostic.push_str(&error.to_string());
-            diagnostic.push(')');
+        let status = wait_result?;
+        if !accepted_completion || !status.success() {
+            return Err(io::Error::other(format!(
+                "projectatlas mcp failed: child_status={status}, {stderr}"
+            ))
+            .into());
         }
-        if let Ok(status) = &wait_result {
-            diagnostic.push_str(" status=");
-            diagnostic.push_str(&status.to_string());
+        Ok((stdout, McpShutdownReport { status, stderr }))
+    })();
+    let (stdout, report) = match shutdown_result {
+        Ok(completion) => completion,
+        Err(shutdown) => {
+            return Err(match response_result {
+                Ok(()) => shutdown,
+                Err(operation) => Box::new(McpTestCompletionError {
+                    operation,
+                    shutdown: Err(shutdown),
+                }),
+            });
         }
-        if !stderr.is_empty() {
-            diagnostic.push_str(" stderr=");
-            diagnostic.push_str(&String::from_utf8_lossy(&stderr));
-        }
-        return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
-    }
-    response_result?;
-    let status = wait_result?;
-    if !accepted_completion || !status.success() {
-        return Err(io::Error::other(format!(
-            "projectatlas mcp failed: {}",
-            String::from_utf8_lossy(&stderr)
-        ))
-        .into());
-    }
+    };
+    complete_mcp_test_after_shutdown(response_result, || Ok(report))?;
     Ok(String::from_utf8(stdout)?)
 }
 
@@ -1095,12 +1106,164 @@ pub(super) fn workspace_root() -> Result<std::path::PathBuf, Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("workspace root not found").into())
 }
 
+/// Release a bounded MCP stdout producer before joining its reader.
+pub(super) fn disconnect_mcp_test_responses(responses: &mut mpsc::Receiver<io::Result<String>>) {
+    let (_sender, disconnected) = mpsc::channel();
+    *responses = disconnected;
+}
+
+/// Drain MCP stderr while retaining a fixed prefix and exact byte count.
+#[derive(Debug, Default)]
+pub(super) struct McpStderrCapture {
+    pub(super) prefix: Vec<u8>,
+    pub(super) total_bytes: u64,
+}
+
+impl McpStderrCapture {
+    pub(super) fn read(mut reader: impl Read) -> io::Result<Self> {
+        let mut prefix = Vec::with_capacity(4_096);
+        reader.by_ref().take(4_096).read_to_end(&mut prefix)?;
+        let discarded = io::copy(&mut reader, &mut io::sink())?;
+        let total_bytes = discarded
+            .checked_add(prefix.len() as u64)
+            .ok_or_else(|| io::Error::other("MCP stderr byte count overflowed"))?;
+        Ok(Self {
+            prefix,
+            total_bytes,
+        })
+    }
+}
+
+impl std::fmt::Display for McpStderrCapture {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            output,
+            "stderr_bytes={}, stderr_truncated={}, stderr_prefix={}",
+            self.total_bytes,
+            self.total_bytes > self.prefix.len() as u64,
+            String::from_utf8_lossy(&self.prefix)
+        )
+    }
+}
+
+/// Retain child completion evidence until the primary operation is assessed.
+pub(super) struct McpShutdownReport {
+    pub(super) status: std::process::ExitStatus,
+    pub(super) stderr: McpStderrCapture,
+}
+
+impl std::fmt::Display for McpShutdownReport {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(output, "child_status={}, {}", self.status, self.stderr)
+    }
+}
+
+impl std::fmt::Debug for McpShutdownReport {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, output)
+    }
+}
+
+/// Keep completion evidence while preserving the primary typed error as the source.
+struct McpTestCompletionError {
+    operation: Box<dyn Error>,
+    shutdown: Result<McpShutdownReport, Box<dyn Error>>,
+}
+
+impl std::fmt::Display for McpTestCompletionError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(output, "{}; MCP shutdown ", self.operation)?;
+        match &self.shutdown {
+            Ok(report) => write!(output, "completed: {report}"),
+            Err(error) => write!(output, "also failed: {error}"),
+        }
+    }
+}
+
+impl std::fmt::Debug for McpTestCompletionError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, output)
+    }
+}
+
+impl Error for McpTestCompletionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.operation.as_ref())
+    }
+}
+
 pub(super) fn complete_mcp_test_after_shutdown<T>(
     operation_result: Result<T, Box<dyn Error>>,
-    shutdown: impl FnOnce() -> Result<(), Box<dyn Error>>,
+    shutdown: impl FnOnce() -> Result<McpShutdownReport, Box<dyn Error>>,
 ) -> Result<T, Box<dyn Error>> {
-    let shutdown_result = shutdown();
-    let value = operation_result?;
-    shutdown_result?;
-    Ok(value)
+    match (operation_result, shutdown()) {
+        (Ok(value), Ok(_report)) => Ok(value),
+        (Ok(_value), Err(shutdown)) => Err(shutdown),
+        (Err(operation), shutdown) => Err(Box::new(McpTestCompletionError {
+            operation,
+            shutdown,
+        })),
+    }
+}
+
+/// Emit native fixture phase evidence only when its diagnostic host root is selected.
+pub(super) fn trace_mcp_test_phase(arguments: std::fmt::Arguments<'_>) {
+    if std::env::var_os(MCP_DIAGNOSTIC_DIR_ENV).is_some() {
+        drop(writeln!(io::stderr().lock(), "{arguments}"));
+    }
+}
+
+/// Bounded output from a profiler, distinct from the observed MCP child's state.
+pub(super) struct McpTimeoutProfile {
+    pub(super) profiler_status: std::process::ExitStatus,
+    pub(super) report_prefix: Vec<u8>,
+    pub(super) profiler_log_prefix: Vec<u8>,
+}
+
+/// Capture a bounded profiler report in an explicitly selected host directory.
+pub(super) fn capture_mcp_timeout_profile(
+    profiler: &Path,
+    child_pid: u32,
+    directory: &Path,
+) -> io::Result<McpTimeoutProfile> {
+    if !directory.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MCP diagnostic directory must be an explicit absolute host path",
+        ));
+    }
+    let mut report = tempfile::NamedTempFile::new_in(directory)?;
+    let mut profiler_log = tempfile::NamedTempFile::new_in(directory)?;
+    // Keep the existing process/file bounds; regular files also bound stderr.
+    let output = assert_cmd::Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"exec >"$4" 2>&1; ulimit -c 0 && ulimit -f 256 && exec "$1" "$2" 1 1 -file "$3""#,
+            "projectatlas-mcp-timeout",
+        ])
+        .arg(profiler)
+        .arg(child_pid.to_string())
+        .arg(report.path())
+        .arg(profiler_log.path())
+        .timeout(Duration::from_secs(5))
+        .output()?;
+    let mut report_prefix = Vec::new();
+    report
+        .as_file_mut()
+        .take(32_768)
+        .read_to_end(&mut report_prefix)?;
+    let mut profiler_log_prefix = Vec::new();
+    profiler_log
+        .as_file_mut()
+        .take(4_096)
+        .read_to_end(&mut profiler_log_prefix)?;
+    for captured in [&output.stdout, &output.stderr] {
+        let remaining = 4_096_usize.saturating_sub(profiler_log_prefix.len());
+        profiler_log_prefix.extend_from_slice(&captured[..captured.len().min(remaining)]);
+    }
+    Ok(McpTimeoutProfile {
+        profiler_status: output.status,
+        report_prefix,
+        profiler_log_prefix,
+    })
 }

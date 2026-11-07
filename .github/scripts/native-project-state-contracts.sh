@@ -20,6 +20,7 @@ fi
 run_contract() {
   local binary="$1" target="$2" selector="$3"
   shift 3
+  export PROJECTATLAS_MCP_DIAGNOSTIC_DIR="${RUNNER_TEMP:?runner host temp is required}"
   if [ -z "$contract_bin" ]; then
     cargo test --locked -p projectatlas-cli "$target" "$binary" "$selector" "$@"
     return

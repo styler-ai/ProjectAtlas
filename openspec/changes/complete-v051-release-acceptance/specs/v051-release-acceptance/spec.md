@@ -39,6 +39,12 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** missing fixture-home authority is rejected before spawning instead of inheriting the operator home
 - **AND** an older runtime, forwarder and host state outside that fixture remain unchanged while the installer keeps its intentional operator upgrade/quarantine behavior inside the selected test context
 
+#### Scenario: Native MCP acceptance failures retain causal evidence
+- **WHEN** a native MCP acceptance request fails or reaches its existing deadline
+- **THEN** the fixture records adapter/root/phase timing and actual MCP child state separately from the profiler outcome, and retains the typed primary failure alongside clean child completion evidence or any shutdown failure
+- **AND** stderr collection retains a fixed prefix and total/truncation metadata while draining the remaining bytes, bounded diagnostic artifacts use an explicit host directory outside mounted fixture images, queued stdout producers cannot block reader cleanup, and owned diagnostic files are removed
+- **AND** the original request deadline, single attempt and failure outcome remain authoritative; diagnostics do not retry an operation or replace its required acceptance proof
+
 ### Requirement: Security and review findings receive current evidence-based disposition
 The release owner SHALL evaluate current dependency, scanner and automated-review findings against exact accepted source and supported trust boundaries before RC1. Confirmed defects and material unresolved proof gaps SHALL block acceptance. Repairs SHALL preserve legitimate product capabilities.
 

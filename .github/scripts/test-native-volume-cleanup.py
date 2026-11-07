@@ -41,6 +41,7 @@ def verify_contract_dispatch() -> int:
             executable.write_text(r'''#!/usr/bin/env bash
 set -euo pipefail
 if [ "${CARGO_BIN_EXE_projectatlas:-}" != "$PROJECTATLAS_MCP_CONTRACT_EXECUTABLE" ]; then exit 23; fi
+if [ "${PROJECTATLAS_MCP_DIAGNOSTIC_DIR:-}" != "$RUNNER_TEMP" ]; then exit 24; fi
 if [ "${1:-}" = --list ]; then
   if [ "$MODEL_BEHAVIOR" = missing ]; then exit 0; fi
   printf 'owning_contract: test\n'
@@ -68,7 +69,8 @@ exit "$result"
                                     env={**os.environ, "MODEL_ROOT": str(directory), "RUNNER_TEMP": str(directory),
                                          "RUNNER_OS": platform, "MODEL_BEHAVIOR": behavior,
                                          "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE": str(directory / "installed runtime"),
-                                         "CARGO_BIN_EXE_projectatlas": "unselected-ambient-runtime"})
+                                         "CARGO_BIN_EXE_projectatlas": "unselected-ambient-runtime",
+                                         "PROJECTATLAS_MCP_DIAGNOSTIC_DIR": "unselected-fixture-volume"})
             assert result.returncode == expected, (target, platform, behavior, result.stdout, result.stderr)
             arguments = directory / "arguments"
             assert arguments.exists() == (behavior in ("valid", "test-failure")), behavior

@@ -573,7 +573,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "79c32514a21de674a55c76426da1ec1ae0e69d6b0ee39b34b69404c83ffca3dd";
+    "432ece2b99e132be18514d9e0e524441e8c6bafef6dac607c9fd20bb7e9faf8e";
 const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
@@ -24634,7 +24634,7 @@ fn assert_cli_non_git_freshness(executable: &Path) -> Result<(), Box<dyn Error>>
 struct McpContractCleanupPacket {
     child: Child,
     stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<support::McpStderrCapture>>>,
 }
 
 /// Reap one test-owned MCP contract packet after the observer has returned.
@@ -25406,7 +25406,7 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
         let mut stdio_cleanup_handoff =
             |child: Child,
              stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+             stderr_reader: thread::JoinHandle<io::Result<support::McpStderrCapture>>| {
                 stdio_cleanup_packet = Some(McpStdioCleanupPacket {
                     child,
                     stdout_reader,
@@ -25631,6 +25631,25 @@ fn e2e_process_observers_reject_late_completion_and_preserve_in_time_success()
     // test-owned cleanup probe runs. Reaping and draining it is the proof; its
     // final status is not part of the injected kill-failure contract.
     reap_plugin_installer_child(installer_packet)?;
+    for (owner, failure) in [
+        ("MCP session observer", &session_probe_failure),
+        ("MCP stdio observer", &stdio_probe_failure),
+    ] {
+        let diagnostic = failure
+            .as_ref()
+            .err()
+            .ok_or_else(|| io::Error::other(format!("{owner} lost its synchronization failure")))?
+            .to_string();
+        if !diagnostic.contains("stderr_bytes=")
+            || !diagnostic.contains("stderr_truncated=")
+            || !diagnostic.contains("stderr_prefix=")
+        {
+            return Err(io::Error::other(format!(
+                "{owner} discarded reaped stderr evidence: {diagnostic}"
+            ))
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -25687,7 +25706,7 @@ fn e2e_process_observers_reap_after_successful_kill_when_reprobe_fails()
         let mut handoff =
             |child: Child,
              stdout_reader: thread::JoinHandle<io::Result<Vec<u8>>>,
-             stderr_reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
+             stderr_reader: thread::JoinHandle<io::Result<support::McpStderrCapture>>| {
                 stdio_handoff_packet = Some(McpStdioCleanupPacket {
                     child,
                     stdout_reader,
@@ -25926,7 +25945,7 @@ fn mcp_contract_shutdown_disconnects_saturated_responses_before_reader_join()
             "accepted"
         });
     });
-    let stderr_reader = thread::spawn(|| Ok(Vec::new()));
+    let stderr_reader = thread::spawn(|| Ok(support::McpStderrCapture::default()));
     let session = McpContractSession {
         child: Some(child),
         stdin: Some(stdin),
@@ -25975,7 +25994,7 @@ struct McpContractSession {
     stdin: Option<ChildStdin>,
     responses: Receiver<io::Result<String>>,
     stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<support::McpStderrCapture>>>,
     next_request_id: u64,
 }
 
@@ -26023,7 +26042,7 @@ impl McpContractSession {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stdout was not piped"))?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
@@ -26046,11 +26065,7 @@ impl McpContractSession {
                 }
             }
         });
-        let stderr_reader = thread::spawn(move || {
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output)?;
-            Ok(output)
-        });
+        let stderr_reader = thread::spawn(move || support::McpStderrCapture::read(stderr));
         let mut session = Self {
             child: Some(child),
             stdin: Some(stdin),
@@ -26212,12 +26227,11 @@ impl McpContractSession {
 
     /// Disconnect the bounded stdout sender before joining its reader.
     fn disconnect_responses(&mut self) {
-        let (_sender, disconnected) = mpsc::channel();
-        self.responses = disconnected;
+        support::disconnect_mcp_test_responses(&mut self.responses);
     }
 
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(self) -> Result<(), Box<dyn Error>> {
+    fn shutdown(self) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         self.shutdown_with_test_delay(Duration::from_secs(10), None, false)
     }
 
@@ -26226,7 +26240,7 @@ impl McpContractSession {
         timeout: Duration,
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         self.shutdown_with_test_delay_and_kill(
             timeout,
             observer_delay,
@@ -26241,7 +26255,7 @@ impl McpContractSession {
         observer_delay: Option<Duration>,
         hold_stdin_until_observation: bool,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         self.shutdown_with_test_delay_and_kill_and_handoff(
             timeout,
             observer_delay,
@@ -26263,7 +26277,7 @@ impl McpContractSession {
         cleanup_probe_error: Option<io::Error>,
         kill_child: &mut impl FnMut(&mut Child) -> io::Result<()>,
         handoff_live_child: Option<&mut dyn FnMut(McpContractCleanupPacket)>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         let mut exit_probe_error = exit_probe_error;
         let mut cleanup_probe_error = cleanup_probe_error;
         if !hold_stdin_until_observation {
@@ -26322,14 +26336,19 @@ impl McpContractSession {
                         io::Error::other("MCP contract stdout reader panicked")
                     })?;
                 }
-                if let Some(reader) = stderr_reader {
-                    reader.join().map_err(|_panic| {
-                        io::Error::other("MCP contract stderr reader panicked")
-                    })??;
-                }
-                let diagnostic = format!(
+                let stderr = stderr_reader
+                    .map(|reader| {
+                        reader.join().map_err(|_panic| {
+                            io::Error::other("MCP contract stderr reader panicked")
+                        })?
+                    })
+                    .transpose()?;
+                let mut diagnostic = format!(
                     "MCP contract server exit synchronization failed before delayed observation: {error}; cleanup complete: child reaped and readers joined status={status}"
                 );
+                if let Some(stderr) = stderr {
+                    write!(diagnostic, ", {stderr}")?;
+                }
                 return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
             }
         }
@@ -26495,22 +26514,21 @@ impl McpContractSession {
                 diagnostic.push_str(" status=");
                 diagnostic.push_str(&status.to_string());
             }
-            if !stderr_result.is_empty() {
-                diagnostic.push_str(" stderr=");
-                diagnostic.push_str(&String::from_utf8_lossy(&stderr_result));
-            }
+            write!(diagnostic, " {stderr_result}")?;
             return Err(io::Error::new(io::ErrorKind::TimedOut, diagnostic).into());
         }
         let status = wait_result?;
         stdout_result.transpose()?;
         if !accepted_completion || !status.success() {
             return Err(io::Error::other(format!(
-                "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr_result)
+                "MCP contract server failed: child_status={status}, {stderr_result}"
             ))
             .into());
         }
-        Ok(())
+        Ok(support::McpShutdownReport {
+            status,
+            stderr: stderr_result,
+        })
     }
 }
 
