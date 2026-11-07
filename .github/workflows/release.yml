@@ -305,6 +305,19 @@ jobs:
           fi
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
+          unit_receipt="$RUNNER_TEMP/projectatlas-packaged-unit.jsonl"
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
+            --bin projectatlas --no-run --message-format=json > "$unit_receipt"
+          unit_executable="$(python3 - "$unit_receipt" <<'PYTHON'
+          import json, sys
+          artifacts = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+          binaries = {row["executable"] for row in artifacts if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == "projectatlas" and row.get("profile", {}).get("test") and row.get("executable")}
+          if len(binaries) != 1:
+              raise SystemExit("expected one exact packaged unit-test executable")
+          print(next(iter(binaries)))
+          PYTHON
+          )"
+          cp "$unit_executable" contract-artifacts/bin/projectatlas_unit
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
             binary="$(find "$contract_target/release/deps" -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
             if [[ -z "$binary" ]]; then
@@ -327,13 +340,13 @@ jobs:
           case "${1:-}" in
             mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*|installed_hosts_read_generated_configs_and_report_native_status)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*|pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)
+            parenthesized_python_imports_resolve_and_converge_after_refresh|rust_root_aliases_follow_manifest_and_module_changes|rust_namespace_aliases_keep_values_types_and_toolchain_identity|rust_absolute_and_bare_use_paths_follow_the_owning_edition|rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers|same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild|lexical_capacity_preserves_navigation_and_repairs_after_source_reduction|go_clause_bindings_agree_across_cli_mcp_and_refresh|python_directive_calls_agree_across_cli_mcp_and_refresh|bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh|ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles|reopened_container_calls_agree_across_cli_mcp_and_refresh|mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*|pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)
               binary=e2e_navigation ;;
             lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
             holistic_agent_worktree_*|*watch*|*federation*)
               binary=e2e_worktrees ;;
-            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*|bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation)
+            automatic_state_admission_preserves_cli_mcp_navigation|managed_document_writers_preserve_cli_mcp_capabilities|root_and_metadata_validation_flow|init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*|bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation)
               binary=e2e_lifecycle ;;
             *)
               echo "unknown packaged contract test: ${1:-<missing>}" >&2
@@ -446,6 +459,14 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
+          $unitReceipt = Join-Path $env:RUNNER_TEMP "projectatlas-packaged-unit.jsonl"
+          $env:CARGO_TARGET_DIR = $contractTarget
+          cargo test --locked --release --all-features -p projectatlas-cli --bin projectatlas --no-run --message-format=json > $unitReceipt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $unitExecutables = @(Get-Content -LiteralPath $unitReceipt | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq "compiler-artifact" -and $_.target.name -eq "projectatlas" -and $_.profile.test -and $_.executable } | Select-Object -ExpandProperty executable -Unique)
+          if ($unitExecutables.Count -ne 1) { throw "Expected one exact packaged unit-test executable." }
+          Copy-Item -LiteralPath $unitExecutables[0] -Destination "contract-artifacts\bin\projectatlas_unit.exe"
+          $env:CARGO_TARGET_DIR = $shippingTarget
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
             $contracts = @(Get-ChildItem -LiteralPath (Join-Path $contractTarget "release\deps") -Filter "$binaryName-*.exe" -File)
             if ($contracts.Count -ne 1) {
@@ -469,6 +490,18 @@ jobs:
               "*plugin*" { return "e2e_delivery.exe" }
               "*installer*" { return "e2e_delivery.exe" }
               "*release_binary*" { return "e2e_delivery.exe" }
+              "parenthesized_python_imports_resolve_and_converge_after_refresh" { return "e2e_navigation.exe" }
+              "rust_root_aliases_follow_manifest_and_module_changes" { return "e2e_navigation.exe" }
+              "rust_namespace_aliases_keep_values_types_and_toolchain_identity" { return "e2e_navigation.exe" }
+              "rust_absolute_and_bare_use_paths_follow_the_owning_edition" { return "e2e_navigation.exe" }
+              "rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers" { return "e2e_navigation.exe" }
+              "same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild" { return "e2e_navigation.exe" }
+              "lexical_capacity_preserves_navigation_and_repairs_after_source_reduction" { return "e2e_navigation.exe" }
+              "go_clause_bindings_agree_across_cli_mcp_and_refresh" { return "e2e_navigation.exe" }
+              "python_directive_calls_agree_across_cli_mcp_and_refresh" { return "e2e_navigation.exe" }
+              "bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh" { return "e2e_navigation.exe" }
+              "ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles" { return "e2e_navigation.exe" }
+              "reopened_container_calls_agree_across_cli_mcp_and_refresh" { return "e2e_navigation.exe" }
               "mcp_tools_list_*" { return "e2e_navigation.exe" }
               "csharp_symbol_*" { return "e2e_navigation.exe" }
               "deep_qualified_*" { return "e2e_navigation.exe" }
@@ -488,6 +521,9 @@ jobs:
               "holistic_agent_worktree_*" { return "e2e_worktrees.exe" }
               "*watch*" { return "e2e_worktrees.exe" }
               "*federation*" { return "e2e_worktrees.exe" }
+              "automatic_state_admission_preserves_cli_mcp_navigation" { return "e2e_lifecycle.exe" }
+              "managed_document_writers_preserve_cli_mcp_capabilities" { return "e2e_lifecycle.exe" }
+              "root_and_metadata_validation_flow" { return "e2e_lifecycle.exe" }
               "persistent_mcp_stdin_*" { return "e2e_lifecycle.exe" }
               "supported_predecessor_*" { return "e2e_lifecycle.exe" }
               "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation" { return "e2e_lifecycle.exe" }
@@ -925,6 +961,27 @@ jobs:
               "$contract" "$test" --exact --include-ignored --nocapture
           done
 
+      - name: Installed-candidate native project-state ownership
+        timeout-minutes: 15
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
+        run: |
+          export PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          export PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas"
+          chmod +x contract-artifacts/bin/projectatlas_unit
+          bash .github/scripts/native-project-state-contracts.sh ownership --contract-bin contract-artifacts/bin
+
+      - name: Installed-candidate native macOS volume contracts
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          export PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          export PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas"
+          bash .github/scripts/native-project-state-contracts.sh macos-volumes --contract-bin contract-artifacts/bin
+
       - name: Installed-candidate regression and upgrade contracts
         timeout-minutes: 20
         env:
@@ -939,6 +996,18 @@ jobs:
             exit 1
           fi
           for test in \
+            parenthesized_python_imports_resolve_and_converge_after_refresh \
+            rust_root_aliases_follow_manifest_and_module_changes \
+            rust_namespace_aliases_keep_values_types_and_toolchain_identity \
+            rust_absolute_and_bare_use_paths_follow_the_owning_edition \
+            rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers \
+            same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild \
+            lexical_capacity_preserves_navigation_and_repairs_after_source_reduction \
+            go_clause_bindings_agree_across_cli_mcp_and_refresh \
+            python_directive_calls_agree_across_cli_mcp_and_refresh \
+            bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh \
+            ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles \
+            reopened_container_calls_agree_across_cli_mcp_and_refresh \
             installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
             bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation \
             pdf_rendering_resource_stop_preserves_source_and_repairs \
@@ -1310,6 +1379,16 @@ jobs:
             throw "Packaged host reader contract '$test' failed with exit code $LASTEXITCODE."
           }
 
+      - name: Installed-candidate native project-state ownership
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_CI_PLATFORM: windows
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE: ${{ runner.temp }}/projectatlas-prepublish/projectatlas.exe
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT: ${{ github.workspace }}/plugins/projectatlas
+        run: bash .github/scripts/native-project-state-contracts.sh ownership --contract-bin contract-artifacts/bin
+
       - name: Installed-candidate regression and upgrade contracts
         timeout-minutes: 10
         shell: pwsh
@@ -1324,6 +1403,18 @@ jobs:
             throw "Installed-candidate contract inventory failed with exit code $LASTEXITCODE."
           }
           foreach ($test in @(
+            "parenthesized_python_imports_resolve_and_converge_after_refresh",
+            "rust_root_aliases_follow_manifest_and_module_changes",
+            "rust_namespace_aliases_keep_values_types_and_toolchain_identity",
+            "rust_absolute_and_bare_use_paths_follow_the_owning_edition",
+            "rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers",
+            "same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild",
+            "lexical_capacity_preserves_navigation_and_repairs_after_source_reduction",
+            "go_clause_bindings_agree_across_cli_mcp_and_refresh",
+            "python_directive_calls_agree_across_cli_mcp_and_refresh",
+            "bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh",
+            "ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles",
+            "reopened_container_calls_agree_across_cli_mcp_and_refresh",
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
             "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
             "pdf_rendering_resource_stop_preserves_source_and_repairs",

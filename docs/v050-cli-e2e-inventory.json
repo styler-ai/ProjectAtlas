@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "d48b7b36070fc1f5bff385c8f41900fc626fcc684606057bca4f27f3e169afcd",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "a851045cbc1e08e5e4dc752f7211cb82ef675e470392f1bbfc6d106115780ba5",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "6c0c1dc753d92d90c1ed48e5c851a0163d8962ccc09e4b25f6c307d6cb477a4d",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "c91cf0c1960b1e396e84d73b163d031f0fbdf898dff246267b7997dd96f85cbd",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "4412ab986418cc3bbc535ee40112c2e7a9aadfd1090a895c8ff05e4f04345e49",
@@ -19818,407 +19818,422 @@
   "selectors_after_move": [
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 456,
+      "line": 533,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 504,
-      "text": "            PROJECTATLAS_TEST_CASE_SENSITIVE=true cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "text": "            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 470,
+      "line": 605,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 606,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 619,
       "text": "          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 620,
       "text": "          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 471,
+      "line": 670,
       "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery real_host_reader_ -- --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 472,
+      "line": 671,
       "text": "          cargo test --locked -p projectatlas-cli --all-features --test e2e_delivery installed_hosts_read_generated_configs_and_report_native_status -- --exact --ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 489,
+      "line": 688,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 694,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_worktrees scan_and_watch_preserve_atomic_publication_across_roots -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 494,
+      "line": 701,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery e2e_process_observers_ -- --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 499,
+      "line": 706,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery release_asset_server_lifecycle_is_causal_and_bounded -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 504,
+      "line": 711,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery posix_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 509,
+      "line": 716,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_installer_rejects_checksum_mismatch -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 514,
+      "line": 721,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_release_binary_only_rejects_invalid_runtime_without_fallback -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 521,
+      "line": 728,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 522,
+      "line": 729,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 523,
+      "line": 730,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation typed_identity_rejections_are_serialized_by_cli_and_mcp_coverage -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 524,
+      "line": 731,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 525,
+      "line": 732,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 526,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 527,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 528,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 529,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 616,
-      "text": "            cargo test --locked -p projectatlas-cli --test e2e_lifecycle linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 650,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 717,
-      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_lifecycle bundled_hook -- --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 656,
-      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_manages_atlas_forwarder_lifecycle_and_argv --test e2e_delivery -- --exact --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 657,
-      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations --test e2e_delivery -- --exact --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 658,
-      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_serializes_opposite_atlas_forwarder_migrations --test e2e_delivery -- --exact --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 663,
-      "text": "        run: cargo test --locked -p projectatlas-cli posix_atlas_forwarder_preserves_streams_exit_and_interrupt --test e2e_delivery -- --exact --nocapture"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 668,
-      "text": "        run: cargo test --locked -p projectatlas-cli installer_workflow_pin_reports_preserve_exact_rc_identity --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 673,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 678,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 683,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 688,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 698,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 703,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 708,
-      "text": "        run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e_delivery -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 713,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 718,
-      "text": "        run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e_delivery -- --exact"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 723,
-      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e_delivery"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "line": 728,
-      "text": "        run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "line": 733,
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 734,
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 735,
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 736,
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 823,
+      "text": "            cargo test --locked -p projectatlas-cli --test e2e_lifecycle linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 857,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 862,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_lifecycle bundled_hook -- --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 868,
+      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_manages_atlas_forwarder_lifecycle_and_argv --test e2e_delivery -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 869,
+      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations --test e2e_delivery -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 870,
+      "text": "          cargo test --locked -p projectatlas-cli plugin_installer_serializes_opposite_atlas_forwarder_migrations --test e2e_delivery -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 875,
+      "text": "        run: cargo test --locked -p projectatlas-cli posix_atlas_forwarder_preserves_streams_exit_and_interrupt --test e2e_delivery -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 880,
+      "text": "        run: cargo test --locked -p projectatlas-cli installer_workflow_pin_reports_preserve_exact_rc_identity --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 885,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 890,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_skips_non_official_codex_marketplace --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 895,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_leaves_current_codex_marketplace_untouched --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 900,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 905,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_preserves_prior_integration_when_all_replacement_adds_fail --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 910,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_unavailable_or_ambiguous_inventory --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 915,
+      "text": "        run: cargo test --locked -p projectatlas-cli posix_plugin_inventory_without_jq_rejects_split_object_fields --test e2e_delivery -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 920,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_serializes_restore_before_the_next_installer_reads_state --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 925,
+      "text": "        run: cargo test --locked -p projectatlas-cli windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized --test e2e_delivery -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 930,
+      "text": "        run: cargo test --locked -p projectatlas-cli plugin_update_refuses_retained_recovery_state_before_mutation --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 935,
+      "text": "        run: cargo test --locked -p projectatlas-cli posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state --test e2e_delivery -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 940,
       "text": "        run: cargo test --locked -p projectatlas-cli posix_plugin_lock_rejects_indirection_and_survives_crash --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 740,
+      "line": 947,
       "text": "          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 742,
+      "line": 949,
       "text": "          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 744,
+      "line": 951,
       "text": "          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 746,
+      "line": 953,
       "text": "          cargo test --locked -p projectatlas-cli windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 748,
+      "line": 955,
       "text": "          cargo test --locked -p projectatlas-cli windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 754,
+      "line": 961,
       "text": "        run: cargo test --locked -p projectatlas-cli windows_installer_recovery_operation_preserves_config_selection --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 761,
+      "line": 968,
       "text": "        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is_locked --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 769,
+      "line": 976,
       "text": "        run: cargo test --locked -p projectatlas-cli windows_installer_fresh_path_probe_respects_machine_precedence --test e2e_delivery -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 774,
+      "line": 981,
       "text": "        run: cargo test --locked -p projectatlas-cli windows_release_binary_installer_repairs_stale_mirror_without_registering_it --test e2e_delivery"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 784,
+      "line": 991,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_delivery windows_installer_obsolete_mcp_handoff_ -- --test-threads=1"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 789,
+      "line": 996,
       "text": "        run: cargo test --locked -p projectatlas-cli parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access --test e2e_lifecycle"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 794,
+      "line": 1001,
       "text": "        run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 864,
+      "line": 1006,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_navigation map_response_preserves_legacy_file_and_separates_format_from_json_sidecar -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 1015,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation document_target_prefixes_preserve_cli_mcp_and_operator_roots -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 1016,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 1017,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation observed_mcp_reconciles_document_only_target_changes -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 1018,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 1019,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation external_policy_ancestor_restart_preserves_cli_mcp_observation -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 799,
+      "line": 1034,
       "text": "        run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e_lifecycle"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 804,
+      "line": 1039,
       "text": "        run: cargo test --locked -p projectatlas-cli implicit_bare_root --test e2e_lifecycle -- --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
-      "line": 809,
+      "line": 1044,
       "text": "        run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture"
     },
     {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 76,
+      "text": "  run_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 77,
+      "text": "  run_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 78,
+      "text": "  run_lifecycle root_and_metadata_validation_flow -- --exact"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 98,
+      "text": "  PROJECTATLAS_TEST_CASE_SENSITIVE=true run_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 165,
+      "text": "  run_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 368,
+      "text": "  run_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/scripts/native-project-state-contracts.sh",
+      "line": 369,
+      "text": "  run_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
       "workflow": ".github/workflows/release.yml",
-      "line": 152,
+      "line": 192,
       "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 157,
+      "line": 197,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 158,
+      "line": 198,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 159,
+      "line": 199,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 160,
+      "line": 200,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 161,
+      "line": 201,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 162,
+      "line": 202,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 163,
+      "line": 203,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 164,
+      "line": 204,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 240,
+      "line": 287,
       "text": "            --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \\"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 241,
+      "line": 288,
       "text": "            --test e2e_worktrees --test e2e_maintenance --no-run"
     },
     {
       "workflow": ".github/workflows/release.yml",
-      "line": 331,
+      "line": 444,
       "text": "          cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run"
     },
     {
       "workflow": ".github/workflows/optional-parser-pack.yml",
-      "line": 1092,
+      "line": 1108,
       "text": "            --test e2e_lifecycle `"
     }
   ],

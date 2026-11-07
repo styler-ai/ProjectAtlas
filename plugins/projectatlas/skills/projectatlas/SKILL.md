@@ -15,6 +15,20 @@ For an exact local checkout, prefer the installed, version-matched short `atlas`
 
 ProjectAtlas is an agent orientation layer. It combines reviewed folder/file responsibility, current source summaries, parser trust, and bounded graph connections so agents select the right source before opening it. TOON is the default agent format; current saved bytes are authoritative, including dirty and non-Git trees.
 
+## Restore context and choose work
+
+After **every compaction**, use ProjectAtlas to recover the project, source ownership and architecture context needed for the active task. Read the repository's continuity instructions, select your own exact checkout, then make the startup navigation call below. A memory summary is a pointer to evidence; it does not replace this Atlas reorientation. Narrow the query to what was lost rather than rereading or indexing the whole repository.
+
+Use these loops to decide when and why to navigate:
+
+- **Understand or resume a change:** start with `atlas next <task>` or an exact-root compact MCP session brief. Follow the ranked owner to a summary, then only the relations or exact slices needed to restore its responsibility, callers and architecture boundaries.
+- **Implement against requirements:** locate the repository's declared specification and architecture context with documentation selection, and inspect current implementation with source selection. Use both selections for an explicit documentation/source bridge. Reconcile what the requirement promises with what the source does; a resolved link or accepted purpose alone does not prove conformance. Report a missing reference or unknown specification authority rather than inventing the association.
+- **Reflect during work:** at a meaningful task boundary, after review feedback, and before declaring completion, reconsider the affected owner for obsolete paths, duplicated work, dead-code candidates and simpler designs. Use a bounded relation/analysis request when it can answer that question, then check current callers, exports, registries and exact source. Partial graphs, unresolved dynamic calls and zero inbound rows do not prove code is dead. Keep improvements within the authorized task or record a concrete follow-up.
+- **Decide what is stale:** distinguish changed saved source, stale indexed projections, approved purpose text and old specification claims. Check current evidence before replacing any of them. Refresh ordinary saved edits/offline changes with `atlas watch --once`; use full scan or a symbol rebuild only for the corresponding typed recovery or an explicitly required rebuild. Reuse unchanged verified source, parse, graph and test evidence when its inputs still match.
+- **Finish or hand off:** reconcile the affected requirements, source, architecture and guidance, and record verified outcomes and remaining uncertainty in the repository's continuity mechanism. A health result or generated summary can identify work to inspect; it cannot substitute for the owning source and behavioral proof.
+
+The [short-command guide](references/short-cli.md) maps each command to its function and call trigger. Pick the smallest operation that answers the current question, and stop when the evidence is sufficient.
+
 ## Task Startup
 
 At startup and after compaction, read this complete installed skill before Atlas calls. Every agent restores its exact selected project/worktree from its own live checkout, not another agent's remembered database binding. A hook reminder does not prove the skill was read. On Windows, the packaged automatic hook requires PowerShell; if Codex launches it through CMD, hooks are disabled or untrusted, or a resumed subagent has no fresh reminder after compaction, follow this recovery step manually before Atlas use.
