@@ -24,6 +24,8 @@ run_contract() {
     cargo test --locked -p projectatlas-cli "$target" "$binary" "$selector" "$@"
     return
   fi
+  # Cargo-based CLI assertions and MCP helpers must select the same installed runtime.
+  export CARGO_BIN_EXE_projectatlas="${PROJECTATLAS_MCP_CONTRACT_EXECUTABLE:?installed runtime selection is required}"
   if [ "${1:-}" = -- ]; then shift; fi
   if [ "$target" = --bin ]; then binary=projectatlas_unit; fi
   if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
