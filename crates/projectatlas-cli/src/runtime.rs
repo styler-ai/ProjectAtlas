@@ -11043,8 +11043,10 @@ mod tests {
         let config = root.join("projectatlas.toml");
         fs::write(&config, "[project]\nroot = \".\"\n")?;
         require_eq(
-            &resolved_mcp_config_path(&database, None)?,
-            &Some(expected.join("projectatlas.toml")),
+            &resolved_mcp_config_path(&database, None)?
+                .map(fs::canonicalize)
+                .transpose()?,
+            &Some(fs::canonicalize(&config)?),
             "current flat configuration discovery",
         )?;
         require_eq(
