@@ -12,14 +12,74 @@ import tempfile
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW = ROOT / ".github/workflows/ci.yml"
+CONTRACTS = ROOT / ".github/scripts/native-project-state-contracts.sh"
+
+
+def verify_contract_dispatch() -> int:
+    """Reject failed inventories/builds even when a caller captures shell failure."""
+    source = CONTRACTS.read_text(encoding="utf-8")
+    functions = source[source.index("run_contract() {"):source.index('\nif [ "$mode" = ownership ]; then')]
+    cases = [
+        ("unit", "Linux", "valid", 0),
+        ("lifecycle", "Linux", "valid", 0),
+        ("worktrees", "Linux", "valid", 0),
+        ("unit", "Windows", "valid", 0),
+        ("lifecycle", "Windows", "valid", 0),
+        ("unit", "Linux", "missing", 1),
+        ("unit", "Linux", "duplicate", 1),
+        ("unit", "Linux", "inventory-failure", 1),
+        ("unit", "Linux", "test-failure", 9),
+        ("unit", "Linux", "compile-failure", 7),
+    ]
+    for target, platform, behavior, expected in cases:
+        with tempfile.TemporaryDirectory(prefix="native-contract-routing-") as temporary:
+            directory = Path(temporary)
+            binary = {"unit": "projectatlas_unit", "lifecycle": "e2e_lifecycle", "worktrees": "e2e_worktrees"}[target]
+            if platform == "Windows":
+                binary += ".exe"
+            executable = directory / binary
+            executable.write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = --list ]; then
+  if [ "$MODEL_BEHAVIOR" = missing ]; then exit 0; fi
+  printf 'owning_contract: test\n'
+  if [ "$MODEL_BEHAVIOR" = duplicate ]; then printf 'owning_contract: test\n'; fi
+  if [ "$MODEL_BEHAVIOR" = inventory-failure ]; then exit 7; fi
+  exit 0
+fi
+printf '%s\n' "$@" > "$MODEL_ROOT/arguments"
+if [ "$MODEL_BEHAVIOR" = test-failure ]; then exit 9; fi
+''', encoding="utf-8")
+            executable.chmod(0o755)
+            script = 'set -euo pipefail\n' + functions + r'''
+contract_bin="$MODEL_ROOT"
+if [ "$MODEL_BEHAVIOR" = compile-failure ]; then
+  contract_bin=""
+  cargo() { printf '{"reason":"compiler-artifact","target":{"name":"projectatlas"},"profile":{"test":true},"executable":"stale"}\n'; return 7; }
+  if value="$(unit_test_executable)"; then result=0; else result=$?; fi
+else
+  result=0
+  run_'''+target+r''' owning_contract -- --exact --nocapture || result=$?
+fi
+exit "$result"
+'''
+            result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10,
+                                    env={**os.environ, "MODEL_ROOT": str(directory), "RUNNER_TEMP": str(directory),
+                                         "RUNNER_OS": platform, "MODEL_BEHAVIOR": behavior})
+            assert result.returncode == expected, (target, platform, behavior, result.stdout, result.stderr)
+            arguments = directory / "arguments"
+            assert arguments.exists() == (behavior in ("valid", "test-failure")), behavior
+            if arguments.exists():
+                assert arguments.read_text().splitlines() == ["owning_contract", "--exact", "--nocapture"]
+    return len(cases)
 
 
 def main() -> None:
     """Run the actual workflow functions against isolated disk-command doubles."""
-    source = WORKFLOW.read_text(encoding="utf-8")
-    start = source.index("          attach_native_volume() {")
-    end = source.index("          trap cleanup EXIT", start)
+    routing_controls = verify_contract_dispatch()
+    source = CONTRACTS.read_text(encoding="utf-8")
+    start = source.index("attach_native_volume() {")
+    end = source.index("trap cleanup EXIT", start)
     helpers = textwrap.dedent(source[start:end])
     controls = {
         "ordinary": (0, 1),
@@ -198,7 +258,8 @@ printf '%s %s\n' "$result" "$detach_failed" > "$MODEL_AUDIT/result"
                 assert image.exists() == (case != "attach-partial"), case
                 if attach_failure:
                     assert int(report[2]) == int(failed_cleanup), (case, report)
-    print(json.dumps({"native_volume_cleanup_controls": len(controls) * 2, "status": "passed"}))
+    print(json.dumps({"native_volume_cleanup_controls": len(controls) * 2,
+                      "packaged_contract_routing_controls": routing_controls, "status": "passed"}))
 
 
 if __name__ == "__main__":

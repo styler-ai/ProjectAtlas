@@ -16,7 +16,7 @@ exclude = ["vendor/ignore"]
 ignore = { path = "vendor/ignore" }
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1-rc1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
@@ -77,11 +77,11 @@ must_use_candidate = "allow"
 missing_inline_in_public_items = "allow"
 
 [workspace.dependencies]
-projectatlas-core = { path = "crates/projectatlas-core", version = "0.5.0" }
-projectatlas-db = { path = "crates/projectatlas-db", version = "0.5.0" }
-projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.5.0" }
-projectatlas-service = { path = "crates/projectatlas-service", version = "0.5.0" }
-projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.5.0" }
+projectatlas-core = { path = "crates/projectatlas-core", version = "0.5.1-rc1" }
+projectatlas-db = { path = "crates/projectatlas-db", version = "0.5.1-rc1" }
+projectatlas-fs = { path = "crates/projectatlas-fs", version = "0.5.1-rc1" }
+projectatlas-service = { path = "crates/projectatlas-service", version = "0.5.1-rc1" }
+projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.5.1-rc1" }
 assert_cmd = "2.0"
 blake3 = "1.5"
 cap-std = "=4.0.3"
