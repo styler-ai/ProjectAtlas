@@ -52,7 +52,10 @@ Causal admission counters must show one complete inspection per native-root read
 while a later schema edit is still refused. Reuse the current/legacy/configuration,
 alias, read-profile, mutation and migration controls, then measure the ordinary
 shipping route before retaining a performance claim. This belongs to tasks 2.4,
-3.1 and 3.2; the original installed RSS failure remains unwaived.
+3.1 and 3.2; the original installed RSS target failure remains recorded. RC1
+acceptance may use only the explicitly bounded Linux detailed-navigation RSS
+allowance, after every other registered assertion and required workflow contract
+passes.
 
 ### Construct arguments only for the selected CLI command
 
@@ -88,8 +91,11 @@ too; repeating descriptions or adding a parser wrapper would duplicate authority
 Causal tests distinguish unselected root and nested argument construction and
 verify full schema inspection. Compare the ordinary shipping CLI's help tree
 and focused startup mapping evidence before and after this change, then require
-the unchanged full installed matrix. The prior failure stays binding until a
-genuinely changed candidate passes; local diagnostics cannot waive it. This
+the full installed matrix with its original target verdicts preserved. The prior
+failure remains recorded as an original-target failure; RC1 acceptance may use
+only the explicit Linux detailed-navigation RSS allowance after every other
+registered assertion and required workflow contract passes. Local diagnostics
+alone cannot establish that acceptance. This
 work belongs to tasks 2.4, 3.1 and 3.2.
 
 ### Settle the architecture before expanding measurements
@@ -721,6 +727,14 @@ inventories and failures remain retained. Local observations of the authenticate
 binaries preserve the expected relation and publication but do not reproduce the
 hosted gap. They establish neither its cause nor acceptance; exited-process
 memory files are unavailable rather than successful zero-RSS evidence.
+
+RC1 acceptance now permits the observed Linux detailed-navigation sampled-RSS
+ratio, up to `1.1150645027049522`, as an explicit tradeoff. This is a
+post-measurement acceptance decision, not a change to the original samples or a
+memory-fix claim. Keep the original `1.10` target verdict, original failures and
+all other limits. Every required workflow contract still needs successful proof,
+including any contract skipped after the original target failure. See the
+[bounded allowance and retained controls](../../../docs/benchmarks/v0.5.1-indexing.md#rc1-linux-navigation-memory-allowance).
 
 Use a separate, explicitly selected `01-CI` manual diagnostic to investigate that
 boundary before another product patch. `navigation_memory_run_id` is empty by
@@ -1411,3 +1425,24 @@ uses twenty rows for the positive legacy read and finishes detailed/coverage
 checks without repeating timings. All 26 positive JSON/TOON comparisons across
 thirteen read commands preserve exact output and state. Native numerical
 acceptance remains required, and the failed Apple Silicon cohort is unwaived.
+
+## Complete installed acceptance of the admitted-root candidate
+
+Campaign `42359927651` measured the exact `2fc62655c591f9479b4d08fa9932135e1e0062ff`
+packages with the original registered harness, normal telemetry, sample/order
+inventory, sampler and targets. Each runtime uses its ordinary shipping profile;
+the candidate includes the documented workspace `codegen-units=1` change, with
+no benchmark-only profile or compiler override. All 1,441 assertions pass across
+Linux, Windows, Intel Mac and Apple Silicon, and the whole prepublish workflow
+is successful. The authenticated benchmark record and guide retain the original
+report/package/executable identities, complete samples and arithmetic. The
+Linux detailed-navigation sampled-RSS exception is not used; the original
+failed cohorts remain failures. Cross-campaign differences do not establish a
+memory cause or independently isolate the final source slice's effect.
+
+Native packaged installation, real-host readers and installed regression/upgrade
+contracts pass, including the Linux Btrfs contract skipped in the earlier failed
+cohort. Reuse verified unchanged source/parser/graph proof rather than repeating
+the numerical cohort after documentation-only reconciliation. Final issue review,
+normal merge and release-owner verification remain separate requirements; the
+development package label does not constitute an RC1 release.

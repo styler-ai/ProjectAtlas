@@ -1,6 +1,6 @@
 # Indexing and incremental refresh
 
-This is the target behavior for 0.5.1 issue #708: faster initial indexing, full reindexing, symbol/graph rebuilding and refresh. The accepted implementation retains exact one-shot reconciliation; local measured gains are recorded in the indexing reference, with installed platform acceptance still required.
+This documents the 0.5.1 issue #708 behavior: faster initial indexing, full reindexing, symbol/graph rebuilding and refresh. The implementation retains exact one-shot reconciliation. The complete four-platform installed campaign passed all 1,441 original assertions and its prepublish workflow; results and retained earlier failures are in the [indexing reference](benchmarks/v0.5.1-indexing.md#accepted-installed-candidate-complete-original-targets). Final issue review, normal merge and RC1 release acceptance remain separate requirements.
 
 ## Shared owners and accepted behavior
 
@@ -11,7 +11,7 @@ This is the target behavior for 0.5.1 issue #708: faster initial indexing, full 
 - A changed pass can stage a full publication and perform two further exact validation scans.
 - Full scans use `run_scan_pipeline_controlled` to stage complete index state, revalidate inputs and publish atomically. CLI/MCP symbol rebuilding shares `run_symbol_build_pipeline_controlled`.
 
-The focused baseline and draft results are in [the indexing reference](benchmarks/v0.5.1-indexing.md). A read-oriented observer or empty callback queue does not safely authorize bypassing exact reconciliation.
+The focused baseline, draft and complete installed results are in [the indexing reference](benchmarks/v0.5.1-indexing.md). A read-oriented observer or empty callback queue does not safely authorize bypassing exact reconciliation.
 
 CLI serialization chooses JSON or TOON before invoking the corresponding
 renderer. Ordinary commands and tracked outputs share that boundary; coverage
@@ -27,6 +27,24 @@ selected command path; names, descriptions and aliases remain registered for
 parent help. Consumers inspecting the complete argument tree call
 `Command::build` first. This avoids unused command construction before the
 existing runtime pipeline without changing command semantics or freshness.
+
+For a current database, native-root discovery uses one storage-owned read-only
+snapshot per root read.
+That snapshot checks the complete live schema and current read profile, then
+decodes the native identity without reopening the database for another admission.
+Discovery without explicit configuration tries the native identity before asking
+for a legacy recovery candidate. Explicit configuration keeps its predecessor
+authority checks before filesystem configuration discovery. Settings and MCP
+launch rendering retain their separate selected-root/configuration validation;
+the later source, root, publication and policy checks remain independent. A later
+schema change is checked again; no root result is cached across those boundaries.
+
+The owning tests reduce complete schema inspections from two to one per
+native-root read. Across the tested root-and-configuration discovery paths,
+unnecessary legacy reads fall from four to zero; the explicit-configuration
+fixture retains two authority-guard reads. These work counts are causal evidence
+of reduced work. Installed latency and memory acceptance remain separate
+requirements in [the indexing reference](benchmarks/v0.5.1-indexing.md).
 
 ## Target refresh flow
 
