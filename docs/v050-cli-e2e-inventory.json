@@ -19833,6 +19833,11 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "line": 614,
+      "text": "        run: cargo test --release --locked -p projectatlas-cli --test e2e_navigation --no-run"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "line": 619,
       "text": "          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture"
     },

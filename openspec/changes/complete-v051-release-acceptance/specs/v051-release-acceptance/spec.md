@@ -52,6 +52,13 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** teardown refuses to delete the fixture while any image beneath it remains mapped, including a partial creation without an explicit attachment receipt
 - **AND** all four filesystem variants and both Mac architectures retain their required native checks, original deadlines and one execution per successfully constructed fixture; setup recovery never retries a failed product request or numerical cohort
 
+#### Scenario: Cold document contracts require optimized construction
+- **WHEN** the native document acceptance executable has not been compiled for the required release profile
+- **THEN** CI constructs the locked `e2e_navigation` target with `--no-run` before the existing document resource step, within a separate 60-minute Intel or 30-minute other-platform construction bound
+- **AND** the resource step retains its default shipping build after precompilation, original 30-minute bound, sampler limits, samples and required execution selectors
+- **AND** completed reports survive a later failure, while a successful resource step without its required report fails instead of silently skipping artifact validation
+- **AND** compilation, console medians without complete report identity, and skipped execution do not establish product acceptance
+
 ### Requirement: Security and review findings receive current evidence-based disposition
 The release owner SHALL evaluate current dependency, scanner and automated-review findings against exact accepted source and supported trust boundaries before RC1. Confirmed defects and material unresolved proof gaps SHALL block acceptance. Repairs SHALL preserve legitimate product capabilities.
 
