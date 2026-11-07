@@ -3732,7 +3732,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
-        "if: always()",
         "needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]",
         "WINDOWS_SECURITY_RESULT: ${{ needs.windows-security-diagnostics.result }}",
         "if [[ \"$WINDOWS_SECURITY_RESULT\" != \"$windows_security_expected\" ]]; then",
@@ -3755,10 +3754,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null";
+    let diagnostic_event =
+        "github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != ''";
     let plan_job = workflow_job_block(&ci, "plan")?;
-    if !plan_job.contains(&format!("if: {source_event}")) {
+    if !plan_job.contains(&format!(
+        "    if: ({source_event}) && !({diagnostic_event})\n"
+    )) {
         return Err(io::Error::other(
-            "source planning must rerun for a base retarget and skip metadata-only edits",
+            "source planning must preserve source events and skip metadata-only edits or explicit diagnostics",
         )
         .into());
     }
@@ -3775,9 +3778,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let verify_job = workflow_job_block(&ci, "verify")?;
+    let verify_condition = format!("    if: ${{{{ always() && !({diagnostic_event}) }}}}\n");
     for required in [
         "    name: verify\n",
-        "    if: always()\n",
+        verify_condition.as_str(),
         "      actions: read\n",
     ] {
         if !verify_job.contains(required) {
@@ -3786,6 +3790,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    let diagnostic_job = workflow_job_block(&ci, "navigation-resource-diagnostics")?;
+    if !diagnostic_job.contains(&format!("    if: ${{{{ {diagnostic_event} }}}}\n")) {
+        return Err(io::Error::other(
+            "navigation resource inspection must require the explicit manual diagnostic event",
+        )
+        .into());
     }
     let metadata_event = "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null";
     let metadata_step =

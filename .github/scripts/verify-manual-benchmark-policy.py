@@ -107,10 +107,11 @@ def explicit_navigation_memory_diagnostic(relative: str, lines: list[str], posit
     if option is None or '        default: ""\n' not in option[1] or "        type: string\n" not in option[1]:
         return False
     isolation = "!(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')"
+    source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null"
     plan = re.search(r"^  plan:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
     verify = re.search(r"^  verify:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
-    if (plan is None or f"&& {isolation}" not in plan[1] or verify is None
-            or f"    if: ${{{{ always() && {isolation} }}}}" not in verify[1]):
+    if (plan is None or f"    if: ({source_event}) && {isolation}" not in plan[1].splitlines()
+            or verify is None or f"    if: ${{{{ always() && {isolation} }}}}" not in verify[1].splitlines()):
         return False
     for start in range(position, -1, -1):
         if re.fullmatch(r"  [\w-]+:", lines[start]):
@@ -155,10 +156,10 @@ def self_test() -> None:
         "    runs-on: ubuntu-latest", "    timeout-minutes: 10", "    steps:",
         "      - run: python3 docs/benchmarks/harness/native_navigation_memory.py",
     ]
-    native[10:10] = [
-        "  plan:", "    if: ordinary_source && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')",
-        "  verify:", "    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}",
-    ]
+    source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null"
+    plan_if = f"    if: ({source_event}) && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')"
+    verify_if = "    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}"
+    native[10:10] = ["  plan:", plan_if, "  verify:", verify_if]
     assert campaign_entrypoint(native[-1])
     assert explicit_indexing_diagnostic(".github/workflows/ci.yml", native, len(native) - 1)
     assert not explicit_indexing_diagnostic(route, native, len(native) - 1)
@@ -169,7 +170,11 @@ def self_test() -> None:
         ("    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}", "    if: always()"),
         ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
         ("    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}", "    if: always()"),
-        ("    if: ordinary_source && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')", "    if: ordinary_source"),
+        (plan_if, "    if: ordinary_source"),
+        (plan_if, plan_if + " || true"),
+        (verify_if, verify_if + " || true"),
+        (plan_if, plan_if.replace("if: ", "if: true || ", 1)),
+        (verify_if, verify_if.replace("if: ", "if: true || ", 1)),
     ]:
         changed = [after if line == before else line for line in native]
         assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
