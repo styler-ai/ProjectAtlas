@@ -970,6 +970,17 @@
           "last_task": "3.1"
         }
       ]
+    },
+    "verify-specification-source-traceability": {
+      "contract": "checklist-v1",
+      "primary_issue": 751,
+      "owners": [
+        {
+          "issue": 751,
+          "first_task": "1.1",
+          "last_task": "3.2"
+        }
+      ]
     }
   }
 }
