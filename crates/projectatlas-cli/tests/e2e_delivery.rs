@@ -7110,7 +7110,52 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         permissions.set_mode(0o755);
         fs::set_permissions(&runtime, permissions)?;
     }
-    let installer_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime)?;
+    require(
+        projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root,
+            &repo,
+            &runtime,
+            None,
+            None,
+        )
+        .is_err(),
+        "installer fixture must reject inherited host home before spawning",
+    )?;
+    let home = temp.path().join(TEST_ISOLATED_HOME_DIR_NAME);
+    let isolated_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &workspace_root,
+        &repo,
+        &runtime,
+        None,
+        Some(&home),
+    )?;
+    let environment = isolated_command.get_envs().collect::<BTreeMap<_, _>>();
+    for (name, expected) in [
+        ("HOME", home.clone()),
+        ("USERPROFILE", home.clone()),
+        ("CODEX_HOME", home.join(CODEX_CONFIG_DIR)),
+        ("APPDATA", home.join("AppData").join("Roaming")),
+        ("LOCALAPPDATA", home.join("AppData").join("Local")),
+        ("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR)),
+        ("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR)),
+        ("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR)),
+        ("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR)),
+    ] {
+        require(
+            environment.get(OsStr::new(name)).copied().flatten() == Some(expected.as_os_str()),
+            format!("installer fixture inherited its host location for {name}"),
+        )?;
+    }
+    require(
+        environment
+            .get(OsStr::new("PROJECTATLAS_SKIP_USER_PATH_UPDATE"))
+            .copied()
+            .flatten()
+            == Some(OsStr::new("1")),
+        "installer fixture must preserve the operator's persistent user PATH",
+    )?;
+    let installer_output =
+        run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime, &home)?;
     let installer_output_text = format!(
         "{}{}",
         String::from_utf8_lossy(&installer_output.stdout),
@@ -10532,7 +10577,8 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
     )?;
 
     fs::remove_file(&forwarder)?;
-    let repaired_output = run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link)?;
+    let repaired_output =
+        run_projectatlas_plugin_installer(&workspace_root, &repo, &runtime_link, &home)?;
     require(
         repaired_output.status.success() && forwarder.is_file(),
         format!(
@@ -10548,6 +10594,10 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
         .arg("--uninstall")
         .arg(&repo)
         .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
         .env("PROJECTATLAS_RUNTIME_PATH", &runtime_link)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
@@ -10839,6 +10889,11 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
                 .arg(&release_base_url)
                 .arg("-ReleaseBinaryOnly")
                 .env("HOME", &isolated_home)
+                .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+                .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+                .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+                .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+                .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
                 .env("USERPROFILE", &isolated_home)
                 .env("APPDATA", &app_data)
                 .env("LOCALAPPDATA", &local_app_data)
@@ -11068,6 +11123,11 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .arg(&versioned_runtime)
             .env_remove("PROJECTATLAS_VERSION")
             .env("HOME", &isolated_home)
+            .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
@@ -11208,6 +11268,11 @@ fn windows_release_binary_installer_uses_versioned_runtime_when_stable_mirror_is
             .arg(&versioned_runtime)
             .env_remove("PROJECTATLAS_VERSION")
             .env("HOME", &isolated_home)
+            .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
@@ -11317,6 +11382,11 @@ exit $exitCode
                 )
                 .env("PROJECTATLAS_TEST_RUNTIME", &versioned_runtime)
                 .env("HOME", &isolated_home)
+                .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+                .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+                .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+                .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+                .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
                 .env("USERPROFILE", &isolated_home)
                 .env("APPDATA", &app_data)
                 .env("LOCALAPPDATA", &local_app_data)
@@ -11454,6 +11524,11 @@ exit $exitCode
             .arg("-RuntimePath")
             .arg(&versioned_runtime)
             .env("HOME", &isolated_home)
+            .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
@@ -11548,6 +11623,11 @@ exit $exitCode
             .arg("-RuntimePath")
             .arg(&versioned_runtime)
             .env("HOME", &isolated_home)
+            .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
@@ -18804,6 +18884,11 @@ fn windows_installer_without_codex_reports_clean_skip() -> Result<(), Box<dyn Er
         .arg("-RuntimePath")
         .arg(isolated_installer_runtime(temp.path())?)
         .env("HOME", &isolated_home)
+        .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+        .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
@@ -18969,6 +19054,11 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
             .arg(&release_base_url)
             .arg("-ReleaseBinaryOnly")
             .env("HOME", &isolated_home)
+            .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &isolated_home)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
@@ -19101,6 +19191,11 @@ fn windows_release_binary_installer_repairs_stale_mirror_without_registering_it(
         .arg("-RuntimePath")
         .arg(&versioned_runtime)
         .env("HOME", &isolated_home)
+        .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+        .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
@@ -19248,6 +19343,11 @@ fn windows_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Bo
         .arg(&release_base_url)
         .arg("-ReleaseBinaryOnly")
         .env("HOME", &isolated_home)
+        .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+        .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
@@ -19338,6 +19438,11 @@ fn windows_release_binary_only_rejects_invalid_runtime_without_fallback()
         .arg(&release_base_url)
         .arg("-ReleaseBinaryOnly")
         .env("HOME", &isolated_home)
+        .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+        .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
         .env("USERPROFILE", &isolated_home)
         .env("APPDATA", &app_data)
         .env("LOCALAPPDATA", &local_app_data)
@@ -19411,6 +19516,19 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
         .env("PROJECTATLAS_RELEASE_BASE_URL", &release_base_url)
         .env("PROJECTATLAS_RELEASE_BINARY_ONLY", "1")
         .env("HOME", &isolated_home)
+        .env("CODEX_HOME", isolated_home.join(CODEX_CONFIG_DIR))
+        .env("XDG_DATA_HOME", isolated_home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", isolated_home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", isolated_home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
+        .env("USERPROFILE", &isolated_home)
+        .env("APPDATA", isolated_home.join(TEST_WINDOWS_APPDATA_DIR))
+        .env(
+            "LOCALAPPDATA",
+            isolated_home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR),
+        )
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
         .env("PROJECTATLAS_NO_TELEMETRY", "1");
     let installer_result =
@@ -32530,8 +32648,9 @@ fn run_projectatlas_plugin_installer(
     workspace_root: &Path,
     repo: &Path,
     runtime: &Path,
+    home: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
-    run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None)
+    run_projectatlas_plugin_installer_with_optional_path(workspace_root, repo, runtime, None, home)
 }
 
 /// Run the bundled plugin installer against the isolated Codex fixture.
@@ -32557,13 +32676,14 @@ fn run_projectatlas_plugin_installer_with_optional_path(
     repo: &Path,
     runtime: &Path,
     path_shadow: Option<&Path>,
+    home: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     run_projectatlas_plugin_installer_with_optional_path_and_home(
         workspace_root,
         repo,
         runtime,
         path_shadow,
-        None,
+        Some(home),
     )
 }
 
@@ -32593,6 +32713,9 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     path_shadow: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<StdCommand, Box<dyn Error>> {
+    let home = home.ok_or_else(|| {
+        io::Error::other("installer fixture requires an explicit isolated home before spawning")
+    })?;
     let mut command = if cfg!(windows) {
         let mut command = StdCommand::new("powershell");
         command
@@ -32629,6 +32752,7 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     command
         .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
         .env("PROJECTATLAS_RUNTIME_PATH", runtime)
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
     let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -32655,7 +32779,7 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
     } else {
         command.env("PATH", inherited_path);
     }
-    if let Some(home) = home {
+    {
         let app_data = home.join("AppData").join("Roaming");
         let local_app_data = home.join("AppData").join("Local");
         let codex_dir = home.join(CODEX_CONFIG_DIR);
@@ -32675,6 +32799,10 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
             .env("CODEX_HOME", &codex_dir)
             .env("APPDATA", app_data)
             .env("LOCALAPPDATA", local_app_data)
+            .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
             .env(
                 "PROJECTATLAS_FAKE_CODEX_LOG",
                 home.join(FAKE_CODEX_LOG_FILE),
@@ -33533,6 +33661,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         };
         command
             .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &home)
             .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
             .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
@@ -33567,6 +33699,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             };
             command
                 .env("HOME", &home)
+                .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+                .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+                .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+                .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
                 .env("USERPROFILE", &home)
                 .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
                 .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
@@ -35275,6 +35411,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             };
             let output = uninstall
                 .env("HOME", &home)
+                .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+                .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+                .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+                .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
                 .env("USERPROFILE", &home)
                 .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
                 .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
@@ -35518,6 +35658,10 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
             .arg(&repo);
         command
             .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+            .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+            .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+            .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
             .env("USERPROFILE", &home)
             .env("PROJECTATLAS_RUNTIME_PATH", &second_runtime)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")

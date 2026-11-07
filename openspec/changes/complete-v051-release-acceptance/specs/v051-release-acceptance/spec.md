@@ -33,6 +33,12 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **WHEN** a selected root/database mismatches or initialized state is missing
 - **THEN** the installed candidate returns typed recovery guidance without substituting or resetting a database
 
+#### Scenario: Installer fixtures preserve the operator installation
+- **WHEN** an installer acceptance fixture constructs or runs a native installer child
+- **THEN** its host home, profile, Codex and XDG paths are explicitly bound to fixture-owned state, with controlled per-test overrides retained
+- **AND** missing fixture-home authority is rejected before spawning instead of inheriting the operator home
+- **AND** an older runtime, forwarder and host state outside that fixture remain unchanged while the installer keeps its intentional operator upgrade/quarantine behavior inside the selected test context
+
 ### Requirement: Security and review findings receive current evidence-based disposition
 The release owner SHALL evaluate current dependency, scanner and automated-review findings against exact accepted source and supported trust boundaries before RC1. Confirmed defects and material unresolved proof gaps SHALL block acceptance. Repairs SHALL preserve legitimate product capabilities.
 

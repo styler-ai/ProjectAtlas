@@ -38,6 +38,12 @@ The existing source CI and release workflow share the native project-state cohor
 
 The existing packaged contract dispatcher and inventory-checked regression loops also run every permanent static-binding selector from `docs/benchmarks/static-binding-cost.md`. Match names against actual compiled inventories before execution; a selector matching zero tests is not acceptance. This is test routing and reuse of accepted fixtures, without another product implementation, numerical campaign or release pipeline. Preserve the existing shipping-binary digest guards, isolated contract target and native timeout bounds.
 
+### Keep installer fixture authority explicit
+
+The shared installer test-command constructor requires an explicit fixture home and binds home/profile, Codex, AppData and XDG locations there. Test wrappers carry that authority through installation and repair; a missing home fails before a child can inherit the operator installation. Explicit fault and native-alias overrides remain available within each fixture. Check the same factory's callers rather than repairing only a reported PATH example: the product intentionally scans known shim locations under the selected home even when PATH excludes them.
+
+The causal reproduction passed a configuration test while quarantining a different-version runtime in an outer fake home. Preserve that failed isolation proof, add the missing-authority and environment-boundary controls, and verify the corrected real installation/repair workflows plus retained outside runtime bytes. Keep the product's intended stale-runtime quarantine and supported operator paths; this correction belongs to task 2.3's test isolation, with no production installer restriction.
+
 ### Explain when to use the accepted commands
 
 The packaged ProjectAtlas skill must describe command purpose and call triggers, not only list functionality. After every compaction, an agent restores the repository's continuity context, selects its own exact checkout and uses the existing Atlas startup funnel to recover the source ownership and architecture needed for the active task. It does not initialize or fully scan an already indexed repository merely because the session resumed.
