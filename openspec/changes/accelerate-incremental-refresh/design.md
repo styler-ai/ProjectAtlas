@@ -674,6 +674,39 @@ persisted witness; unchanged performance and sampled-RSS targets remain required
 
 None.
 
+## Native navigation memory attribution
+
+The complete `54f15de` installed campaign passed 1,440 of 1,441 checks. The only
+miss remained Linux detailed-navigation sampled process-tree RSS: 19,685,376 to
+21,950,464 bytes against the unchanged 110% ceiling. All reports, sample/control
+inventories and failures remain retained. Local observations of the authenticated
+binaries preserve the expected relation and publication but do not reproduce the
+hosted gap. They establish neither its cause nor acceptance; exited-process
+memory files are unavailable rather than successful zero-RSS evidence.
+
+Use a separate, explicitly selected `01-CI` manual diagnostic to investigate that
+boundary before another product patch. `navigation_memory_run_id` is empty by
+default and the extra job runs only for a manual dispatch with an original run ID.
+That selected mode skips source planning and its dependent suites and emits no
+source `verify` result. Pull requests, metadata edits, schedules, merge groups and
+ordinary manual dispatches retain every existing source gate; release gates are
+unchanged. The diagnostic admits only a
+completed same-repository manual release run, authenticates its Linux report,
+shipping archive and executable hashes and the registered stable baseline, and
+checks that deterministic fixture dependencies match the original source.
+
+Reconstruct only the navigation fixture in isolated output, then directly invoke
+the two original CLIs with normal telemetry. One ordinary-pipe pair and one
+reversed backpressured-stdout pair collect bounded process-tree status and memory
+mapping classes, output/state evidence and host/CPU context. Failed observations
+retain their timeline, snapshot manifest and bounded partial output after owned
+cleanup. Missing or empty memory data remains unavailable without asserting that
+the process exited. The diagnostic performs no campaign or
+target evaluation, changes no registered sampler, profile, sample count or
+threshold, and cannot clear the original failure. A different VM and reconstructed
+fixture remain explicit limitations. Product changes still require a causal owning
+boundary, compatibility proof and the unchanged complete acceptance gates.
+
 ## Notification-delivery finding during platform proof
 
 The macOS ARM64 installed release test exposed delayed callback delivery after an

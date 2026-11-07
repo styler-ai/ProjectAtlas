@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep campaigns manual; admit only the explicit prepublication indexing diagnostic."""
+"""Keep campaigns and original-artifact resource inspection explicitly selected."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py", "indexing_navigation_resources.py")
+CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py", "indexing_navigation_resources.py", "native_navigation_memory.py")
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 
 
@@ -69,7 +69,9 @@ def campaign_entrypoint(line: str) -> bool:
 
 
 def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int) -> bool:
-    """Admit only the opt-in step of the dispatch-only prepublication diagnostic."""
+    """Admit separately guarded manual measurement or original-artifact inspection."""
+    if "native_navigation_memory.py" in lines[position]:
+        return explicit_navigation_memory_diagnostic(relative, lines, position)
     supplemental = "indexing_navigation_resources.py" in lines[position]
     if relative != ".github/workflows/release.yml" or not ("indexing_acceptance.py" in lines[position] or supplemental):
         return False
@@ -90,6 +92,33 @@ def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int)
             guard = ("        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
                      if supplemental else "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}")
             return guard in lines[start:position]
+    return False
+
+
+def explicit_navigation_memory_diagnostic(relative: str, lines: list[str], position: int) -> bool:
+    """Keep original-artifact composition inspection off ordinary CI events."""
+    if relative != ".github/workflows/ci.yml":
+        return False
+    source = "\n".join(lines)
+    event = re.search(r"^on:\n(.*?)(?=^\S)", source, re.MULTILINE | re.DOTALL)
+    if event is None or "  workflow_dispatch:\n" not in event[1]:
+        return False
+    option = re.search(r"^      navigation_memory_run_id:\n((?:^        [^\n]*\n)+)", event[1] + "\n", re.MULTILINE)
+    if option is None or '        default: ""\n' not in option[1] or "        type: string\n" not in option[1]:
+        return False
+    isolation = "!(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')"
+    plan = re.search(r"^  plan:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
+    verify = re.search(r"^  verify:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
+    if (plan is None or f"&& {isolation}" not in plan[1] or verify is None
+            or f"    if: ${{{{ always() && {isolation} }}}}" not in verify[1]):
+        return False
+    for start in range(position, -1, -1):
+        if re.fullmatch(r"  [\w-]+:", lines[start]):
+            body = lines[start:position]
+            return (lines[start] == "  navigation-resource-diagnostics:"
+                    and "    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}" in body
+                    and "    runs-on: ubuntu-latest" in body
+                    and "    timeout-minutes: 10" in body)
     return False
 
 
@@ -118,6 +147,35 @@ def self_test() -> None:
     ]:
         changed = [after if line == before else line for line in diagnostic]
         assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
+    native = [
+        "on:", "  pull_request:", "  workflow_dispatch:", "    inputs:",
+        "      navigation_memory_run_id:", '        default: ""', "        type: string",
+        "permissions:", "  contents: read", "jobs:", "  navigation-resource-diagnostics:",
+        "    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}",
+        "    runs-on: ubuntu-latest", "    timeout-minutes: 10", "    steps:",
+        "      - run: python3 docs/benchmarks/harness/native_navigation_memory.py",
+    ]
+    native[10:10] = [
+        "  plan:", "    if: ordinary_source && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')",
+        "  verify:", "    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}",
+    ]
+    assert campaign_entrypoint(native[-1])
+    assert explicit_indexing_diagnostic(".github/workflows/ci.yml", native, len(native) - 1)
+    assert not explicit_indexing_diagnostic(route, native, len(native) - 1)
+    for before, after in [
+        ('        default: ""', '        default: "17"'),
+        ("        type: string", "        type: boolean"),
+        ("  navigation-resource-diagnostics:", "  ordinary-job:"),
+        ("    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}", "    if: always()"),
+        ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
+        ("    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}", "    if: always()"),
+        ("    if: ordinary_source && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')", "    if: ordinary_source"),
+    ]:
+        changed = [after if line == before else line for line in native]
+        assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
+    for entrypoint in ("indexing_acceptance.py", "indexing_navigation_resources.py", "system_scale.py", "agent_navigation.py"):
+        changed = [line.replace("native_navigation_memory.py", entrypoint) for line in native]
+        assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
     assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
     supplemental = diagnostic.copy()
     supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"

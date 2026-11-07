@@ -13,6 +13,12 @@ on:
     types: [opened, reopened, synchronize, edited]
   merge_group:
   workflow_dispatch:
+    inputs:
+      navigation_memory_run_id:
+        description: "Original completed release run for diagnostic-only Linux memory attribution"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "17 3 * * 1"
 
@@ -29,7 +35,7 @@ jobs:
   plan:
     name: plan
     # A base retarget changes the source diff without changing the head; other edits are metadata-only.
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    if: (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null) && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')
     runs-on: ubuntu-latest
     outputs:
       base: ${{ steps.inputs.outputs.base }}
@@ -249,6 +255,7 @@ jobs:
         run: |
           python3 .github/scripts/verify-manual-benchmark-policy.py
           python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_native_navigation_memory.py
 
       - name: Published benchmark measurement locks
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
@@ -1538,10 +1545,50 @@ jobs:
             }
           }
 
+  navigation-resource-diagnostics:
+    name: navigation-resource-diagnostics
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout diagnostic source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify diagnostic controls
+        run: python3 -m unittest discover -s docs/benchmarks/harness -p test_native_navigation_memory.py
+      - name: Inspect original native navigation memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN_ID: ${{ inputs.navigation_memory_run_id }}
+        run: |
+          python3 docs/benchmarks/harness/native_navigation_memory.py \
+            --original-run-id "$ORIGINAL_RUN_ID" \
+            --output-root "$RUNNER_TEMP/navigation-memory-diagnosis"
+      - name: Preserve diagnostic observations
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-navigation-memory-diagnosis
+          path: |
+            ${{ runner.temp }}/navigation-memory-diagnosis/diagnosis.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/original-results.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/original-artifacts.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/*-ordinary/
+            ${{ runner.temp }}/navigation-memory-diagnosis/*-hold/
+          if-no-files-found: warn
+          retention-days: 7
+
   verify:
     name: verify
     # Every native CI suite supplies verify; metadata must validate real source proof.
-    if: always()
+    # An explicit diagnostic is not source proof and must not emit a green verify.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}
     needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]
     runs-on: ubuntu-latest
     timeout-minutes: 125
