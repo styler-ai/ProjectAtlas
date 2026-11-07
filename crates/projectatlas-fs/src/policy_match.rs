@@ -183,7 +183,7 @@ impl RootScanMatcher<'_> {
     /// Perform one admission; the public boundary makes any failure terminal.
     fn classify_path(&mut self, path: &Path) -> Result<bool, PolicyMatchError> {
         self.check()?;
-        let absolute = self.policy.absolute_target(path);
+        let absolute = self.policy.absolute_target(path)?;
         if should_skip_path(&self.policy.root, &absolute, &self.policy.options) {
             return Ok(true);
         }

@@ -1711,6 +1711,15 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
                 Err(source) => return Err(source),
             }
         };
+        // This query describes a lookup directory. On Apple, whichdisk pins
+        // regular files too; closing such a probe could discard SQLite locks
+        // before admission rejects an invalid regular-file parent.
+        if !fs::metadata(&probe)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "managed name lookup parent is not a directory",
+            ));
+        }
         let volume = whichdisk::resolve(&probe)?;
         match volume.case_sensitive() {
             Some(true) => Ok(false),

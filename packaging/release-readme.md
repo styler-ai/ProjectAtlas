@@ -28,3 +28,6 @@ relying on a newly installed bare command.
 @RELEASE_CHANNEL_GUIDANCE@
 The matching source and release information are available at
 https://github.com/styler-ai/ProjectAtlas/tree/@RELEASE_VERSION@.
+
+The canonical ignore matcher attribution and local patch notice are included in
+`IGNORE-LICENSE-MIT` and `IGNORE-POLICY-INPUTS.md`.

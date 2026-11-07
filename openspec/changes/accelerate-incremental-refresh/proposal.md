@@ -8,10 +8,13 @@ Indexing and refreshing a large project can take too long and hit a deadline. Ve
 
 - Set separate, measured improvement targets for initial indexing, full `scan`, explicit symbol/graph rebuilding, cold CLI refresh, warm MCP, unchanged projects and small or large change sets. A faster watch-once path alone does not complete this issue.
 - Settle one shared operation plan: trusted no-op, affected-data update or required full work. Use lightweight ordered source comparison, reuse valid source/parse evidence and remove repeated whole-project work in the existing owners. Focused measurements verify this architecture; they are not an open-ended search for it.
-- Reuse the existing watcher and source observer safely. With trustworthy change evidence, update all changed sources and affected data, and make a verified unchanged refresh a cheap no-op.
+- Reuse the existing watcher and source observer safely. With trustworthy change evidence, update all changed sources and affected data, and make an exactly reconciled unchanged refresh avoid derived work. Zero-source-work warm admission is explicitly deferred to unscheduled #725 by the accepted RC1 scope.
 - Reconcile uncertain history, offline edits and relevant configuration changes exactly. Preserve the complete results and force/rebuild semantics of initial and full indexing.
 - Choose bounded default work budgets from the work required. Preserve explicit caller limits, cancellation, atomic publication, authored purposes, native identity and safe retry.
+- Preserve exact schema admission in the shared metadata owner: match SQLite's reserved internal namespace literally, refuse foreign or unsupported user objects before initialization or migration, and retain genuine engine statistics and permitted extension indexes. Apply the same complete user-object inventory to compatibility and rollback proofs.
+- Keep bounded-refusal counters in path units. A dependency-closure refusal reports known affected source paths, rather than graph rows or canonical keys; its source-change categories remain unclassified. Preserve the existing schema, limits, scan recovery and prior publication.
 - Prove each improvement with the optimized installed product, normal telemetry, realistic large-project fixtures, work counts and resource measurements on supported platforms.
+- For RC1, permit the observed approximately 11.5% Linux detailed-navigation sampled-RSS increase as an explicit bounded tradeoff. Every registered assertion other than that single RSS assertion must pass, including latency, throughput, work counts, correctness, state, compatibility and failure controls. Preserve the original 10% target verdict and raw reports; retain every other limit and required workflow contract. This allowance does not claim that memory use improved or that the earlier increase's cause was established.
 
 ## Capabilities
 
@@ -29,7 +32,7 @@ The existing init, scan, symbol-build and watch adapters; filesystem and source-
 
 ## Release Scope
 
-#708 is a high-priority 0.5.1 must-have under release owner #715. Move it out of #493's 0.6.0 child/blocker set. This change publishes the complete plan; implementation and measured speedups remain pending. Start with the baseline and cold-CLI design gate after specification review and native milestone/parent/blocker admission.
+#708 is a high-priority 0.5.1 must-have under release owner #715. Move it out of #493's 0.6.0 child/blocker set. The implementation tasks distinguish accepted source improvements from remaining combined installed-platform proof. Preserve the settled exact cold-CLI contract and preregistered targets through final integration and release acceptance.
 
 ## Non-Goals
 

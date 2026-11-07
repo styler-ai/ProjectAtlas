@@ -9685,7 +9685,11 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             let normalized = current_description.to_lowercase();
             for fragment in [
                 "cooperative indexing-work budget",
-                "30-minute default and ceiling",
+                "automatic work-based default",
+                "30-minute ceiling",
+                "unknown-work fallback",
+                "explicit values take precedence",
+                "zero refuses",
                 "clamped",
                 "fail closed",
                 "setup after work-control creation",
@@ -13881,7 +13885,7 @@ fn observed_mcp_reconciles_document_only_target_changes() -> Result<(), Box<dyn 
 // flood reproduction. Shared fence/control units run on every native platform.
 #[cfg(target_os = "linux")]
 #[test]
-fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(), Box<dyn Error>> {
+fn continuous_cli_policy_flood_preserves_refresh_and_later_edits() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         Arc,
@@ -13907,9 +13911,9 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
     /// intervening capture must finish before an edit can be admitted here.
     fn during_watch_wait(
         child: &mut Child,
-        polling: bool,
+        required_polling: Option<bool>,
         edit: impl FnOnce() -> Result<(), Box<dyn Error>>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<bool, Box<dyn Error>> {
         fn has_inotify(descriptors: &Path) -> io::Result<bool> {
             for entry in fs::read_dir(descriptors)? {
                 match fs::read_link(entry?.path()) {
@@ -13929,25 +13933,69 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         let syscall = process.join("syscall");
         let status = process.join("status");
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if child.try_wait()?.is_some() || Instant::now() >= deadline {
-                return Err(io::Error::other("watch did not reach its required idle phase").into());
-            }
-            let is_wait = |channel: &str| {
-                if polling {
-                    channel.trim() == "hrtimer_nanosleep"
-                } else {
-                    channel.trim().starts_with("futex")
-                }
+        let mut observed_wait = None;
+        // Kernel wait-channel symbols can be unavailable or change spelling.
+        // Match the actual target ABI call; keep wchan only as diagnostics.
+        let is_wait = |snapshot: &str, polling: bool| {
+            let mut arguments = snapshot.split_whitespace();
+            let Some(number) = arguments
+                .next()
+                .and_then(|number| number.parse::<nix::libc::c_long>().ok())
+            else {
+                return false;
             };
-            if has_inotify(&descriptors)? == polling
-                || !is_wait(&fs::read_to_string(&wait_channel)?)
-            {
+            if polling {
+                let sleeping = number == nix::libc::SYS_clock_nanosleep;
+                // The x86 ABIs also expose nanosleep directly;
+                // aarch64 instead provides clock_nanosleep as its sleep ABI.
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                let sleeping = sleeping || number == nix::libc::SYS_nanosleep;
+                sleeping
+            } else {
+                // An untimed channel park is idle; a timed debounce or worker
+                // join is not proof that reconciliation has finished.
+                let mut argument = || {
+                    arguments
+                        .next()
+                        .and_then(|value| value.strip_prefix("0x"))
+                        .and_then(|value| u64::from_str_radix(value, 16).ok())
+                };
+                let _address = argument();
+                let operation = argument();
+                let expected = argument();
+                let timeout = argument();
+                number == nix::libc::SYS_futex
+                    && operation.is_some_and(|operation| {
+                        let command = operation & 0x7f;
+                        command == nix::libc::FUTEX_WAIT as u64
+                            || command == nix::libc::FUTEX_WAIT_BITSET as u64
+                    })
+                    && expected == Some(u64::from(u32::MAX))
+                    && timeout == Some(0)
+            }
+        };
+        loop {
+            let exit = child.try_wait()?;
+            if exit.is_some() {
+                return Ok(false);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "watch did not reach its required idle phase: required_polling={required_polling:?}, exit={exit:?}, last_wait={observed_wait:?}"
+                )).into());
+            }
+            let inotify = has_inotify(&descriptors)?;
+            let polling = !inotify;
+            let channel = fs::read_to_string(&wait_channel)
+                .unwrap_or_else(|error| format!("unavailable: {error}"));
+            let sampled_syscall = fs::read_to_string(&syscall)?;
+            let waiting = is_wait(&sampled_syscall, polling);
+            observed_wait = Some((inotify, channel, sampled_syscall.clone()));
+            if required_polling.is_some_and(|required| required != polling) || !waiting {
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            let sampled_syscall = fs::read_to_string(&syscall)?;
-            if !is_wait(&fs::read_to_string(&wait_channel)?) {
+            if fs::read_to_string(&syscall)? != sampled_syscall {
                 continue;
             }
             signal(child, "-STOP", signal_program)?;
@@ -13970,7 +14018,8 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
                     let result = edit();
                     let resumed = signal(child, "-CONT", signal_program);
                     result?;
-                    return resumed;
+                    resumed?;
+                    return Ok(true);
                 }
                 result => {
                     let resumed = signal(child, "-CONT", signal_program);
@@ -13979,6 +14028,41 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
                 }
             }
         }
+    }
+
+    fn stop_noise(
+        stop: &AtomicBool,
+        actor: &mut Option<thread::JoinHandle<io::Result<usize>>>,
+    ) -> io::Result<usize> {
+        stop.store(true, Ordering::Release);
+        actor.take().map_or(Ok(0), |actor| {
+            actor
+                .join()
+                .map_err(|_panic| io::Error::other("policy flood actor panicked"))?
+        })
+    }
+
+    fn await_source(
+        child: &mut Child,
+        database: &Path,
+        path: &str,
+    ) -> Result<bool, Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while AtlasStore::open_read_only(database)?
+            .load_node_by_path(path)?
+            .is_none()
+        {
+            if child.try_wait()?.is_some() {
+                return Ok(false);
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    io::Error::other(format!("watch did not publish source edit {path}")).into(),
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(true)
     }
 
     // The witness never signals a PID, even on the unguarded regression path.
@@ -13999,7 +14083,7 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
         "signal command ran after the child was reaped",
     )?;
 
-    for later_handoff in [false, true] {
+    for later_noise in [false, true] {
         let temp = tempfile::tempdir()?;
         let directory = temp.path().canonicalize()?;
         let root = directory.join(TEST_REPO_DIR);
@@ -14009,8 +14093,8 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             root.join("README.md"),
             "# Watch\n[source](src/file0000.rs)\n[later](src/later.rs)\n",
         )?;
-        // Enough ordinary source work to overlap native ingress without sleeps
-        // or a production hook inside reconciliation.
+        // Keep the original representative source corpus. Native callback/fence
+        // overlap is schedule-dependent; the shared-runner unit forces it.
         for ordinal in 0..512 {
             fs::write(
                 root.join(format!("src/file{ordinal:04}.rs")),
@@ -14044,7 +14128,7 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             .timeout(Duration::from_secs(60))
             .assert()
             .success();
-        let (identity, purposes, revision, generation) = {
+        let (identity, purposes, revision) = {
             let store = AtlasStore::open_for_project(&database, &root)?;
             store.set_purpose(
                 "README.md",
@@ -14060,14 +14144,12 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
                 store.project_instance_id()?,
                 mcp_database_snapshot(&database)?.authored_purposes,
                 store.authored_purpose_revision()?,
-                store.index_publication()?,
             )
         };
-        if later_handoff {
-            fs::write(root.join("src/ready.rs"), "pub fn ready() {}\n")?;
-        }
+        fs::write(root.join("src/ready.rs"), "pub fn ready() {}\n")?;
         let stop = Arc::new(AtomicBool::new(false));
         let start_noise = || {
+            stop.store(false, Ordering::Release);
             let stop = Arc::clone(&stop);
             let noise = directory.join("λ-sibling");
             let (sender, ready) = mpsc::sync_channel(1);
@@ -14086,11 +14168,12 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             (actor, ready)
         };
         let mut actor = None;
+        let mut writes = 0;
         let mut watch = None;
         let operation = (|| -> Result<(), Box<dyn Error>> {
-            if !later_handoff {
-                // Establish noise before spawning the CLI, so a descheduled
-                // test thread cannot accidentally exercise only a later fence.
+            if !later_noise {
+                // Exercise noise before startup as well as after a quiet
+                // native capture, without assuming callbacks overlap a fence.
                 let (spawned, ready) = start_noise();
                 actor = Some(spawned);
                 ready.recv_timeout(Duration::from_secs(60))?;
@@ -14107,33 +14190,44 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             let child = watch
                 .as_mut()
                 .ok_or_else(|| io::Error::other("watch child missing"))?;
-            if later_handoff {
-                let deadline = Instant::now() + Duration::from_secs(60);
-                while AtlasStore::open_read_only(&database)?.index_publication()? == generation {
-                    if child.try_wait()?.is_some() || Instant::now() >= deadline {
-                        return Err(io::Error::other(
-                            "native watch did not publish its initial cycle",
-                        )
-                        .into());
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                // Publication precedes the final ingress fence. Confirm the
-                // main thread has returned to native receive before flooding.
-                during_watch_wait(child, false, || Ok(()))?;
+            rust_binding_require(
+                await_source(child, &database, "src/ready.rs")?,
+                "watch exited before its initial source publication",
+            )?;
+            writes += stop_noise(&stop, &mut actor)?;
+            // Publication precedes the final fence. Quiesce the producer and
+            // verify the owned child is idle before authoring the next edit.
+            // A quiet startup must be native; noisy startup may already poll.
+            let edited = during_watch_wait(child, later_noise.then_some(false), || {
                 let (spawned, ready) = start_noise();
                 actor = Some(spawned);
                 ready.recv_timeout(Duration::from_secs(60))?;
-                fs::write(root.join("src/trigger.rs"), "pub fn trigger() {}\n")?;
-            }
-            // Native observation must be released and the immediate polling
-            // capture complete before operator edits. Keep sibling noise active
-            // throughout, and retain the production refusal for capture drift.
-            during_watch_wait(child, true, || {
                 fs::write(&rules, "src/file0000.rs\n")?;
                 fs::write(root.join("src/later.rs"), "pub fn later() {}\n")?;
                 Ok(())
             })?;
+            rust_binding_require(edited, "watch exited before its required later edits")?;
+            rust_binding_require(
+                await_source(child, &database, "src/later.rs")?,
+                "watch exited before publishing its required later edits",
+            )?;
+            writes += stop_noise(&stop, &mut actor)?;
+            // Native mode counts refreshes, including conservative rechecks;
+            // polling also counts no-op samples. Drive any remaining cycles,
+            // allowing the bounded command to finish before these extra edits.
+            for ordinal in 0..2 {
+                let path = format!("src/progress_{ordinal}.rs");
+                let edited = during_watch_wait(child, None, || {
+                    fs::write(
+                        root.join(&path),
+                        format!("pub fn progress_{ordinal}() {{}}\n"),
+                    )?;
+                    Ok(())
+                })?;
+                if !edited || !await_source(child, &database, &path)? {
+                    break;
+                }
+            }
             let deadline = Instant::now() + Duration::from_secs(60);
             while child.try_wait()?.is_none() {
                 if Instant::now() >= deadline {
@@ -14146,14 +14240,7 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             }
             Ok(())
         })();
-        stop.store(true, Ordering::Release);
-        let writes = match actor {
-            Some(actor) => actor
-                .join()
-                .map_err(|_panic| io::Error::other("policy flood actor panicked"))
-                .and_then(|result| result),
-            None => Ok(0),
-        };
+        let remaining_writes = stop_noise(&stop, &mut actor);
         let output = match watch {
             Some(mut child) => {
                 if child.try_wait()?.is_none() {
@@ -14163,17 +14250,42 @@ fn continuous_cli_policy_flood_preserves_polling_and_later_edits() -> Result<(),
             }
             None => None,
         };
-        operation?;
+        if let Err(source) = operation {
+            return Err(WatchFixtureCommandError {
+                operation: if later_noise {
+                    "continuous watch later policy flood"
+                } else {
+                    "continuous watch initial policy flood"
+                },
+                source,
+                stdout: output.as_ref().map_or_else(String::new, |output| {
+                    String::from_utf8_lossy(&output.stdout).into_owned()
+                }),
+                stderr: output.as_ref().map_or_else(String::new, |output| {
+                    String::from_utf8_lossy(&output.stderr).into_owned()
+                }),
+            }
+            .into());
+        }
         let output = output.ok_or_else(|| io::Error::other("watch output missing"))?;
-        rust_binding_require(writes? > 0, "native policy flood produced no callbacks")?;
+        writes += remaining_writes?;
+        rust_binding_require(writes > 0, "policy flood actor produced no sibling writes")?;
         rust_binding_require(
             output.status.success(),
             &format!("watch failed: {}", String::from_utf8_lossy(&output.stderr)),
         )?;
         let report: Value = serde_json::from_slice(&output.stdout)?;
-        require_json_string(&report, &["mode"], "portable-polling")?;
         require_json_usize(&report, &["cycles"], 4)?;
-        require_json_contains(&report, &["fallback_reason"], "bounded native refresh")?;
+        match report["mode"].as_str() {
+            Some("notify") => rust_binding_require(
+                report["fallback_reason"].is_null(),
+                "native watch unexpectedly reported a fallback",
+            )?,
+            Some("portable-polling") => {
+                require_json_contains(&report, &["fallback_reason"], "bounded native refresh")?;
+            }
+            mode => return Err(io::Error::other(format!("unexpected watch mode {mode:?}")).into()),
+        }
         let relations = Command::from_std(command())
             .args([
                 "symbols",

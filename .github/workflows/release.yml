@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_indexing_performance:
+        description: "Explicit four-platform 0.5.1 indexing comparison (prepublish diagnostic only)"
+        required: false
+        default: false
+        type: boolean
       parser_pack_run_id:
         description: "Successful clean optional-parser-pack workflow run for this release tree"
         required: true
@@ -38,6 +43,11 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    # Bound hosted disk while tests make independent executable copies, as in CI.
+    # Keep debug assertions, unoptimized checks, and the release package profile.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 1
+      CARGO_PROFILE_TEST_DEBUG: 1
     outputs:
       package_version: ${{ steps.release_version.outputs.package_version }}
       release_tag: ${{ steps.release_version.outputs.tag }}
@@ -50,6 +60,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+
+      - name: Validate explicit performance diagnostic
+        env:
+          REQUESTED_PERFORMANCE: ${{ inputs.run_indexing_performance }}
+          PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re
+          if os.environ["REQUESTED_PERFORMANCE"] == "true":
+              if os.environ["PREPUBLISH_ONLY"] != "true" or not re.fullmatch(r"v0\.5\.(?:0|1-rc[1-9][0-9]*)", os.environ["RELEASE_VERSION"]):
+                  raise SystemExit("Indexing comparison requires an explicit prepublish-only 0.5.0-development or 0.5.1 RC diagnostic")
+          PYTHON
 
       - name: Classify release version
         id: release_version
@@ -184,7 +206,7 @@ jobs:
 
       - name: Filtered custom harness compatibility
         timeout-minutes: 10
-        run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
+        run: cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests
         run: cargo test --doc --workspace --all-features --locked
@@ -208,7 +230,9 @@ jobs:
         run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
 
       - name: Manual-only full benchmark policy
-        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+        run: |
+          python3 .github/scripts/verify-manual-benchmark-policy.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
 
       - name: Published benchmark measurement locks
         run: python3 .github/scripts/verify-published-benchmark-locks.py
@@ -226,7 +250,8 @@ jobs:
     name: package ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Intel needs time for shipping, integration-test and CLI unit-test compilation.
+    timeout-minutes: ${{ matrix.label == 'macos-x64' && 90 || 60 }}
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
       RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
@@ -261,7 +286,23 @@ jobs:
           CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
             --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
             --test e2e_worktrees --test e2e_maintenance --no-run
-          CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
+            --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit \
+            -- --exact --include-ignored --nocapture
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-fs \
+            --lib -- --include-ignored --nocapture
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          runtime_digest_before="$("${digest_command[@]}" target/release/projectatlas)"
+          cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          runtime_digest_after="$("${digest_command[@]}" target/release/projectatlas)"
+          if [[ "$runtime_digest_after" != "$runtime_digest_before" ]]; then
+            echo "Release helper build changed the shipping runtime." >&2
+            exit 1
+          fi
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
@@ -272,7 +313,7 @@ jobs:
             fi
             cp "$binary" "contract-artifacts/bin/$binary_name"
           done
-          cp "$contract_target/release/optional_parser_pack_release" contract-artifacts/bin/optional_parser_pack_release
+          cp target/release/optional_parser_pack_release contract-artifacts/bin/optional_parser_pack_release
           cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -321,6 +362,8 @@ jobs:
             -e "s|@RELEASE_CHANNEL_GUIDANCE@|${release_channel_guidance}|g" \
             packaging/release-readme.md > "dist/projectatlas/README.md"
           cp LICENSE "dist/projectatlas/"
+          cp vendor/ignore/LICENSE-MIT "dist/projectatlas/IGNORE-LICENSE-MIT"
+          cp vendor/ignore/PROJECTATLAS.md "dist/projectatlas/IGNORE-POLICY-INPUTS.md"
           cp packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md "dist/projectatlas/PDF-PARSER.md"
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
@@ -359,7 +402,8 @@ jobs:
     name: package windows-x64
     needs: verify
     runs-on: windows-latest
-    timeout-minutes: 30
+    # Allow both independent optimized trees: shipping runtime and test contracts.
+    timeout-minutes: 60
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
       RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
@@ -386,8 +430,20 @@ jobs:
           $env:CARGO_TARGET_DIR = $contractTarget
           cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --release --all-features -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_mutation_admission_retains_preexisting_source_repair_through_commit -- --exact --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --release --all-features -p projectatlas-fs --lib -- --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $shippingTarget = Join-Path $env:GITHUB_WORKSPACE "target"
+          $shippingRuntime = Join-Path $shippingTarget "release\projectatlas.exe"
+          $runtimeDigestBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $shippingRuntime).Hash
+          $env:CARGO_TARGET_DIR = $shippingTarget
           cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $runtimeDigestAfter = (Get-FileHash -Algorithm SHA256 -LiteralPath $shippingRuntime).Hash
+          if ($runtimeDigestAfter -ne $runtimeDigestBefore) {
+            throw "Release helper build changed the shipping runtime."
+          }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
@@ -397,7 +453,7 @@ jobs:
             }
             Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
           }
-          Copy-Item -LiteralPath (Join-Path $contractTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
+          Copy-Item -LiteralPath (Join-Path $shippingTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
           @'
           param(
             [Parameter(ValueFromRemainingArguments = $true)]
@@ -484,6 +540,8 @@ jobs:
           (Get-Content "packaging/release-readme.md" -Raw).Replace("@RELEASE_VERSION@", $env:RELEASE_VERSION).Replace("@PACKAGE_VERSION@", $packageVersion).Replace("@RELEASE_CHANNEL_GUIDANCE@", $releaseChannelGuidance) |
             Set-Content -LiteralPath "dist/projectatlas/README.md" -Encoding utf8
           Copy-Item "LICENSE" "dist/projectatlas/"
+          Copy-Item "vendor/ignore/LICENSE-MIT" "dist/projectatlas/IGNORE-LICENSE-MIT"
+          Copy-Item "vendor/ignore/PROJECTATLAS.md" "dist/projectatlas/IGNORE-POLICY-INPUTS.md"
           Copy-Item "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md" "dist/projectatlas/PDF-PARSER.md"
           Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
@@ -586,6 +644,22 @@ jobs:
             echo "PROJECTATLAS_CODEX_COMMAND=$codex_command"
             echo "PROJECTATLAS_CODEX_VERSION=0.162.1"
           } >> "$GITHUB_ENV"
+
+      - name: Capture indexing measurement interpreter
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import json, os, sqlite3, sys
+          from pathlib import Path
+          command = Path(sys.executable).resolve(strict=True)
+          if not command.is_file() or not os.access(command, os.X_OK) or any(c in str(command) for c in "\r\n"):
+              raise SystemExit("measurement interpreter must be an executable absolute path")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              output.write(f"PROJECTATLAS_INDEX_BASE_PYTHON={command}\n")
+          print(json.dumps({"executable": str(command), "python": sys.version, "sqlite": sqlite3.sqlite_version}))
+          PYTHON
 
       - name: Prepare isolated macOS arm64 host state
         if: matrix.label == 'macos-arm64-posix'
@@ -902,6 +976,83 @@ jobs:
               "$contract" "$test" --exact --include-ignored --nocapture
           done
 
+      - name: Prepare explicit indexing comparison baseline
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          python_command="${PROJECTATLAS_INDEX_BASE_PYTHON:?measurement interpreter was not captured before isolation}"
+          "$python_command" .github/scripts/prepare-indexing-baseline.py \
+            --suffix "$BASELINE_SUFFIX" --destination "$RUNNER_TEMP/projectatlas-indexing-baseline"
+          "$python_command" -m venv "$RUNNER_TEMP/projectatlas-indexing-python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/Scripts/python.exe"
+          else
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/bin/python"
+          fi
+          "$measurement_python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r docs/benchmarks/harness/indexing-requirements.txt
+          echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
+
+      - name: Explicit installed indexing performance diagnostic
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        timeout-minutes: 30
+        shell: bash
+        env:
+          CANDIDATE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
+          PYTHONPATH=docs/benchmarks/harness "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -m unittest test_indexing_acceptance.DatabaseInspection
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"
+          else
+            candidate="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.tar.gz"
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_acceptance.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
+            --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
+            --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+
+      - name: Upload explicit indexing diagnostic result
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-performance-${{ matrix.label }}
+          path: ${{ runner.temp }}/projectatlas-indexing-measurement/results.json
+          if-no-files-found: warn
+
+      - name: Supplemental native navigation resource attribution
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$RUNNER_TEMP/projectatlas-indexing-measurement/results.json" ]]; then
+            echo "No original indexing report is available for supplemental attribution."
+            exit 0
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_navigation_resources.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --candidate "$PROJECTATLAS_PACKAGED_RUNTIME" \
+            --campaign-root "$RUNNER_TEMP/projectatlas-indexing-measurement" \
+            --output-root "$RUNNER_TEMP/projectatlas-indexing-navigation-resources"
+
+      - name: Upload supplemental native navigation resources
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-navigation-resources-${{ matrix.label }}
+          path: ${{ runner.temp }}/projectatlas-indexing-navigation-resources/
+          if-no-files-found: warn
+
       - name: Installed-candidate native Btrfs database placement contract
         if: matrix.label == 'linux-x64-posix'
         timeout-minutes: 10
@@ -1212,6 +1363,59 @@ jobs:
               throw "Installed-candidate contract '$test' failed with exit code $LASTEXITCODE."
             }
           }
+
+      - name: Prepare explicit indexing comparison baseline
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SUFFIX: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          "$python_command" .github/scripts/prepare-indexing-baseline.py \
+            --suffix "$BASELINE_SUFFIX" --destination "$RUNNER_TEMP/projectatlas-indexing-baseline"
+          "$python_command" -m venv "$RUNNER_TEMP/projectatlas-indexing-python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/Scripts/python.exe"
+          else
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/bin/python"
+          fi
+          "$measurement_python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r docs/benchmarks/harness/indexing-requirements.txt
+          echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
+
+      - name: Explicit installed indexing performance diagnostic
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        timeout-minutes: 30
+        shell: bash
+        env:
+          CANDIDATE_SUFFIX: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
+          PYTHONPATH=docs/benchmarks/harness "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -m unittest test_indexing_acceptance.DatabaseInspection
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"
+          else
+            candidate="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.tar.gz"
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_acceptance.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
+            --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
+            --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+
+      - name: Upload explicit indexing diagnostic result
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-performance-windows-x64
+          path: ${{ runner.temp }}/projectatlas-indexing-measurement/results.json
+          if-no-files-found: warn
 
   parser-pack-assets:
     name: optional-parser release assets

@@ -145,6 +145,9 @@ exacl.workspace = true
 xattr = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 winapi-util = { workspace = true, optional = true }
 windows-permissions = { workspace = true, optional = true }

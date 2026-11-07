@@ -1,6 +1,7 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
 mod content_classification;
+mod database_file_identity;
 mod derived_snapshot;
 mod diagnostics;
 mod hydration;
@@ -16,6 +17,8 @@ pub use content_classification::{
     FileContentClassification, FileContentClassificationPage,
     MAX_FILE_CONTENT_CLASSIFICATION_PAGE_ROWS, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
 };
+use database_file_identity::DatabaseConnection;
+pub use database_file_identity::DatabaseFileIdentity;
 pub use derived_snapshot::{
     DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
     DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,
@@ -1018,7 +1021,7 @@ pub struct IndexPublicationGuard<'store> {
 /// `SQLite`-backed `ProjectAtlas` index store.
 pub struct AtlasStore {
     /// Active database connection for index reads and writes.
-    connection: Connection,
+    connection: DatabaseConnection,
     /// Whether normal reads currently share one explicit `SQLite` snapshot.
     read_snapshot_active: Cell<bool>,
     /// Durable database path when the store is file-backed.
@@ -1966,7 +1969,7 @@ impl AtlasStore {
                     validated_project_root_identity,
                     validated_project_instance_id,
                 )) => Ok(Self {
-                    connection,
+                    connection: database_file_identity::own_connection(connection),
                     read_snapshot_active: Cell::new(false),
                     database_path: Some(path.to_path_buf()),
                     database_location: Some(database_location),
@@ -1986,7 +1989,7 @@ impl AtlasStore {
                 validated_project_instance_id,
             ) = opened?;
             Ok(Self {
-                connection,
+                connection: database_file_identity::own_connection(connection),
                 read_snapshot_active: Cell::new(false),
                 database_path: Some(path.to_path_buf()),
                 database_location: Some(database_location),
@@ -2064,7 +2067,7 @@ impl AtlasStore {
         };
         let database_location = sqlite_profile::inspect_database_location(path)?;
         Ok(Self {
-            connection,
+            connection: database_file_identity::own_connection(connection),
             read_snapshot_active: Cell::new(true),
             database_path: Some(path.to_path_buf()),
             database_location: Some(database_location),
@@ -2083,7 +2086,7 @@ impl AtlasStore {
     /// Returns an error if schema setup fails.
     pub fn in_memory() -> DbResult<Self> {
         let store = Self {
-            connection: Connection::open_in_memory()?,
+            connection: database_file_identity::own_connection(Connection::open_in_memory()?),
             read_snapshot_active: Cell::new(false),
             database_path: None,
             database_location: None,
@@ -6687,18 +6690,7 @@ pub fn preflight_project_binding_read_only(path: &Path, root: &Path) -> DbResult
 /// Returns an error if the database cannot be opened read-only or the identity
 /// row contains an invalid versioned codec payload.
 pub fn read_project_root_identity_read_only(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
-    let location = sqlite_profile::inspect_database_location(path)?;
-    if !location.database_exists {
-        return Ok(None);
-    }
-    let (preflight, _) = schema::inspect_compatibility(path, None)?;
-    if preflight.state != schema::SchemaState::Current {
-        return Ok(None);
-    }
-    let connection = schema::open_current_read_only(path, None)?.0;
-    let identity = project_identity::load_project_root_identity(&connection)?;
-    connection.execute_batch("ROLLBACK")?;
-    Ok(identity)
+    schema::read_project_root_identity(path)
 }
 
 /// Verify the current project database schema, identity, and full integrity read-only.
@@ -10496,6 +10488,49 @@ mod tests {
         if fs::read(&database)? != before {
             return Err(io::Error::other(
                 "malformed project-root identity refusal mutated the database",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Native discovery reuses one complete admission and rechecks changed schema.
+    #[test]
+    fn native_root_discovery_admits_one_snapshot_and_rechecks_schema() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("atlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = CanonicalProjectRoot::from_path(&root)?;
+        let before = schema::schema_inspection_count();
+        let discovered = read_project_root_identity_read_only(&database)?;
+        if discovered != Some(expected) {
+            return Err(
+                io::Error::other("native root discovery returned the wrong identity").into(),
+            );
+        }
+        let inspections = schema::schema_inspection_count().saturating_sub(before);
+        if inspections != 1 {
+            return Err(io::Error::other(format!(
+                "native root discovery repeated full admission: {inspections} inspections"
+            ))
+            .into());
+        }
+
+        Connection::open(&database)?
+            .execute_batch("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")?;
+        let bytes = fs::read(&database)?;
+        let before = schema::schema_inspection_count();
+        if !matches!(
+            read_project_root_identity_read_only(&database),
+            Err(DbError::SchemaShape { .. })
+        ) || schema::schema_inspection_count().saturating_sub(before) != 1
+            || fs::read(&database)? != bytes
+        {
+            return Err(io::Error::other(
+                "native root discovery cached schema facts or changed rejected storage",
             )
             .into());
         }

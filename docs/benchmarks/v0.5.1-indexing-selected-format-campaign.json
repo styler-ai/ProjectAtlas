@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "scope": "Partial authenticated installed development-candidate campaign; cancelled during Intel package construction. Windows results do not establish all-platform or RC1 acceptance. Every earlier failed target remains unwaived.",
+  "workflow_run_id": 42255591671,
+  "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42255591671",
+  "source_revision": "6c80aa2d52490c1bd43741320026819e823a28bb",
+  "workflow_status": "completed",
+  "workflow_conclusion": "cancelled",
+  "complete": false,
+  "all_platforms_passed": false,
+  "expected_registered_checks": 1441,
+  "available_registered_checks": 360,
+  "available_passed_checks": 360,
+  "authenticated_intake_sha256": "01399cf09f6a265d3e485380f0a566d50435774d481df3278d15b7a8e8caacee",
+  "construction_failure": {
+    "job_id": 128030151252,
+    "job_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42255591671/job/128030151252",
+    "platform": "macos-x64",
+    "conclusion": "cancelled",
+    "started_at": "2026-11-06T17:02:54Z",
+    "completed_at": "2026-11-06T18:03:19Z",
+    "official_annotation": "The job has exceeded the maximum execution time of 1h0m0s",
+    "shipping_compiler_reported_duration": "25m 29s",
+    "integration_test_compiler_reported_duration": "23m 32s",
+    "next_stage": "CLI unit-test binary compilation remained active at cancellation; no assertion failure was reported.",
+    "original_log_sha256": "a7cf6c3923bd3b3e2c845855ba422230056d66b543fc21dcc5edee2c6c4581ca"
+  },
+  "authenticated_packages": {
+    "linux": {
+      "job_id": 128030151527,
+      "job_conclusion": "success",
+      "artifact_id": 13523923699,
+      "artifact_sha256": "3b05a4de8f42d0398e8ba8059176379e5919b1160e7b06b7333da692beca642b",
+      "artifact_bytes": 18572284,
+      "nested_archive": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+      "nested_archive_sha256": "bfce30668e57185e0df66c3d17c232e4087a9615b31b466ef81afe3efde81903",
+      "runtime_sha256": "795b86c026f0a2f4de10d926a9bc869ebcb61c085c245efe4a3e98743a9d5cbf",
+      "original_artifact_authenticated": true
+    },
+    "arm": {
+      "job_id": 128030151351,
+      "job_conclusion": "success",
+      "artifact_id": 13525655104,
+      "artifact_sha256": "ee5152d166e835b5a2cd415848351bed44e387e8cb3e990a2825c5de8e32468f",
+      "artifact_bytes": 17360273,
+      "nested_archive": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
+      "nested_archive_sha256": "79d78a2f9c41980ed869295deebc7225a84560ce4d6241f574cf82a053ca94cb",
+      "runtime_sha256": "2e39b015c699d8da50a15dee71501f038eb9b431723acbe5ae8dd3c5b469c442",
+      "original_artifact_authenticated": true
+    },
+    "windows": {
+      "job_id": 128030151802,
+      "job_conclusion": "success",
+      "artifact_id": 13525247400,
+      "artifact_sha256": "3e7e5cf97e39365e5bc70e9a5622b0e7f95664a2ff86024c739590414fd88daa",
+      "artifact_bytes": 17815043,
+      "nested_archive": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+      "nested_archive_sha256": "13dac0922bb72ad5baf80fcedc5990a38eda7d522ab7a545c01a1cc788850ebf",
+      "runtime_sha256": "e0fb6ac15a7b10f794b6d99f5d103d19ca69501910ff71c5edddd443ebc989a4",
+      "original_artifact_authenticated": true
+    }
+  },
+  "platforms": {
+    "windows-x64": {
+      "report_artifact_id": 13526776597,
+      "report_artifact_sha256": "14cd5053e6426d77985fb82257798bad6d0ef0f2117f5c224e243282b0077226",
+      "package_artifact_id": 13525247400,
+      "package_artifact_sha256": "3e7e5cf97e39365e5bc70e9a5622b0e7f95664a2ff86024c739590414fd88daa",
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "sha256": "13dac0922bb72ad5baf80fcedc5990a38eda7d522ab7a545c01a1cc788850ebf"
+      },
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "87ae41df90b35770841ae6ca7e3d88c25ab99f0e0f83c3e3c85a235a63f30ebc"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "e0fb6ac15a7b10f794b6d99f5d103d19ca69501910ff71c5edddd443ebc989a4"
+        }
+      },
+      "source_dirty": true,
+      "data_valid": true,
+      "sample_contract_complete": true,
+      "cold_operation_records": 120,
+      "measured_warm_samples": 18,
+      "warm_attempt_audit": 20,
+      "registered_checks": 360,
+      "passed_checks": 360,
+      "targets_passed": true,
+      "failed_checks": [],
+      "measurements": {
+        "initial": {
+          "baseline": {
+            "median_seconds": 7.413989499999957,
+            "maximum_sampled_rss_bytes": 165834752,
+            "median_source_bytes_per_second": 102763.02657294084
+          },
+          "candidate": {
+            "median_seconds": 5.363792100000069,
+            "maximum_sampled_rss_bytes": 175341568,
+            "median_source_bytes_per_second": 142042.04521647852
+          }
+        },
+        "full": {
+          "baseline": {
+            "median_seconds": 10.005400699999996,
+            "maximum_sampled_rss_bytes": 165801984,
+            "median_source_bytes_per_second": 76153.67168653228
+          },
+          "candidate": {
+            "median_seconds": 6.557783200000017,
+            "maximum_sampled_rss_bytes": 173875200,
+            "median_source_bytes_per_second": 116184.9937338578
+          }
+        },
+        "rebuild": {
+          "baseline": {
+            "median_seconds": 9.481903699999975,
+            "maximum_sampled_rss_bytes": 164065280,
+            "median_source_bytes_per_second": 80358.12470864916
+          },
+          "candidate": {
+            "median_seconds": 6.157165500000019,
+            "maximum_sampled_rss_bytes": 174292992,
+            "median_source_bytes_per_second": 123739.40573791586
+          }
+        },
+        "cold_noop": {
+          "baseline": {
+            "median_seconds": 0.09001660000001266,
+            "maximum_sampled_rss_bytes": 10846208,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.08773909999996476,
+            "maximum_sampled_rss_bytes": 11792384,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "sparse": {
+          "baseline": {
+            "median_seconds": 9.638840100000039,
+            "maximum_sampled_rss_bytes": 164229120,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.23525000000006457,
+            "maximum_sampled_rss_bytes": 17580032,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "summary": {
+          "baseline": {
+            "median_seconds": 0.09772590000000037,
+            "maximum_sampled_rss_bytes": 12804096,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.09230079999997542,
+            "maximum_sampled_rss_bytes": 13053952,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "detailed": {
+          "baseline": {
+            "median_seconds": 0.0871850999999424,
+            "maximum_sampled_rss_bytes": 11984896,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.08421269999996639,
+            "maximum_sampled_rss_bytes": 12558336,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "compatible_open": {
+          "baseline": {
+            "median_seconds": 0.0903561999999738,
+            "maximum_sampled_rss_bytes": 12115968,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.08689830000002985,
+            "maximum_sampled_rss_bytes": 11751424,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "large_sparse": {
+          "baseline": {
+            "median_seconds": 23.598181000000068,
+            "maximum_sampled_rss_bytes": 336711680,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.3197121999999126,
+            "maximum_sampled_rss_bytes": 18800640,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "dense_sparse": {
+          "baseline": {
+            "median_seconds": 12.913337500000125,
+            "maximum_sampled_rss_bytes": 245567488,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 7.8818200999999135,
+            "maximum_sampled_rss_bytes": 218763264,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "semantic_upgrade": {
+          "baseline": {
+            "median_seconds": 9.783341000000064,
+            "maximum_sampled_rss_bytes": 167276544,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 6.367128700000194,
+            "maximum_sampled_rss_bytes": 175378432,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "warm_mcp": {
+          "median_seconds": {
+            "baseline": 0.041254500000150074,
+            "candidate": 0.04290029999992839
+          },
+          "rss": "not measured by public MCP route"
+        }
+      },
+      "ratios": {
+        "initial": {
+          "baseline_seconds": 7.413989499999957,
+          "candidate_seconds": 5.363792100000069,
+          "elapsed_ratio": 0.7234690715437485,
+          "sampled_rss_ratio": 1.05732704324845
+        },
+        "full": {
+          "baseline_seconds": 10.005400699999996,
+          "candidate_seconds": 6.557783200000017,
+          "elapsed_ratio": 0.6554243449740119,
+          "sampled_rss_ratio": 1.0486919143259468
+        },
+        "rebuild": {
+          "baseline_seconds": 9.481903699999975,
+          "candidate_seconds": 6.157165500000019,
+          "elapsed_ratio": 0.6493596322856596,
+          "sampled_rss_ratio": 1.062339283485208
+        },
+        "cold_noop": {
+          "baseline_seconds": 0.09001660000001266,
+          "candidate_seconds": 0.08773909999996476,
+          "elapsed_ratio": 0.9746991110523218,
+          "sampled_rss_ratio": 1.0872356495468278
+        },
+        "sparse": {
+          "baseline_seconds": 9.638840100000039,
+          "candidate_seconds": 0.23525000000006457,
+          "elapsed_ratio": 0.024406463595143948,
+          "sampled_rss_ratio": 0.10704576630502556
+        },
+        "summary": {
+          "baseline_seconds": 0.09772590000000037,
+          "candidate_seconds": 0.09230079999997542,
+          "elapsed_ratio": 0.9444865690669012,
+          "sampled_rss_ratio": 1.0195137555982086
+        },
+        "detailed": {
+          "baseline_seconds": 0.0871850999999424,
+          "candidate_seconds": 0.08421269999996639,
+          "elapsed_ratio": 0.9659070185160312,
+          "sampled_rss_ratio": 1.0478468899521531
+        },
+        "compatible_open": {
+          "baseline_seconds": 0.0903561999999738,
+          "candidate_seconds": 0.08689830000002985,
+          "elapsed_ratio": 0.9617303516532906,
+          "sampled_rss_ratio": 0.9699121027721433
+        },
+        "large_sparse": {
+          "baseline_seconds": 23.598181000000068,
+          "candidate_seconds": 0.3197121999999126,
+          "elapsed_ratio": 0.01354817136117024,
+          "sampled_rss_ratio": 0.055836019706830484
+        },
+        "dense_sparse": {
+          "baseline_seconds": 12.913337500000125,
+          "candidate_seconds": 7.8818200999999135,
+          "elapsed_ratio": 0.6103627431715338,
+          "sampled_rss_ratio": 0.890847830800794
+        },
+        "semantic_upgrade": {
+          "baseline_seconds": 9.783341000000064,
+          "candidate_seconds": 6.367128700000194,
+          "elapsed_ratio": 0.6508133264495383,
+          "sampled_rss_ratio": 1.048434094860305
+        },
+        "warm_mcp": {
+          "baseline_seconds": 0.041254500000150074,
+          "candidate_seconds": 0.04290029999992839,
+          "ratio": 1.0398938297585072
+        }
+      }
+    }
+  },
+  "unmeasured_platforms": {
+    "linux-x64-posix": "No numerical report: Unix installer/performance admission was blocked by the cancelled Intel package job.",
+    "macos-x64-posix": "No numerical report: Unix installer/performance admission was blocked by the cancelled Intel package job.",
+    "macos-arm64-posix": "No numerical report: Unix installer/performance admission was blocked by the cancelled Intel package job."
+  },
+  "normal_telemetry": "enabled",
+  "no_performance_target_or_sample_change": true
+}

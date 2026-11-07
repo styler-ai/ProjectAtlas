@@ -44,12 +44,11 @@ use crate::runtime::{
     strip_legacy_purpose, telemetry_disabled, validate_purpose_review_admission,
     validated_indexed_file_key, watcher_status_report,
 };
-#[cfg(all(test, unix))]
-use crate::runtime::{IndexReadStatus, IndexRefreshReason, IndexRefreshScope};
 #[cfg(test)]
 use crate::runtime::{
-    PURPOSE_CURATOR_RECOMMENDED_REASONING, db_sidecar_path, mcp_config_path_for_db,
-    run_scan_pipeline, synchronize_registered_worktree_usage,
+    IndexReadStatus, IndexRefreshReason, IndexRefreshScope, PURPOSE_CURATOR_RECOMMENDED_REASONING,
+    db_sidecar_path, mcp_config_path_for_db, run_scan_pipeline,
+    synchronize_registered_worktree_usage,
 };
 use crate::token_tui::{
     TokenDashboardTheme, render_token_dashboard_plain_with_theme,
@@ -981,7 +980,8 @@ struct AtlasScanParams {
     max_bytes: Option<u64>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+    /// Cooperative indexing-work budget in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+    /// Omitted limits use existing source-work estimates; explicit values take precedence and zero refuses.
     /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
     /// Covers root/config/store setup after work-control creation, traversal, source hashing,
     /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
@@ -1005,7 +1005,8 @@ struct AtlasWatchOnceParams {
     nearest_project: Option<bool>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Cooperative indexing-work budget for this refresh in seconds (30-minute default and ceiling).
+    /// Cooperative indexing-work budget for this refresh in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+    /// Omitted limits use existing source-work estimates; explicit values take precedence and zero refuses.
     /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
     /// Covers root/config/store setup after work-control creation, traversal, source hashing,
     /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
@@ -3987,6 +3988,12 @@ impl ProjectAtlasMcpServer {
         if let Some(current) = current {
             match current {
                 Ok(SourceReadAdmission::Current(outcome)) if outcome.value => {
+                    crate::runtime::check_unchanged_index_budget(
+                        options,
+                        control,
+                        outcome.work.filesystem_entries,
+                        outcome.work.filesystem_bytes,
+                    )?;
                     return Ok(WatchReport::unchanged(plan.text_options));
                 }
                 Ok(SourceReadAdmission::Reconcile(assessment)) => {
@@ -4163,7 +4170,7 @@ impl ProjectAtlasMcpServer {
             if let Some(bridge) = bridge {
                 bridge.synchronize(control);
             }
-            admission.verify()?;
+            admission.verify(&store)?;
             if let Some(bridge) = bridge {
                 bridge.synchronize(control);
             }
@@ -7732,7 +7739,11 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 Some(McpNextCall {
-                    tool: MCP_TOOL_ATLAS_WATCH_ONCE,
+                    tool: if report.requires_explicit_scan() {
+                        MCP_TOOL_ATLAS_SCAN
+                    } else {
+                        MCP_TOOL_ATLAS_WATCH_ONCE
+                    },
                     project_path: report
                         .worktree
                         .is_none()
@@ -10988,7 +10999,7 @@ mod tests {
                 ),
                 "invalid purpose path passed admission preflight",
             )?;
-            admission.verify()?;
+            admission.verify(&store)?;
         }
         transaction.commit()?;
         require(
@@ -11689,6 +11700,62 @@ mod tests {
             payload.contains(&selected_display) && payload.contains(&indexed_display),
             "MCP TOON did not retain lossless store roots",
         )
+    }
+
+    #[test]
+    fn mcp_refresh_recovery_matches_refusal_reason() -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            IndexRefreshReason::SourceChanged,
+            IndexRefreshReason::PathsChanged,
+            IndexRefreshReason::PolicyDrift,
+            IndexRefreshReason::DependencyClosureLimit,
+        ] {
+            let scan = reason == IndexRefreshReason::DependencyClosureLimit;
+            for worktree in [None, Some("issue-branch".to_string())] {
+                let error = CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: Some("/selected/project".to_string()),
+                    worktree: worktree.clone(),
+                    status: IndexReadStatus::RefreshRequired,
+                    reason,
+                    scope: IndexRefreshScope::Full,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                }));
+                let rendered = ProjectAtlasMcpServer::encode_error_payload(&error);
+                let value: serde_json::Value = toon_format::decode_default(&rendered)?;
+                let tool = if scan {
+                    "atlas_scan"
+                } else {
+                    "atlas_watch_once"
+                };
+                require(
+                    value
+                        .pointer("/error/next/tool")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(tool)
+                        && value
+                            .pointer("/error/message")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|message| message.contains(&format!("`{tool}`"))),
+                    "MCP typed and human recovery disagree with the refusal",
+                )?;
+                require(
+                    value
+                        .pointer("/error/next/worktree")
+                        .and_then(serde_json::Value::as_str)
+                        == worktree.as_deref()
+                        && value
+                            .pointer("/error/next/project_path")
+                            .and_then(serde_json::Value::as_str)
+                            == worktree.is_none().then_some("/selected/project"),
+                    "MCP refresh recovery lost its exclusive root selector",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -17546,6 +17613,7 @@ mod tests {
         fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
         let incomplete = |policy_work_limit| {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                unavailable_source_root: None,
                 policy_work_limit,
                 project_root: lossless_project_root_display(root),
                 worktree: None,

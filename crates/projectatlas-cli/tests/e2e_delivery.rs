@@ -173,7 +173,7 @@ const WORKFLOW_DOC_FILE_NAME: &str = "workflow.md";
 
 const DOCS_WORKFLOW_FILE_NAME: &str = "04-docs.yml";
 
-const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
+const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled";
 
 const CODEX_CONFIG_DIR: &str = ".codex";
 const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
@@ -490,7 +490,7 @@ const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "70218bfe77a40085c88eb14e0f09dc06dac566ec4345f5f816bb494286f0be19";
+const MCP_TOOLS_SHA256: &str = "1b04e4263156d1c188244a1f1db5b9d42f942bf88d1ba50d03b2e5d83704ea02";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -573,7 +573,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "2fa4b160266cd041d808e8709f70c3ffe9e9052cd7275fd2986dadb41df3258e";
+    "79c32514a21de674a55c76426da1ec1ae0e69d6b0ee39b34b69404c83ffca3dd";
 const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
@@ -3732,7 +3732,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "cargo deny --locked --all-features check -D warnings",
         "test-optional-parser-proof-inputs.py",
         "--issue-map openspec/issue-map.json",
-        "if: always()",
         "needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]",
         "WINDOWS_SECURITY_RESULT: ${{ needs.windows-security-diagnostics.result }}",
         "if [[ \"$WINDOWS_SECURITY_RESULT\" != \"$windows_security_expected\" ]]; then",
@@ -3755,10 +3754,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null";
+    let diagnostic_event =
+        "github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != ''";
     let plan_job = workflow_job_block(&ci, "plan")?;
-    if !plan_job.contains(&format!("if: {source_event}")) {
+    if !plan_job.contains(&format!(
+        "    if: ({source_event}) && !({diagnostic_event})\n"
+    )) {
         return Err(io::Error::other(
-            "source planning must rerun for a base retarget and skip metadata-only edits",
+            "source planning must preserve source events and skip metadata-only edits or explicit diagnostics",
         )
         .into());
     }
@@ -3775,9 +3778,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     let verify_job = workflow_job_block(&ci, "verify")?;
+    let verify_condition = format!("    if: ${{{{ always() && !({diagnostic_event}) }}}}\n");
     for required in [
         "    name: verify\n",
-        "    if: always()\n",
+        verify_condition.as_str(),
         "      actions: read\n",
     ] {
         if !verify_job.contains(required) {
@@ -3786,6 +3790,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    let diagnostic_job = workflow_job_block(&ci, "navigation-resource-diagnostics")?;
+    if !diagnostic_job.contains(&format!("    if: ${{{{ {diagnostic_event} }}}}\n")) {
+        return Err(io::Error::other(
+            "navigation resource inspection must require the explicit manual diagnostic event",
+        )
+        .into());
     }
     let metadata_event = "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null";
     let metadata_step =
@@ -5146,10 +5157,15 @@ gate_status={gate_status}
         )
         .into());
     }
-    if release
-        .matches("cargo test --locked --release --all-features -p projectatlas-cli")
-        .count()
-        != 2
+    let release_commands = release.replace("\\\n", " ");
+    let packaged_contract_builds = release_commands
+        .lines()
+        .filter(|line| line.contains("cargo test") && line.contains("--no-run"))
+        .collect::<Vec<_>>();
+    if packaged_contract_builds.len() != 2
+        || packaged_contract_builds.iter().any(|line| {
+            !line.contains("cargo test --locked --release --all-features -p projectatlas-cli")
+        })
     {
         return Err(io::Error::other(
             "Unix and Windows packaged contract runners must compile all feature-gated contracts",
@@ -6699,6 +6715,91 @@ exit 0
 fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    // Construct the independent unit-test executable before its execution budget.
+    let validate_current_read = |workflow: &str| -> Result<(), Box<dyn Error>> {
+        let build = workflow_job_step(
+            workflow,
+            "e2e-smoke",
+            "Compile optimized native current-read proof",
+        )?;
+        let execute = workflow_job_step(
+            workflow,
+            "e2e-smoke",
+            "Optimized native current-read stage attribution",
+        )?;
+        let condition = "contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')";
+        let command = "cargo test --release --locked -p projectatlas-cli --bin projectatlas";
+        if build["if"].as_str() != Some(condition)
+            || execute["if"].as_str() != Some(condition)
+            || build["shell"].as_str() != Some("bash")
+            || execute["shell"].as_str() != Some("bash")
+            || (build["continue-on-error"] != Yaml::BadValue
+                && build["continue-on-error"] != Yaml::Boolean(false))
+            || (execute["continue-on-error"] != Yaml::BadValue
+                && execute["continue-on-error"] != Yaml::Boolean(false))
+            || build["timeout-minutes"].as_str()
+                != Some("${{ matrix.label == 'macos-x64' && 30 || 10 }}")
+            || execute["timeout-minutes"].as_i64() != Some(10)
+            || build["run"].as_str().map(str::trim)
+                != Some(format!("{command} --no-run").as_str())
+            || execute["run"].as_str().map(str::trim)
+                != Some(format!("set -euo pipefail\n{command} runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\"").as_str())
+        {
+            return Err(io::Error::other("current-read construction and execution contracts drifted").into());
+        }
+        let mut previous = None;
+        for name in [
+            "Document resource proof",
+            "Compile optimized native current-read proof",
+            "Optimized native current-read stage attribution",
+            "Upload optimized native current-read stage attribution",
+        ] {
+            let position = workflow
+                .find(&format!("      - name: {name}\n"))
+                .ok_or_else(|| io::Error::other("current-read proof stage missing"))?;
+            if previous.is_some_and(|before| position <= before) {
+                return Err(io::Error::other("current-read proof stages reordered").into());
+            }
+            previous = Some(position);
+        }
+        Ok(())
+    };
+    validate_current_read(&ci)?;
+    for (before, after) in [
+        (
+            "${{ matrix.label == 'macos-x64' && 30 || 10 }}",
+            "${{ matrix.label == 'macos-arm64' && 30 || 10 }}",
+        ),
+        ("${{ matrix.label == 'macos-x64' && 30 || 10 }}", "30"),
+        (
+            "      - name: Compile optimized native current-read proof\n",
+            "      - name: Compile optimized native current-read proof\n        continue-on-error: true\n",
+        ),
+        (
+            "      - name: Optimized native current-read stage attribution\n",
+            "      - name: Optimized native current-read stage attribution\n        continue-on-error: true\n",
+        ),
+        (
+            "cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run",
+            "cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run || true",
+        ),
+        (
+            "# This test-only owner profile is diagnostic, not installed acceptance.\n        timeout-minutes: 10",
+            "# This test-only owner profile is diagnostic, not installed acceptance.\n        timeout-minutes: 30",
+        ),
+        (
+            "--exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\"",
+            "--exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\" || true",
+        ),
+    ] {
+        let changed = ci.replacen(before, after, 1);
+        if changed == ci || validate_current_read(&changed).is_ok() {
+            return Err(io::Error::other(format!(
+                "current-read weakened construction proof accepted: {before:?}"
+            ))
+            .into());
+        }
+    }
     let planner = fs::read_to_string(workspace_root.join(".github/scripts/affected-ci-proof.py"))?;
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
@@ -22994,7 +23095,11 @@ fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Bo
             .join(" ");
         for fragment in [
             "cooperative indexing-work budget",
-            "30-minute default and ceiling",
+            "automatic work-based default",
+            "30-minute ceiling",
+            "unknown-work fallback",
+            "explicit values take precedence",
+            "zero refuses immediately",
             "clamped",
             "fail closed",
             "setup after work-control creation",
@@ -26461,7 +26566,11 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             let normalized = current_description.to_lowercase();
             for fragment in [
                 "cooperative indexing-work budget",
-                "30-minute default and ceiling",
+                "automatic work-based default",
+                "30-minute ceiling",
+                "unknown-work fallback",
+                "explicit values take precedence",
+                "zero refuses",
                 "clamped",
                 "fail closed",
                 "setup after work-control creation",
@@ -26845,7 +26954,7 @@ fn sqlite_compatibility_snapshot(
         let mut statement = connection.prepare(
             "SELECT type, name, tbl_name, COALESCE(sql, '')
              FROM sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY type, name",
         )?;
         statement
@@ -27675,6 +27784,25 @@ fn assert_packaged_readme_command_order(readme: &str, package_version: &str) -> 
     }
     Ok(())
 }
+/// Exact canonical matcher attribution inputs and their release archive members.
+const MATCHER_PACKAGE_NOTICES: [(&str, &str); 2] = [
+    ("vendor/ignore/LICENSE-MIT", "IGNORE-LICENSE-MIT"),
+    ("vendor/ignore/PROJECTATLAS.md", "IGNORE-POLICY-INPUTS.md"),
+];
+
+/// Stage real upstream attribution for the actual release package producers.
+fn stage_matcher_package_notices(workspace: &Path, fixture: &Path) -> io::Result<()> {
+    for (input, _member) in MATCHER_PACKAGE_NOTICES {
+        let destination = fixture.join(input);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("package notice has no parent"))?;
+        fs::create_dir_all(parent)?;
+        fs::copy(workspace.join(input), destination)?;
+    }
+    Ok(())
+}
+
 /// Exercise the real package producer and pre-install digest consumer with substituted inputs.
 #[cfg(windows)]
 fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
@@ -27724,6 +27852,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         workspace.join(RELEASE_README_TEMPLATE),
         temp.path().join(RELEASE_README_TEMPLATE),
     )?;
+    stage_matcher_package_notices(&workspace, temp.path())?;
     let script = temp.path().join("digest-admission.ps1");
     fs::write(
         &script,
@@ -27769,6 +27898,16 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     archive_reader
         .by_name("README.md")?
         .read_to_string(&mut readme)?;
+    for (input, member) in MATCHER_PACKAGE_NOTICES {
+        let mut actual = Vec::new();
+        archive_reader.by_name(member)?.read_to_end(&mut actual)?;
+        if actual != fs::read(workspace.join(input))? {
+            return Err(io::Error::other(format!(
+                "Windows archive altered matcher attribution {member}"
+            ))
+            .into());
+        }
+    }
     let expected_guidance = [
         format!("ProjectAtlas {release_version}"),
         format!("projectatlas --require-version {package_version} --format json runtime-info"),
@@ -27910,6 +28049,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         workspace.join(RELEASE_README_TEMPLATE),
         temp.path().join(RELEASE_README_TEMPLATE),
     )?;
+    stage_matcher_package_notices(&workspace, temp.path())?;
     let script = temp.path().join("package.sh");
     fs::write(&script, format!("set -eu\n{producer}"))?;
     let package_version = "0.5.0-rc1";
@@ -27927,6 +28067,19 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     let archive = temp.path().join(format!(
         "release-assets/projectatlas-{release_version}-x86_64-unknown-linux-gnu.tar.gz"
     ));
+    for (input, member) in MATCHER_PACKAGE_NOTICES {
+        let output = StdCommand::new("tar")
+            .args(["-xOf"])
+            .arg(&archive)
+            .arg(format!("projectatlas/{member}"))
+            .output()?;
+        if !output.status.success() || output.stdout != fs::read(workspace.join(input))? {
+            return Err(io::Error::other(format!(
+                "Unix archive omitted or altered matcher attribution {member}"
+            ))
+            .into());
+        }
+    }
     let output = StdCommand::new("tar")
         .args(["-xOf"])
         .arg(&archive)

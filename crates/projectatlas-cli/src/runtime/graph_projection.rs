@@ -1482,6 +1482,8 @@ pub(super) struct StagedRepositoryGraph {
     database: Option<StagedGraphDatabase>,
     /// Conservative bytes retained until the parent publication completes.
     retained_bytes: u64,
+    /// Already measured old and new affected work, including retained path identities.
+    incremental_work_bytes: Option<u64>,
 }
 
 /// File-backed graph rows staged outside the main database writer transaction.
@@ -1539,6 +1541,11 @@ impl Drop for StagedGraphDatabase {
 }
 
 impl StagedRepositoryGraph {
+    /// Return complete affected work evidence, or unknown for full/spilled staging.
+    pub(super) const fn incremental_work_bytes(&self) -> Option<u64> {
+        self.incremental_work_bytes
+    }
+
     /// Include evidence recovery in existing parser counts instead of reporting reuse.
     pub(super) fn account_source_recovery(
         &self,
@@ -1775,8 +1782,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             identity_admission
                 .incomplete_reused_rejection_paths()
                 .iter()
-                .cloned(),
-            identity_admission.incomplete_reused_rejection_paths().len(),
+                .map(String::as_str),
         ));
     }
     identity_admission.merge(
@@ -1884,7 +1890,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
         .saturating_add(binding_bytes);
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
     let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
-    let graph_work_bytes = symbols
+    let peak_graph_work_bytes = symbols
         .retained_bytes
         .saturating_add(identity_admission.observed_fact_bytes)
         .saturating_add(entity_projection.retained_bytes)
@@ -1892,13 +1898,23 @@ pub(super) fn stage_full_repository_graph_with_limit(
         .saturating_add(document_fact_map_retained_bytes(&document_facts))
         .saturating_add(sources.retained_bytes)
         .saturating_add(document_projection_bytes);
-    let mut staged = if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+    let source_recovery = sources.work;
+    // Key admission, call/import binding and Cargo consumers have finished. Preserve
+    // their original peak budget while freeing proof before raw row materialization.
+    drop(packages);
+    drop(configured_modules);
+    drop(sources);
+    let graphs = graphs
+        .into_iter()
+        .map(SourceGraph::into_bound)
+        .collect::<Vec<_>>();
+    let mut staged = if peak_graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
         finish_projection_in_database_with_documents(
             root,
             nodes,
             project,
             generation,
-            &graphs,
+            graphs,
             &document_facts,
             &identity_admission,
             entity_projection,
@@ -1911,7 +1927,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             project,
             generation,
             RepositoryGraphMutation::Full,
-            &graphs,
+            graphs,
             root,
             nodes,
             &document_facts,
@@ -1922,7 +1938,7 @@ pub(super) fn stage_full_repository_graph_with_limit(
             control,
         )
     }?;
-    staged.source_recovery = sources.work;
+    staged.source_recovery = source_recovery;
     Ok(staged)
 }
 
@@ -1963,8 +1979,7 @@ impl<'a> ResolutionKeyWorkspace<'a> {
         if self.keys.len() >= self.row_limit {
             return Err(dependency_closure_limit(
                 self.root,
-                self.paths.iter().cloned(),
-                self.keys.len().saturating_add(1),
+                self.paths.iter().map(String::as_str),
             ));
         }
         let next = self
@@ -1984,8 +1999,7 @@ impl<'a> ResolutionKeyWorkspace<'a> {
         if self.keys.len() >= self.row_limit {
             return Err(dependency_closure_limit(
                 self.root,
-                self.paths.iter().cloned(),
-                self.keys.len().saturating_add(1),
+                self.paths.iter().map(String::as_str),
             ));
         }
         let next = self
@@ -2200,8 +2214,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
     if old_exports.page.truncated {
         return Err(dependency_closure_limit(
             root,
-            direct_paths.iter().cloned(),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+            direct_paths.iter().map(String::as_str),
         ));
     }
     let mut changed_keys = ResolutionKeyWorkspace::new(
@@ -2282,8 +2295,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
                 .page
                 .rows
                 .iter()
-                .map(|path| path.as_str().to_string()),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+                .map(projectatlas_core::graph::RepositoryFilePath::as_str),
         ));
     }
     let mut affected_paths = direct_paths;
@@ -2340,10 +2352,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
             affected_identity_admission
                 .incomplete_reused_rejection_paths()
                 .iter()
-                .cloned(),
-            affected_identity_admission
-                .incomplete_reused_rejection_paths()
-                .len(),
+                .map(String::as_str),
         ));
     }
     let admitted_graphs = direct_graphs
@@ -2474,8 +2483,7 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
     if persisted.page.truncated {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
+            affected_paths.iter().map(String::as_str),
         ));
     }
     let mut candidates = resolution_registry_from_persisted(
@@ -2531,11 +2539,29 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
             .saturating_add(sources.retained_bytes)
             .saturating_add(direct_identity_admission.observed_fact_bytes),
     )?;
+    let source_recovery = sources.work;
+    // All source-dependent decisions are owned by the projection now. Reference
+    // vectors and package context must drop before consuming their captured graphs.
+    drop(affected_graphs);
+    drop(binding_graphs);
+    drop(admitted_graphs);
+    drop(package_index_graphs);
+    drop(packages);
+    drop(direct_packages);
+    drop(package_graphs);
+    drop(configured_modules);
+    drop(sources);
+    let affected_graphs = direct_graphs
+        .into_iter()
+        .filter(|graph| affected_graph_paths.contains(&graph.graph().path))
+        .chain(newly_affected_graphs)
+        .map(SourceGraph::into_bound)
+        .collect::<Vec<_>>();
     let mut staged = finish_projection_with_documents(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
-        &affected_graphs,
+        affected_graphs,
         root,
         expected_nodes,
         &document_facts,
@@ -2545,8 +2571,21 @@ pub(super) fn stage_incremental_repository_graph_with_limit(
         scan_policy,
         control,
     )?;
+    let prior_bytes = persisted_footprint.retained_bytes;
     enforce_incremental_projection_limits(root, &affected_paths, persisted_footprint, &staged)?;
-    staged.source_recovery = sources.work;
+    if staged.database.is_none() {
+        staged.incremental_work_bytes =
+            prior_bytes
+                .checked_add(staged.retained_bytes)
+                .and_then(|bytes| {
+                    affected_paths.iter().try_fold(bytes, |total, path| {
+                        total
+                            .checked_add(STAGED_GRAPH_ROW_BYTES)?
+                            .checked_add(path.len() as u64)
+                    })
+                });
+    }
+    staged.source_recovery = source_recovery;
     Ok(staged)
 }
 
@@ -3515,12 +3554,13 @@ fn cleanup_abandoned_graph_staging_while_locked(
 }
 
 /// Spill a large full graph to typed disposable `SQLite` rows before main publication.
+/// Owned raw inputs are released after their rows enter the bounded staging batch.
 fn finish_projection_in_database_with_documents(
     root: &Path,
     nodes: &[Node],
     project: ProjectInstanceId,
     generation: IndexGeneration,
-    graphs: &[impl Borrow<SymbolGraph>],
+    graphs: impl IntoIterator<Item = impl Borrow<SymbolGraph>>,
     document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
     identity_admission: &GraphIdentityAdmission,
     mut entities: EntityProjection,
@@ -3674,6 +3714,7 @@ fn finish_projection_in_database_with_documents(
             .sum::<u64>()
         + identity_rejection_bytes;
     Ok(StagedRepositoryGraph {
+        incremental_work_bytes: None,
         project,
         mutation: RepositoryGraphMutation::Full,
         entities: Vec::new(),
@@ -3715,7 +3756,7 @@ fn finish_projection_in_database(
         nodes,
         project,
         generation,
-        graphs,
+        graphs.iter().map(Borrow::<SymbolGraph>::borrow),
         &BTreeMap::new(),
         &GraphIdentityAdmission::default(),
         entities,
@@ -3726,11 +3767,12 @@ fn finish_projection_in_database(
 }
 
 /// Resolve staged relationships and finish one complete normalized graph batch.
+/// Consume owned raw inputs as their normalized rows accumulate.
 fn finish_projection_with_documents(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     mutation: RepositoryGraphMutation,
-    graphs: &[impl Borrow<SymbolGraph>],
+    graphs: impl IntoIterator<Item = impl Borrow<SymbolGraph>>,
     root: &Path,
     nodes: &[Node],
     document_facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
@@ -3846,6 +3888,7 @@ fn finish_projection_with_documents(
                 }),
         );
     Ok(StagedRepositoryGraph {
+        incremental_work_bytes: None,
         project,
         mutation,
         entities: entities.entity_by_digest.into_values().collect(),
@@ -3888,7 +3931,7 @@ fn finish_projection(
         project,
         generation,
         mutation,
-        graphs,
+        graphs.iter().map(Borrow::<SymbolGraph>::borrow),
         Path::new("."),
         &[],
         &BTreeMap::new(),
@@ -4098,6 +4141,7 @@ impl<'a> DocumentResolutionIndex<'a> {
         if observed > self.prefix_probe_limit {
             return Err(CliError::VerificationIncomplete(Box::new(
                 super::IndexVerificationIncomplete {
+                    unavailable_source_root: None,
                     policy_work_limit: Some(super::VerificationWorkLimit::DocumentPrefixes),
                     project_root: lossless_project_root_display(&self.root),
                     worktree: None,
@@ -4186,6 +4230,7 @@ impl<'a> DocumentResolutionIndex<'a> {
                     }
                     other => CliError::VerificationIncomplete(Box::new(
                         super::IndexVerificationIncomplete {
+                            unavailable_source_root: None,
                             policy_work_limit,
                             project_root: lossless_project_root_display(&self.root),
                             worktree: None,
@@ -4345,76 +4390,130 @@ fn nonindexed_document_projection_changed_with_limits(
     control: &IndexWorkControl,
     limits: DocumentVerificationLimits,
 ) -> Result<(bool, u64), CliError> {
+    let (changed, statements, evidence) =
+        nonindexed_document_projection_changed_recorded_with_limits(
+            store, root, nodes, options, control, limits,
+        )?;
+    if let Some(evidence) = evidence
+        && !evidence
+            .is_current(control)
+            .map_err(|source| super::source_inspection_error(root, source))?
+    {
+        return Err(super::source_changed_during_derivation(root, "."));
+    }
+    Ok((changed, statements))
+}
+
+/// Verify unresolved document reasons while retaining the policy actually consumed.
+pub(super) fn nonindexed_document_projection_changed_recorded(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+) -> Result<(bool, u64, Option<projectatlas_fs::ScanPolicyEvidence>), CliError> {
+    nonindexed_document_projection_changed_recorded_with_limits(
+        store,
+        root,
+        nodes,
+        options,
+        control,
+        DocumentVerificationLimits::default(),
+    )
+}
+
+/// Retain consumed policy across the runtime's final document-admission boundary.
+fn nonindexed_document_projection_changed_recorded_with_limits(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+    limits: DocumentVerificationLimits,
+) -> Result<(bool, u64, Option<projectatlas_fs::ScanPolicyEvidence>), CliError> {
     const DOCUMENT_INPUT_PAGE: u32 = 256;
     let mut page =
         store.repository_unresolved_documents_page(None, DOCUMENT_INPUT_PAGE, control)?;
     // Each page loads the exact project identity, then its indexed keyset rows.
     let mut statements = 2_u64;
     if page.rows.is_empty() {
-        return Ok((false, statements));
+        return Ok((false, statements, None));
     }
-    let scan_policy = RootScanPolicy::discover(root, options, control)
-        .map_err(|source| super::source_inspection_error(root, source))?;
-    let index = DocumentResolutionIndex::with_limits(
+    let observed = projectatlas_fs::ObservedRootScanPolicy::discover(
         root,
-        nodes,
-        &scan_policy,
+        options,
+        projectatlas_fs::ScanLimits::default(),
         control,
-        limits.policy,
-        limits.prefix_probes,
-    )?;
-    let mut inspected_rows = 0_u64;
-    loop {
-        for row in &page.rows {
-            control.check(IndexWorkStage::RepositoryTraversal)?;
-            inspected_rows = inspected_rows.saturating_add(1);
-            if inspected_rows > limits.rows {
-                return Err(CliError::VerificationIncomplete(Box::new(
-                    super::IndexVerificationIncomplete {
-                        policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
-                        project_root: lossless_project_root_display(root),
-                        worktree: None,
-                        status: IndexReadStatus::VerificationIncomplete,
-                        reason: super::IndexVerificationReason::PolicyUnavailable,
-                        scope: IndexRefreshScope::Full,
-                        message: format!(
-                            "document verification exceeds row work: observed {inspected_rows}, limit {}",
-                            limits.rows,
-                        ),
-                    },
-                )));
-            }
-            let Ok(target) = normalize_document_target(row.source.as_str(), row.reference.as_str())
-            else {
-                continue;
-            };
-            // Existing file/heading and folder state is covered by the source-node delta.
-            if index.kinds_by_path.contains_key(target.path.as_str()) {
-                continue;
-            }
-            let current = if index
-                .casefold_path_counts
-                .contains_key(&target.path.to_lowercase())
-            {
-                DocumentTargetUnresolvedReason::CaseConflict
-            } else {
-                index.inspect_absent_reason(&target.path)?
-            };
-            if current != row.reason {
-                return Ok((true, statements));
-            }
-        }
-        if !page.truncated {
-            return Ok((false, statements));
-        }
-        let after = page.rows.last().map(|row| row.digest);
-        page = store.repository_unresolved_documents_page(
-            after.as_ref(),
-            DOCUMENT_INPUT_PAGE,
+    )
+    .map_err(|source| super::source_inspection_error(root, source))?;
+    let result = (|| -> Result<(bool, u64), CliError> {
+        let index = DocumentResolutionIndex::with_limits(
+            root,
+            nodes,
+            observed.policy(),
             control,
+            limits.policy,
+            limits.prefix_probes,
         )?;
-        statements = statements.saturating_add(2);
-    }
+        let mut inspected_rows = 0_u64;
+        loop {
+            for row in &page.rows {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                inspected_rows = inspected_rows.saturating_add(1);
+                if inspected_rows > limits.rows {
+                    return Err(CliError::VerificationIncomplete(Box::new(
+                        super::IndexVerificationIncomplete {
+                            unavailable_source_root: None,
+                            policy_work_limit: Some(super::VerificationWorkLimit::DocumentRows),
+                            project_root: lossless_project_root_display(root),
+                            worktree: None,
+                            status: IndexReadStatus::VerificationIncomplete,
+                            reason: super::IndexVerificationReason::PolicyUnavailable,
+                            scope: IndexRefreshScope::Full,
+                            message: format!(
+                                "document verification exceeds row work: observed {inspected_rows}, limit {}",
+                                limits.rows,
+                            ),
+                        },
+                    )));
+                }
+                let Ok(target) =
+                    normalize_document_target(row.source.as_str(), row.reference.as_str())
+                else {
+                    continue;
+                };
+                // Existing file/heading and folder state is covered by the source-node delta.
+                if index.kinds_by_path.contains_key(target.path.as_str()) {
+                    continue;
+                }
+                let current = if index
+                    .casefold_path_counts
+                    .contains_key(&target.path.to_lowercase())
+                {
+                    DocumentTargetUnresolvedReason::CaseConflict
+                } else {
+                    index.inspect_absent_reason(&target.path)?
+                };
+                if current != row.reason {
+                    return Ok((true, statements));
+                }
+            }
+            if !page.truncated {
+                return Ok((false, statements));
+            }
+            let after = page.rows.last().map(|row| row.digest);
+            page = store.repository_unresolved_documents_page(
+                after.as_ref(),
+                DOCUMENT_INPUT_PAGE,
+                control,
+            )?;
+            statements = statements.saturating_add(2);
+        }
+    })()?;
+    let evidence = observed
+        .finish()
+        .map_err(|source| super::source_inspection_error(root, source))?;
+    Ok((result.0, result.1, Some(evidence)))
 }
 
 /// One resolved or typed-unresolved document candidate plus invalidation keys.
@@ -7404,8 +7503,8 @@ fn hydrate_reused_identity_admission(
 
 /// One admitted captured source, shared across repeated bounded projection requests.
 struct CapturedSourceGraph {
-    /// Actual parser ordering, independent of persisted row presentation order.
-    graph: SymbolGraph,
+    /// Raw parser ordering retained independently after binding proof is consumed.
+    graph: Arc<SymbolGraph>,
     /// Source identity and ordinal-owned lexical evidence.
     semantics: SourceSemanticFacts,
     /// Identity rejection details produced by the same raw admission boundary.
@@ -7427,7 +7526,36 @@ enum SourceGraph<'a> {
     Persisted(SymbolGraph),
 }
 
-impl SourceGraph<'_> {
+/// Raw graphs retained for row materialization after all binding consumers finish.
+enum BoundSourceGraph<'a> {
+    /// Fresh parser output remains owned by the enclosing symbol stage.
+    Borrowed(&'a SymbolGraph),
+    /// Recovered raw facts outlive their consumed semantic and admission payload.
+    Shared(Arc<SymbolGraph>),
+    /// Persisted graph-only facts need no new reference-counted owner.
+    Owned(SymbolGraph),
+}
+
+impl Borrow<SymbolGraph> for BoundSourceGraph<'_> {
+    fn borrow(&self) -> &SymbolGraph {
+        match self {
+            Self::Borrowed(graph) => graph,
+            Self::Shared(graph) => graph,
+            Self::Owned(graph) => graph,
+        }
+    }
+}
+
+impl<'a> SourceGraph<'a> {
+    /// Consume binding input while retaining the same raw graph and parser ordinals.
+    fn into_bound(self) -> BoundSourceGraph<'a> {
+        match self {
+            Self::Staged { graph, .. } => BoundSourceGraph::Borrowed(graph),
+            Self::Captured(source) => BoundSourceGraph::Shared(Arc::clone(&source.graph)),
+            Self::Persisted(graph) => BoundSourceGraph::Owned(graph),
+        }
+    }
+
     /// Borrow the exact graph whose ordinals own this source proof.
     fn graph(&self) -> &SymbolGraph {
         match self {
@@ -7599,13 +7727,15 @@ impl<'a> SourceBindingCache<'a> {
             .saturating_add(semantics.retained_bytes())
             .saturating_add(admission.observed_fact_bytes)
             .saturating_add(STAGED_GRAPH_ROW_BYTES)
+            // Reserve an additional owner for the independently retained raw graph.
+            .saturating_add(STAGED_GRAPH_ROW_BYTES)
             .saturating_add(path.len() as u64);
         enforce_resolution_registry_budget_with_limit(
             self.retained_bytes.saturating_add(bytes),
             self.retained_limit,
         )?;
         let source = Arc::new(CapturedSourceGraph {
-            graph,
+            graph: Arc::new(graph),
             semantics,
             admission,
         });
@@ -7739,9 +7869,30 @@ fn complete_symbol_graphs<'a>(
     sources: &mut SourceBindingCache<'_>,
     control: &IndexWorkControl,
 ) -> Result<Vec<SourceGraph<'a>>, CliError> {
-    let paths = paths.iter().cloned().collect::<Vec<_>>();
+    // A staged mutation wholly owns this path's raw graph. Loading the previous
+    // rows first only allocates/validates facts that the overlay must discard.
+    // Keep unchanged context and incremental old-export reads at their owners.
+    let mut staged_paths = BTreeSet::new();
+    for (index, change) in symbols.changes.iter().enumerate() {
+        check_graph_work(control, index)?;
+        let path = match change {
+            SymbolProjectionChange::Parsed(parsed) => &parsed.path,
+            SymbolProjectionChange::Clear { path, .. } => path,
+        };
+        if paths.contains(path) {
+            staged_paths.insert(path.as_str());
+        }
+    }
+    let mut persisted_paths = Vec::with_capacity(paths.len().saturating_sub(staged_paths.len()));
+    for (index, path) in paths.iter().enumerate() {
+        check_graph_work(control, index)?;
+        if !staged_paths.contains(path.as_str()) {
+            persisted_paths.push(path.clone());
+        }
+    }
+    drop(staged_paths);
     let mut graphs = BTreeMap::new();
-    for chunk in paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
+    for chunk in persisted_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
         control.check(IndexWorkStage::SymbolParsing)?;
         for graph in store.load_symbol_graphs_for_paths(chunk)? {
             graphs.insert(graph.path.clone(), SourceGraph::Persisted(graph));
@@ -7750,7 +7901,7 @@ fn complete_symbol_graphs<'a>(
     for (index, change) in symbols.changes.iter().enumerate() {
         check_graph_work(control, index)?;
         match change {
-            SymbolProjectionChange::Parsed(parsed) if paths.binary_search(&parsed.path).is_ok() => {
+            SymbolProjectionChange::Parsed(parsed) if paths.contains(&parsed.path) => {
                 graphs.insert(
                     parsed.path.clone(),
                     SourceGraph::Staged {
@@ -7759,13 +7910,13 @@ fn complete_symbol_graphs<'a>(
                     },
                 );
             }
-            SymbolProjectionChange::Clear { path, .. } if paths.binary_search(path).is_ok() => {
+            SymbolProjectionChange::Clear { path, .. } if paths.contains(path) => {
                 graphs.remove(path);
             }
             SymbolProjectionChange::Parsed(_) | SymbolProjectionChange::Clear { .. } => {}
         }
     }
-    graphs.retain(|path, _graph| paths.binary_search(path).is_ok());
+    graphs.retain(|path, _graph| paths.contains(path));
     for (path, graph) in &mut graphs {
         control.check(IndexWorkStage::SymbolParsing)?;
         if matches!(graph, SourceGraph::Persisted(_))
@@ -8919,20 +9070,16 @@ fn enforce_key_binding_limit(count: usize) -> Result<(), CliError> {
 }
 
 /// Enforce one path/key count before incremental graph work expands further.
-fn enforce_incremental_count<T>(
+fn enforce_incremental_count(
     root: &Path,
     _context: &'static str,
     count: usize,
-    sample: &BTreeSet<T>,
-) -> Result<(), CliError>
-where
-    T: ToString + Ord,
-{
+    affected_paths: &BTreeSet<String>,
+) -> Result<(), CliError> {
     if count > MAX_INCREMENTAL_RESOLUTION_ITEMS as usize {
         return Err(dependency_closure_limit(
             root,
-            sample.iter().map(ToString::to_string),
-            count,
+            affected_paths.iter().map(String::as_str),
         ));
     }
     Ok(())
@@ -8956,8 +9103,7 @@ fn admitted_persisted_footprint(
     if footprint.truncated {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            usize::try_from(footprint.rows).unwrap_or(usize::MAX),
+            affected_paths.iter().map(String::as_str),
         ));
     }
     enforce_incremental_projection_budget(
@@ -9010,32 +9156,35 @@ fn enforce_incremental_projection_budget(
     if rows > MAX_INCREMENTAL_GRAPH_ROWS || retained_bytes > MAX_INCREMENTAL_GRAPH_BYTES {
         return Err(dependency_closure_limit(
             root,
-            affected_paths.iter().cloned(),
-            affected_paths.len(),
+            affected_paths.iter().map(String::as_str),
         ));
     }
     Ok(())
 }
 
-/// Construct deterministic full-refresh guidance for an oversized dependency closure.
-fn dependency_closure_limit(
+/// Report observed affected paths independently of the exhausted graph-work unit.
+///
+/// A truncated inbound cursor provides only a lower bound on the complete closure.
+/// Source-change categories are unclassified here: affected dependents need not
+/// have changed source. Only the bounded path sample is copied.
+fn dependency_closure_limit<'paths>(
     root: &Path,
-    sample: impl IntoIterator<Item = String>,
-    observed: usize,
+    paths: impl ExactSizeIterator<Item = &'paths str>,
 ) -> CliError {
+    let changed = paths.len();
     CliError::RefreshRequired(Box::new(IndexRefreshRequired {
         project_root: lossless_project_root_display(root),
         worktree: None,
         status: IndexReadStatus::RefreshRequired,
         reason: IndexRefreshReason::DependencyClosureLimit,
         scope: IndexRefreshScope::Full,
-        changed: observed,
+        changed,
         added: 0,
         removed: 0,
-        modified: observed,
-        sample_paths: sample
-            .into_iter()
+        modified: 0,
+        sample_paths: paths
             .take(INDEX_FRESHNESS_SAMPLE_LIMIT)
+            .map(str::to_owned)
             .collect(),
     }))
 }
@@ -9086,10 +9235,11 @@ mod tests {
         GraphOwners, GraphSymbolIndex, MAX_IN_MEMORY_GRAPH_WORK_BYTES, MAX_INCREMENTAL_GRAPH_BYTES,
         MAX_INCREMENTAL_GRAPH_ROWS, PARTIAL_COVERAGE_REASON, PackageIndex,
         ProjectResolutionRegistry, QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation,
-        SourceGraph, SourceRecoveryWork, StagedRepositoryGraph, build_entity_projection,
-        build_entity_projection_with_config, build_entity_projection_with_config_limit,
-        cleanup_abandoned_graph_staging, coverage_for_graph, document_casefold_resolution_key,
-        document_coverage, document_fact_map_retained_bytes, document_projection_retained_bytes,
+        SourceBindingCache, SourceGraph, SourceRecoveryWork, StagedRepositoryGraph,
+        build_entity_projection, build_entity_projection_with_config,
+        build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging,
+        coverage_for_graph, document_casefold_resolution_key, document_coverage,
+        document_fact_map_retained_bytes, document_projection_retained_bytes,
         enforce_incremental_projection_budget, enforce_incremental_projection_limits,
         enforce_resolution_staging_budget, explicit_external_selector, finish_projection,
         finish_projection_in_database, finish_projection_in_database_with_documents,
@@ -9137,7 +9287,7 @@ mod tests {
         MAX_MARKDOWN_EVIDENCE_BYTES, MAX_MARKDOWN_LABEL_BYTES, MarkdownFactLimit,
     };
     use rusqlite::Connection;
-    use std::borrow::Cow;
+    use std::borrow::{Borrow, Cow};
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fmt::Debug;
@@ -9145,6 +9295,7 @@ mod tests {
     use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -10877,6 +11028,40 @@ mod tests {
     }
 
     #[test]
+    fn incremental_count_refusal_reports_paths_without_classifying_source_changes()
+    -> Result<(), Box<dyn Error>> {
+        let root = Path::new("repository");
+        let paths = (0..65)
+            .map(|index| format!("src/dependent_{index:02}.rs"))
+            .collect::<BTreeSet<_>>();
+        let work_items = usize::try_from(super::MAX_INCREMENTAL_RESOLUTION_ITEMS)? + 1;
+        let error = super::enforce_incremental_count(root, "canonical keys", work_items, &paths)
+            .err()
+            .ok_or_else(|| io::Error::other("oversized key count reached publication"))?;
+        let CliError::RefreshRequired(report) = error else {
+            return Err(
+                io::Error::other(format!("expected closure refusal, found {error:?}")).into(),
+            );
+        };
+        require_eq(&report.changed, &paths.len(), "affected path count")?;
+        require_eq(
+            &(report.added, report.removed, report.modified),
+            &(0, 0, 0),
+            "closure source categories remain unclassified",
+        )?;
+        require_eq(
+            &report.sample_paths,
+            &paths
+                .iter()
+                .take(super::INDEX_FRESHNESS_SAMPLE_LIMIT)
+                .cloned()
+                .collect::<Vec<_>>(),
+            "bounded affected path sample",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn incremental_projection_budget_requests_one_complete_refresh() -> Result<(), Box<dyn Error>> {
         let root = Path::new("repository");
         let affected_paths = BTreeSet::from(["src/lib.rs".to_string()]);
@@ -10906,9 +11091,56 @@ mod tests {
             )?;
             require_eq(&report.changed, &1, "incremental changed paths")?;
             require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "incremental closure categories remain unclassified",
+            )?;
+            require_eq(
                 &report.sample_paths,
                 &vec!["src/lib.rs".to_string()],
                 "incremental sample paths",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn closure_refusal_counts_the_observed_path_prefix_without_exhausting_it()
+    -> Result<(), Box<dyn Error>> {
+        let paths = (0..12)
+            .map(|index| format!("src/dependent_{index:02}.rs"))
+            .collect::<Vec<_>>();
+        for observed in [0, 3, 12] {
+            let sampled = std::cell::Cell::new(0);
+            let error = super::dependency_closure_limit(
+                Path::new("repository"),
+                paths[..observed]
+                    .iter()
+                    .map(String::as_str)
+                    .inspect(|_| sampled.set(sampled.get() + 1)),
+            );
+            let CliError::RefreshRequired(report) = error else {
+                return Err(io::Error::other("path evidence lost typed closure recovery").into());
+            };
+            require_eq(&report.changed, &observed, "observed path-prefix count")?;
+            require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "partial closure source categories remain unclassified",
+            )?;
+            require_eq(
+                &report.sample_paths,
+                &paths[..observed.min(super::INDEX_FRESHNESS_SAMPLE_LIMIT)].to_vec(),
+                "observed path-prefix sample",
+            )?;
+            require_eq(
+                &sampled.get(),
+                &observed.min(super::INDEX_FRESHNESS_SAMPLE_LIMIT),
+                "path evidence is counted without walking beyond the bounded sample",
+            )?;
+            require(
+                report.requires_explicit_scan(),
+                "partial closure lost explicit scan recovery",
             )?;
         }
         Ok(())
@@ -11372,6 +11604,7 @@ mod tests {
             truncated: false,
         };
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project: ProjectInstanceId::from_bytes([1; 16])?,
             mutation: RepositoryGraphMutation::AffectedPaths(vec!["src/lib.rs".to_string()]),
             entities: Vec::new(),
@@ -15139,7 +15372,7 @@ function helper() {}
         let key = test_resolution_key(project, &"x".repeat(1_000))?;
         let other = test_resolution_key(project, &"y".repeat(1_000))?;
         let one_owner = super::resolution_workspace_key_bytes(&key);
-        let paths = BTreeSet::new();
+        let paths = BTreeSet::from(["src/lib.rs".to_string()]);
         let root = Path::new(".");
         let mut exact = super::ResolutionKeyWorkspace::new(one_owner, root, &paths);
         exact.insert(&key)?;
@@ -15181,14 +15414,27 @@ function helper() {}
         one_row.row_limit = 1;
         one_row.insert(&key)?;
         one_row.insert_owned(key.clone())?;
+        for result in [one_row.insert(&other), one_row.insert_owned(other.clone())] {
+            let CliError::RefreshRequired(report) = result
+                .err()
+                .ok_or_else(|| io::Error::other("distinct-key cap admitted another owner"))?
+            else {
+                return Err(io::Error::other("key cap lost typed closure refusal").into());
+            };
+            require_eq(&report.changed, &1, "key cap reports source-path units")?;
+            require_eq(
+                &(report.added, report.removed, report.modified),
+                &(0, 0, 0),
+                "key cap source categories remain unclassified",
+            )?;
+            require_eq(
+                &report.sample_paths,
+                &vec!["src/lib.rs".to_string()],
+                "key cap source path sample",
+            )?;
+        }
         require(
-            matches!(one_row.insert(&other), Err(CliError::RefreshRequired(_)))
-                && matches!(
-                    one_row.insert_owned(other.clone()),
-                    Err(CliError::RefreshRequired(_))
-                )
-                && one_row.keys.len() == 1
-                && one_row.retained_bytes == one_owner,
+            one_row.keys.len() == 1 && one_row.retained_bytes == one_owner,
             "distinct-key row refusal retained another owner or charged a duplicate",
         )?;
         let mut expected = vec![key, other];
@@ -15839,6 +16085,7 @@ function helper() {}
             EntityResolutionKey::new(entities[4].key().clone(), local_package_key.clone())?,
         ];
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project,
             mutation: RepositoryGraphMutation::Full,
             entities,
@@ -16244,7 +16491,7 @@ function helper() {}
             project,
             generation,
             RepositoryGraphMutation::Full,
-            std::slice::from_ref(&admitted),
+            std::iter::once(admitted.as_ref()),
             temp.path(),
             &nodes,
             &BTreeMap::new(),
@@ -17681,6 +17928,7 @@ function helper() {}
         let document_target_states = vec![("docs/target.md".to_string(), stale)];
         drop(index);
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project: ProjectInstanceId::from_bytes([34; 16])?,
             mutation: RepositoryGraphMutation::Full,
             entities: Vec::new(),
@@ -18439,6 +18687,12 @@ function helper() {}
             &report.scope,
             &IndexRefreshScope::Full,
             "persisted overflow scope",
+        )?;
+        require_eq(&report.changed, &1, "persisted rows report affected paths")?;
+        require_eq(
+            &(report.added, report.removed, report.modified),
+            &(0, 0, 0),
+            "persisted rows do not classify source changes",
         )?;
         require_eq(
             &store.index_publication()?,
@@ -20144,6 +20398,27 @@ function helper() {}
             &repaired_symbols,
             &incremental_control,
         )?;
+        let RepositoryGraphMutation::AffectedPaths(affected) = &incremental_stage.mutation else {
+            return Err("incremental repair unexpectedly selected full mutation".into());
+        };
+        let prior = store.repository_affected_source_footprint(
+            project,
+            affected,
+            u32::try_from(super::MAX_INCREMENTAL_GRAPH_ROWS)?,
+        )?;
+        require(
+            prior.retained_bytes > 0,
+            "budget fixture has no prior graph work",
+        )?;
+        let path_bytes = affected.iter().map(|path| path.len() as u64).sum::<u64>();
+        require(
+            incremental_stage
+                .incremental_work_bytes()
+                .is_some_and(|bytes| {
+                    bytes >= prior.retained_bytes + incremental_stage.retained_bytes() + path_bytes
+                }),
+            "incremental budget omitted old graph removal, new graph or affected path identities",
+        )?;
         {
             let mut publication = store.begin_index_publication("incremental-identity-repair")?;
             incremental_stage.apply(&mut publication, &incremental_control)?;
@@ -20526,6 +20801,282 @@ function helper() {}
             &store.repository_graph_generation()?,
             &Some(base),
             "failed capture preserved publication",
+        )?;
+        Ok(())
+    }
+
+    /// Wholly staged mutations own their raw graph; unchanged context still needs validation.
+    #[test]
+    fn staged_graphs_replace_or_clear_raw_rows_without_skipping_unchanged_context()
+    -> Result<(), Box<dyn Error>> {
+        for clear_last in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            let changed = "changed.rs";
+            let context = "context.py";
+            let changed_text = "pub fn replacement() {}\n";
+            let context_text = "import target\n\ndef caller():\n    target.run()\n";
+            fs::write(root.join(changed), changed_text)?;
+            fs::write(root.join(context), context_text)?;
+            let mut nodes = vec![
+                test_file_node(changed, "rust"),
+                test_file_node(context, "python"),
+            ];
+            capture_test_file_hashes(root, &mut nodes)?;
+            let database = root.join("atlas.db");
+            let mut store = AtlasStore::open_for_project(&database, root)?;
+            store.replace_scan(&nodes)?;
+            store.replace_symbol_graph(&function_graph(changed, 1))?;
+            store.replace_symbol_graph(&extract_symbol_graph(
+                context,
+                Some("python"),
+                context_text,
+            ))?;
+            // A count mismatch proves that discarded rows were not decoded,
+            // rather than merely omitted from the final result afterward.
+            let writer = Connection::open(&database)?;
+            writer.execute(
+                "UPDATE source_parse_metadata SET symbol_count = symbol_count + 1 WHERE path = ?1",
+                [changed],
+            )?;
+            drop(writer);
+            require(
+                matches!(
+                    store.load_symbol_graphs_for_paths(&[changed.to_string()]),
+                    Err(projectatlas_db::DbError::SymbolGraphRowShape { path, .. }) if path == changed
+                ),
+                "discarded-row control did not create an invalid persisted graph",
+            )?;
+            let paths = BTreeSet::from([changed.to_string(), context.to_string()]);
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let replacement = extract_symbol_graph(changed, Some("rust"), changed_text);
+            let mut symbols = symbol_build_stage_for_graphs(vec![replacement.clone()]);
+            let clear = SymbolProjectionChange::Clear {
+                path: changed.to_string(),
+                language: Some("rust".to_string()),
+            };
+            if clear_last {
+                symbols.changes.push(clear);
+            } else {
+                symbols.changes.insert(0, clear);
+            }
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            let graphs =
+                super::complete_symbol_graphs(&store, &paths, &symbols, &mut sources, &control)?;
+            require(
+                graphs
+                    .iter()
+                    .filter(|graph| graph.graph().path == changed)
+                    .count()
+                    == usize::from(!clear_last),
+                "staged parsed/clear mutations lost last-change-wins behavior",
+            )?;
+            if !clear_last {
+                require(
+                    graphs.iter().any(|graph| graph.graph() == &replacement),
+                    "replacement did not retain the exact staged parser graph",
+                )?;
+            }
+            require(
+                graphs.iter().any(|graph| {
+                    graph.graph().path == context
+                        && matches!(graph, SourceGraph::Captured(_))
+                        && graph
+                            .semantics()
+                            .is_some_and(|facts| !facts.imports().is_empty())
+                }) && sources.work.previously_unchanged == 1,
+                "unchanged import context was not recovered from verified source exactly once",
+            )?;
+            let writer = Connection::open(&database)?;
+            writer.execute(
+                "UPDATE source_parse_metadata SET symbol_count = symbol_count + 1 WHERE path = ?1",
+                [context],
+            )?;
+            drop(writer);
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            require(
+                matches!(
+                    super::complete_symbol_graphs(&store, &paths, &symbols, &mut sources, &control),
+                    Err(CliError::Db(projectatlas_db::DbError::SymbolGraphRowShape { path, .. })) if path == context
+                ),
+                "staged mutations bypassed validation of an unchanged persisted graph",
+            )?;
+            let cancelled = IndexCancellation::new();
+            cancelled.cancel();
+            let mut sources = SourceBindingCache::new(root, &nodes, None);
+            require(
+                matches!(
+                    super::complete_symbol_graphs(
+                        &store,
+                        &BTreeSet::from([changed.to_string()]),
+                        &symbols,
+                        &mut sources,
+                        &IndexWorkControl::new(cancelled, None),
+                    ),
+                    Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+                ),
+                "fully staged selection ignored cancellation",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn raw_graph_payloads_release_between_materialized_sources() -> Result<(), Box<dyn Error>> {
+        for database_staging in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let canonical_root = temp.path().canonicalize()?;
+            let root = canonical_root.as_path();
+            let store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
+            let project = store
+                .project_instance_id()?
+                .ok_or("missing fixture project")?;
+            let generation = IndexGeneration::new(1);
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let paths = ["first.rs", "second.rs"];
+            let mut graphs = Vec::new();
+            for path in paths {
+                fs::write(root.join(path), "pub fn symbol_0() { dependency(); }\n")?;
+                graphs.push(Arc::new(extract_symbol_graph(
+                    path,
+                    Some("rust"),
+                    "pub fn symbol_0() { dependency(); }\n",
+                )));
+            }
+            let nodes = paths.map(|path| test_file_node(path, "rust"));
+            let packages = PackageIndex::from_graphs(&graphs)?;
+            let scan_policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+            let (baseline, entities, candidates) = {
+                let make_projection = || {
+                    let entities = build_entity_projection(
+                        project, generation, &nodes, &graphs, &packages, true, &control,
+                    )?;
+                    let candidates = resolution_registry_from_exports(&entities, &control)?;
+                    Result::<_, CliError>::Ok((entities, candidates))
+                };
+                let (entities, candidates) = make_projection()?;
+                let baseline = finish_projection_with_documents(
+                    project,
+                    generation,
+                    RepositoryGraphMutation::Full,
+                    graphs.iter().map(Arc::as_ref),
+                    root,
+                    &nodes,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?;
+                let (entities, candidates) = make_projection()?;
+                (baseline, entities, candidates)
+            };
+            let weak = graphs.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let released_before_next = std::cell::Cell::new(true);
+            let input = graphs.into_iter().enumerate().map(|(index, graph)| {
+                if index > 0 {
+                    released_before_next
+                        .set(released_before_next.get() && weak[index - 1].strong_count() == 0);
+                }
+                super::BoundSourceGraph::Shared(graph)
+            });
+            let staged = if database_staging {
+                finish_projection_in_database_with_documents(
+                    root,
+                    &nodes,
+                    project,
+                    generation,
+                    input,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?
+            } else {
+                finish_projection_with_documents(
+                    project,
+                    generation,
+                    RepositoryGraphMutation::Full,
+                    input,
+                    root,
+                    &nodes,
+                    &BTreeMap::new(),
+                    &GraphIdentityAdmission::default(),
+                    entities,
+                    &candidates,
+                    &scan_policy,
+                    &control,
+                )?
+            };
+            require(
+                released_before_next.get() && weak.iter().all(|graph| graph.strong_count() == 0),
+                "raw graph payload remained alive while the next source was materialized",
+            )?;
+            require(
+                staged.database.is_some() == database_staging,
+                "owned inputs changed the selected materialization path",
+            )?;
+            if !database_staging {
+                require_eq(&staged.entities, &baseline.entities, "owned graph entities")?;
+                require_eq(
+                    &staged.relations,
+                    &baseline.relations,
+                    "owned graph relations",
+                )?;
+                require_eq(
+                    &staged.occurrences,
+                    &baseline.occurrences,
+                    "owned graph occurrences",
+                )?;
+                require_eq(&staged.coverage, &baseline.coverage, "owned graph coverage")?;
+                require_eq(
+                    &staged.relation_dependencies,
+                    &baseline.relation_dependencies,
+                    "owned graph dependency keys",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bound_graphs_release_recovered_proof_without_copying_raw_facts() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = "module.py";
+        fs::write(
+            temp.path().join(path),
+            "import target\n\ndef caller():\n    target.run()\n",
+        )?;
+        let mut nodes = vec![test_file_node(path, "python")];
+        capture_test_file_hashes(temp.path(), &mut nodes)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut sources = SourceBindingCache::new(temp.path(), &nodes, None);
+        let captured = sources.capture(path, &control)?;
+        require(
+            !captured.semantics.imports().is_empty(),
+            "fixture has no binding proof",
+        )?;
+        let proof = Arc::downgrade(&captured);
+        let raw = Arc::clone(&captured.graph);
+        let graph = SourceGraph::Captured(captured);
+        drop(sources);
+        let bound = graph.into_bound();
+        require(
+            proof.upgrade().is_none(),
+            "materialization retained recovered binding proof",
+        )?;
+        let bound_raw: &SymbolGraph = bound.borrow();
+        require(
+            std::ptr::eq(bound_raw, raw.as_ref()),
+            "raw graph was copied or reordered",
+        )?;
+        require(
+            bound_raw.path == path,
+            "bound graph lost its original source identity",
         )?;
         Ok(())
     }

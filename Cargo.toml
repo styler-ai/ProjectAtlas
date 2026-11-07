@@ -9,6 +9,11 @@ members = [
     "crates/projectatlas-symbols",
 ]
 resolver = "3"
+exclude = ["vendor/ignore"]
+
+[patch.crates-io]
+# Preserve canonical matching while exposing operation-owned policy input reads.
+ignore = { path = "vendor/ignore" }
 
 [workspace.package]
 version = "0.5.0"
@@ -16,6 +21,9 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/styler-ai/ProjectAtlas"
 homepage = "https://styler-ai.github.io/ProjectAtlas/"
+
+[profile.release]
+codegen-units = 1
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -76,6 +84,8 @@ projectatlas-service = { path = "crates/projectatlas-service", version = "0.5.0"
 projectatlas-symbols = { path = "crates/projectatlas-symbols", version = "0.5.0" }
 assert_cmd = "2.0"
 blake3 = "1.5"
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
 clap = { version = "4.5", features = ["derive"] }
 cssparser = "0.37"
 ed25519-dalek = { version = "3.0", default-features = false, features = ["fast", "signature", "zeroize"] }
@@ -87,6 +97,7 @@ jsonc-parser = { version = "0.34", features = ["serde"] }
 landlock = "=0.4.7"
 libloading = "=0.9.0"
 nix = { version = "=0.31.3", default-features = false, features = [
+    "feature",
     "fs",
     "process",
     "resource",
@@ -152,4 +163,5 @@ rustix = { version = "1.1.4", features = ["fs"] }
 exacl = { version = "=0.13.0", default-features = false }
 windows-permissions = "=0.2.4"
 windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+winx = "=0.36.4"
 yaml-rust2 = "0.12"

@@ -1,0 +1,1410 @@
+{
+  "schema_version": 1,
+  "scope": "Complete installed development-candidate campaign; not a published RC1 result. All original report/package identities authenticated. No failed targets waived.",
+  "workflow_run_id": "42076882709",
+  "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42076882709",
+  "source_revision": "5543fbf8372d09f761c4e3bb3111282d5bd29c9e",
+  "complete": true,
+  "all_platforms_passed": false,
+  "platforms": {
+    "linux-x64-posix": {
+      "passed": true,
+      "candidate_origin": "installed release workflow",
+      "source_dirty": true,
+      "platform": "Linux-7.0.0-1017-azure-x86_64-with-glibc2.39",
+      "machine": "x86_64",
+      "python": "3.12.3",
+      "sqlite_version": "3.45.1",
+      "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+      "telemetry": "enabled",
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "f6f9dc4567e8222be56ec1fbc5cb5482a01bbe216353cc0d0650cfc04e3af99b"
+        }
+      },
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "6a783511b24368d3c246d13c52514572d92bfc70ddfe2223ac433a4d94caf20c"
+      },
+      "baseline_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266"
+      },
+      "summary": {
+        "initial": {
+          "baseline": {
+            "median_seconds": 4.510630921999962,
+            "maximum_sampled_rss_bytes": 175529984,
+            "median_source_bytes_per_second": 165976.55914353844
+          },
+          "candidate": {
+            "median_seconds": 3.553542069999992,
+            "maximum_sampled_rss_bytes": 183508992,
+            "median_source_bytes_per_second": 210679.65012160435
+          }
+        },
+        "full": {
+          "baseline": {
+            "median_seconds": 5.534531173000005,
+            "maximum_sampled_rss_bytes": 176967680,
+            "median_source_bytes_per_second": 135265.11579737006
+          },
+          "candidate": {
+            "median_seconds": 3.9260620750000044,
+            "maximum_sampled_rss_bytes": 185094144,
+            "median_source_bytes_per_second": 190681.90611835886
+          }
+        },
+        "rebuild": {
+          "baseline": {
+            "median_seconds": 5.343152084999986,
+            "maximum_sampled_rss_bytes": 175423488,
+            "median_source_bytes_per_second": 140109.99277030723
+          },
+          "candidate": {
+            "median_seconds": 3.7454922750000037,
+            "maximum_sampled_rss_bytes": 183586816,
+            "median_source_bytes_per_second": 199874.66133540464
+          }
+        },
+        "cold_noop": {
+          "baseline": {
+            "median_seconds": 0.03421373500000868,
+            "maximum_sampled_rss_bytes": 20430848,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.03325382450000802,
+            "maximum_sampled_rss_bytes": 20795392,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "sparse": {
+          "baseline": {
+            "median_seconds": 5.260400669999967,
+            "maximum_sampled_rss_bytes": 176095232,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.104516990999997,
+            "maximum_sampled_rss_bytes": 27230208,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "summary": {
+          "baseline": {
+            "median_seconds": 0.03867054500000222,
+            "maximum_sampled_rss_bytes": 22282240,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.03827751899996201,
+            "maximum_sampled_rss_bytes": 22142976,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "detailed": {
+          "baseline": {
+            "median_seconds": 0.03302641499999481,
+            "maximum_sampled_rss_bytes": 22122496,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.03321645500000159,
+            "maximum_sampled_rss_bytes": 22208512,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "compatible_open": {
+          "baseline": {
+            "median_seconds": 0.03478969700000789,
+            "maximum_sampled_rss_bytes": 20328448,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.033643837999989046,
+            "maximum_sampled_rss_bytes": 20307968,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "large_sparse": {
+          "baseline": {
+            "median_seconds": 12.842565997999998,
+            "maximum_sampled_rss_bytes": 353595392,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.1295683910000207,
+            "maximum_sampled_rss_bytes": 28254208,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "dense_sparse": {
+          "baseline": {
+            "median_seconds": 7.132553069000039,
+            "maximum_sampled_rss_bytes": 259198976,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 5.4173537160000365,
+            "maximum_sampled_rss_bytes": 224714752,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "semantic_upgrade": {
+          "baseline": {
+            "median_seconds": 5.645449205000034,
+            "maximum_sampled_rss_bytes": 177299456,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 3.9922703400000046,
+            "maximum_sampled_rss_bytes": 185610240,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "warm_mcp": {
+          "median_seconds": {
+            "baseline": 0.014130577000003086,
+            "candidate": 0.015366675999985091
+          },
+          "rss": "not measured by public MCP route"
+        }
+      },
+      "warm_measurement_protocol": {
+        "method": "serial alternating pairs with both isolated clients live",
+        "discarded_warmup_calls_each_runtime": 1,
+        "measured_calls_each_runtime": 9,
+        "actual_call_order": [
+          {
+            "runtime": "baseline",
+            "round": 0,
+            "position": 0,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 0,
+            "position": 1,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 1,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 1,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 2,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 2,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 3,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 3,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 4,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 4,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 5,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 5,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 6,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 6,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 7,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 7,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 8,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 8,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 9,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 9,
+            "position": 1,
+            "warmup": false
+          }
+        ],
+        "harness_sha256": "66f2806f3c01375e4965cfc98218fe9e09f7b449b9f0ce3342e2c5c6d0f746cc"
+      },
+      "raw_sha256": "c372b046c107de2a4d74946509305cf8ff07a07e6db98876f3fd23c9980b1d47",
+      "source_artifact": {
+        "artifact_id": 13443235785,
+        "name": "indexing-performance-linux-x64-posix",
+        "zip_sha256": "cf780ca439b569428a172c0973ed82599f8669560069f68a7f21a0b9e1c39294"
+      },
+      "package_artifact": {
+        "artifact_id": 13439209690,
+        "zip_sha256": "a66e6831cf704f86f8608780a650266a5027db64d59b4cf9e4b1569b92d79b0f"
+      },
+      "check_count": 361,
+      "failed_checks": [],
+      "sample_counts": {
+        "baseline": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "offline_same_metadata": 1
+        },
+        "candidate": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "large_full_convergence": 1,
+          "dense_full_convergence": 1,
+          "offline_same_metadata": 1
+        }
+      },
+      "warm_samples_each_runtime": 9
+    },
+    "macos-x64-posix": {
+      "passed": true,
+      "candidate_origin": "installed release workflow",
+      "source_dirty": true,
+      "platform": "macOS-15.7.9-x86_64-i386-64bit-Mach-O",
+      "machine": "x86_64",
+      "python": "3.14.7",
+      "sqlite_version": "3.53.4",
+      "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+      "telemetry": "enabled",
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "425f97ab6facb2ea7a2c2f1b0d99c3fd309640eb44a5c47bd4ac9542923fc5d4"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "4ebddec057bc72936e1dd313a4facd21393ec0b601fd1c16f9df1c5c4bb9dbf9"
+        }
+      },
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz",
+        "sha256": "b69f194959b4949377dcf2c26c08d18e1e1164c2af948b1b265ce2b4959f6ccd"
+      },
+      "baseline_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz",
+        "sha256": "2cc8ef67bbf2417fbf3f20fcd1a642a18f73767697b08358d42125f13fc5aa35"
+      },
+      "summary": {
+        "initial": {
+          "baseline": {
+            "median_seconds": 14.47920705599995,
+            "maximum_sampled_rss_bytes": 183984128,
+            "median_source_bytes_per_second": 51705.801091487796
+          },
+          "candidate": {
+            "median_seconds": 10.64768706599989,
+            "maximum_sampled_rss_bytes": 189579264,
+            "median_source_bytes_per_second": 70311.8898366775
+          }
+        },
+        "full": {
+          "baseline": {
+            "median_seconds": 17.02468567699998,
+            "maximum_sampled_rss_bytes": 187150336,
+            "median_source_bytes_per_second": 43971.38450616699
+          },
+          "candidate": {
+            "median_seconds": 10.815509839000015,
+            "maximum_sampled_rss_bytes": 191836160,
+            "median_source_bytes_per_second": 69218.09615488428
+          }
+        },
+        "rebuild": {
+          "baseline": {
+            "median_seconds": 15.157773419000023,
+            "maximum_sampled_rss_bytes": 183029760,
+            "median_source_bytes_per_second": 49387.13485858308
+          },
+          "candidate": {
+            "median_seconds": 10.17927450000002,
+            "maximum_sampled_rss_bytes": 186892288,
+            "median_source_bytes_per_second": 73538.54147464031
+          }
+        },
+        "cold_noop": {
+          "baseline": {
+            "median_seconds": 0.15162704149997808,
+            "maximum_sampled_rss_bytes": 12550144,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.12864711999998235,
+            "maximum_sampled_rss_bytes": 11010048,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "sparse": {
+          "baseline": {
+            "median_seconds": 14.966108507999934,
+            "maximum_sampled_rss_bytes": 186769408,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.4406473490000735,
+            "maximum_sampled_rss_bytes": 17100800,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "summary": {
+          "baseline": {
+            "median_seconds": 0.15277330200001416,
+            "maximum_sampled_rss_bytes": 14192640,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.15165167800000745,
+            "maximum_sampled_rss_bytes": 12632064,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "detailed": {
+          "baseline": {
+            "median_seconds": 0.1410907300000872,
+            "maximum_sampled_rss_bytes": 12464128,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.11882608099995196,
+            "maximum_sampled_rss_bytes": 12460032,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "compatible_open": {
+          "baseline": {
+            "median_seconds": 0.14966096200009815,
+            "maximum_sampled_rss_bytes": 12156928,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.13962899500006642,
+            "maximum_sampled_rss_bytes": 11083776,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "large_sparse": {
+          "baseline": {
+            "median_seconds": 35.53722101900007,
+            "maximum_sampled_rss_bytes": 380968960,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.5473407619999762,
+            "maximum_sampled_rss_bytes": 18059264,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "dense_sparse": {
+          "baseline": {
+            "median_seconds": 20.190170898999895,
+            "maximum_sampled_rss_bytes": 261300224,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 14.311593183000014,
+            "maximum_sampled_rss_bytes": 257089536,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "semantic_upgrade": {
+          "baseline": {
+            "median_seconds": 15.433516524999959,
+            "maximum_sampled_rss_bytes": 189210624,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 9.666233853999984,
+            "maximum_sampled_rss_bytes": 191414272,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "warm_mcp": {
+          "median_seconds": {
+            "baseline": 0.048944768999945154,
+            "candidate": 0.04499533300008807
+          },
+          "rss": "not measured by public MCP route"
+        }
+      },
+      "warm_measurement_protocol": {
+        "method": "serial alternating pairs with both isolated clients live",
+        "discarded_warmup_calls_each_runtime": 1,
+        "measured_calls_each_runtime": 9,
+        "actual_call_order": [
+          {
+            "runtime": "baseline",
+            "round": 0,
+            "position": 0,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 0,
+            "position": 1,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 1,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 1,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 2,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 2,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 3,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 3,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 4,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 4,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 5,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 5,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 6,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 6,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 7,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 7,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 8,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 8,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 9,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 9,
+            "position": 1,
+            "warmup": false
+          }
+        ],
+        "harness_sha256": "66f2806f3c01375e4965cfc98218fe9e09f7b449b9f0ce3342e2c5c6d0f746cc"
+      },
+      "raw_sha256": "0f297a866aecb19e00fd89ca2b1d855e51c326a2628ada0ae2a39e5f963b2164",
+      "source_artifact": {
+        "artifact_id": 13444511907,
+        "name": "indexing-performance-macos-x64-posix",
+        "zip_sha256": "56881ccaaa7ef690692d42a85211d4705d5f2ad23b7fe271a860bc6a192e3dcd"
+      },
+      "package_artifact": {
+        "artifact_id": 13441308267,
+        "zip_sha256": "d410ca8ccb8c7ce098c6ef70ee3c75614eb64deb80bb74b3e1f15d97bdf3cd5a"
+      },
+      "check_count": 360,
+      "failed_checks": [],
+      "sample_counts": {
+        "baseline": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "offline_same_metadata": 1
+        },
+        "candidate": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "large_full_convergence": 1,
+          "dense_full_convergence": 1,
+          "offline_same_metadata": 1
+        }
+      },
+      "warm_samples_each_runtime": 9
+    },
+    "macos-arm64-posix": {
+      "passed": false,
+      "candidate_origin": "installed release workflow",
+      "source_dirty": true,
+      "platform": "macOS-15.8.2-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "python": "3.15.2",
+      "sqlite_version": "3.54.1",
+      "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+      "telemetry": "enabled",
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "0056f59bd1e75b206ec638a0e48ef8ae5db89d3e1daf4b0193e2bebd1d1724be"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "dc2a133867852d4bcafc2e9185a0b7f3144e9c798b0f3d682b2ea71b4d909edc"
+        }
+      },
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
+        "sha256": "b096997d4e5bbb800930ca61da9a97bbe7d70cdbdfe3d62c00a50288ed92d4ca"
+      },
+      "baseline_archive": {
+        "name": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
+        "sha256": "1b20209332de1039719c7dc4e95cf6c2b64c1e2df06e99e3675e5b3b170823fe"
+      },
+      "summary": {
+        "initial": {
+          "baseline": {
+            "median_seconds": 5.3075178750000305,
+            "maximum_sampled_rss_bytes": 186040320,
+            "median_source_bytes_per_second": 141056.3313458451
+          },
+          "candidate": {
+            "median_seconds": 4.016537208000045,
+            "maximum_sampled_rss_bytes": 191954944,
+            "median_source_bytes_per_second": 186394.1403328316
+          }
+        },
+        "full": {
+          "baseline": {
+            "median_seconds": 7.804059583000026,
+            "maximum_sampled_rss_bytes": 194297856,
+            "median_source_bytes_per_second": 95924.30606638508
+          },
+          "candidate": {
+            "median_seconds": 5.245950332999996,
+            "maximum_sampled_rss_bytes": 200753152,
+            "median_source_bytes_per_second": 142700.35979770694
+          }
+        },
+        "rebuild": {
+          "baseline": {
+            "median_seconds": 7.054178208999929,
+            "maximum_sampled_rss_bytes": 188219392,
+            "median_source_bytes_per_second": 106121.3620950085
+          },
+          "candidate": {
+            "median_seconds": 4.687569708999945,
+            "maximum_sampled_rss_bytes": 203915264,
+            "median_source_bytes_per_second": 159705.14498433218
+          }
+        },
+        "cold_noop": {
+          "baseline": {
+            "median_seconds": 0.07653779200001054,
+            "maximum_sampled_rss_bytes": 15810560,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.06864616699999715,
+            "maximum_sampled_rss_bytes": 13910016,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "sparse": {
+          "baseline": {
+            "median_seconds": 7.002401374999977,
+            "maximum_sampled_rss_bytes": 189644800,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.191724000000022,
+            "maximum_sampled_rss_bytes": 20922368,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "summary": {
+          "baseline": {
+            "median_seconds": 0.07684141599997929,
+            "maximum_sampled_rss_bytes": 17317888,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.07279445799997575,
+            "maximum_sampled_rss_bytes": 16662528,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "detailed": {
+          "baseline": {
+            "median_seconds": 0.07534820800003672,
+            "maximum_sampled_rss_bytes": 14434304,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.06215945899998587,
+            "maximum_sampled_rss_bytes": 16613376,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "compatible_open": {
+          "baseline": {
+            "median_seconds": 0.0706146660000968,
+            "maximum_sampled_rss_bytes": 15777792,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.06822350000004462,
+            "maximum_sampled_rss_bytes": 14499840,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "large_sparse": {
+          "baseline": {
+            "median_seconds": 19.632187334000037,
+            "maximum_sampled_rss_bytes": 396328960,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.8575980829999708,
+            "maximum_sampled_rss_bytes": 21741568,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "dense_sparse": {
+          "baseline": {
+            "median_seconds": 11.100496790999955,
+            "maximum_sampled_rss_bytes": 280150016,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 7.3956751249999115,
+            "maximum_sampled_rss_bytes": 295190528,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "semantic_upgrade": {
+          "baseline": {
+            "median_seconds": 7.005183792000025,
+            "maximum_sampled_rss_bytes": 189300736,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 5.2990736250000054,
+            "maximum_sampled_rss_bytes": 198279168,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "warm_mcp": {
+          "median_seconds": {
+            "baseline": 0.037739666999982546,
+            "candidate": 0.03505008299998735
+          },
+          "rss": "not measured by public MCP route"
+        }
+      },
+      "warm_measurement_protocol": {
+        "method": "serial alternating pairs with both isolated clients live",
+        "discarded_warmup_calls_each_runtime": 1,
+        "measured_calls_each_runtime": 9,
+        "actual_call_order": [
+          {
+            "runtime": "baseline",
+            "round": 0,
+            "position": 0,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 0,
+            "position": 1,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 1,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 1,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 2,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 2,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 3,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 3,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 4,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 4,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 5,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 5,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 6,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 6,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 7,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 7,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 8,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 8,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 9,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 9,
+            "position": 1,
+            "warmup": false
+          }
+        ],
+        "harness_sha256": "66f2806f3c01375e4965cfc98218fe9e09f7b449b9f0ce3342e2c5c6d0f746cc"
+      },
+      "raw_sha256": "4ab12e885b455914d4cff34487b069d0fde02968712cc7d93dbf74836641a004",
+      "source_artifact": {
+        "artifact_id": 13443521914,
+        "name": "indexing-performance-macos-arm64-posix",
+        "zip_sha256": "a6e32f4693a7a8e31f0edc1d0a11ed6c88c1007ba668d45e3930f3ce1949e541"
+      },
+      "package_artifact": {
+        "artifact_id": 13441710190,
+        "zip_sha256": "218178a49c4b018ae6df6d06227fd91104a4d96d62b39affb08d2dd60f33feb7"
+      },
+      "check_count": 360,
+      "failed_checks": [
+        {
+          "name": "detailed sampled RSS target",
+          "passed": false
+        }
+      ],
+      "sample_counts": {
+        "baseline": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "offline_same_metadata": 1
+        },
+        "candidate": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "large_full_convergence": 1,
+          "dense_full_convergence": 1,
+          "offline_same_metadata": 1
+        }
+      },
+      "warm_samples_each_runtime": 9
+    },
+    "windows-x64": {
+      "passed": false,
+      "candidate_origin": "installed release workflow",
+      "source_dirty": true,
+      "platform": "Windows-2025Server-10.0.26100-SP0",
+      "machine": "AMD64",
+      "python": "3.12.10",
+      "sqlite_version": "3.49.1",
+      "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+      "telemetry": "enabled",
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "87ae41df90b35770841ae6ca7e3d88c25ab99f0e0f83c3e3c85a235a63f30ebc"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "e73c7d5b35177de4339b6deb5ab312235bb7c793a25f492e485a37c328c1779f"
+        }
+      },
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "sha256": "37ea97ada47ad7dba62a4de561f94083ade1a3ee1aaada4cebacf69a70c465ba"
+      },
+      "baseline_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "sha256": "b2fddfa71f7ad73a816fbeb3111101c1a20b25f2286bd418fdbda73448f127c4"
+      },
+      "summary": {
+        "initial": {
+          "baseline": {
+            "median_seconds": 9.947110800000019,
+            "maximum_sampled_rss_bytes": 167395328,
+            "median_source_bytes_per_second": 76603.14792110273
+          },
+          "candidate": {
+            "median_seconds": 7.151183199999991,
+            "maximum_sampled_rss_bytes": 172388352,
+            "median_source_bytes_per_second": 106539.57236055718
+          }
+        },
+        "full": {
+          "baseline": {
+            "median_seconds": 13.728422499999965,
+            "maximum_sampled_rss_bytes": 166211584,
+            "median_source_bytes_per_second": 55501.49698554236
+          },
+          "candidate": {
+            "median_seconds": 8.572214899999949,
+            "maximum_sampled_rss_bytes": 177582080,
+            "median_source_bytes_per_second": 88882.04610922722
+          }
+        },
+        "rebuild": {
+          "baseline": {
+            "median_seconds": 13.175211099999956,
+            "maximum_sampled_rss_bytes": 164753408,
+            "median_source_bytes_per_second": 57831.93864726787
+          },
+          "candidate": {
+            "median_seconds": 8.042029500000012,
+            "maximum_sampled_rss_bytes": 172425216,
+            "median_source_bytes_per_second": 94745.73551365346
+          }
+        },
+        "cold_noop": {
+          "baseline": {
+            "median_seconds": 0.1287158500000487,
+            "maximum_sampled_rss_bytes": 10915840,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.1276628499999788,
+            "maximum_sampled_rss_bytes": 11923456,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "sparse": {
+          "baseline": {
+            "median_seconds": 13.21026919999997,
+            "maximum_sampled_rss_bytes": 164417536,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.3520294999999578,
+            "maximum_sampled_rss_bytes": 18104320,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "summary": {
+          "baseline": {
+            "median_seconds": 0.13665759999980764,
+            "maximum_sampled_rss_bytes": 12722176,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.1439669999999751,
+            "maximum_sampled_rss_bytes": 13545472,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "detailed": {
+          "baseline": {
+            "median_seconds": 0.12070859999994354,
+            "maximum_sampled_rss_bytes": 12582912,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.12415489999989404,
+            "maximum_sampled_rss_bytes": 12300288,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "compatible_open": {
+          "baseline": {
+            "median_seconds": 0.12793420000002698,
+            "maximum_sampled_rss_bytes": 11739136,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.12444110000001274,
+            "maximum_sampled_rss_bytes": 12038144,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "large_sparse": {
+          "baseline": {
+            "median_seconds": 36.62368460000016,
+            "maximum_sampled_rss_bytes": 333283328,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 0.4581510000000435,
+            "maximum_sampled_rss_bytes": 19091456,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "dense_sparse": {
+          "baseline": {
+            "median_seconds": 18.734075200000007,
+            "maximum_sampled_rss_bytes": 244383744,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 10.181125099999917,
+            "maximum_sampled_rss_bytes": 219840512,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "semantic_upgrade": {
+          "baseline": {
+            "median_seconds": 13.485866600000008,
+            "maximum_sampled_rss_bytes": 167473152,
+            "median_source_bytes_per_second": null
+          },
+          "candidate": {
+            "median_seconds": 8.46438779999994,
+            "maximum_sampled_rss_bytes": 175669248,
+            "median_source_bytes_per_second": null
+          }
+        },
+        "warm_mcp": {
+          "median_seconds": {
+            "baseline": 0.05266829999982292,
+            "candidate": 0.06103480000001582
+          },
+          "rss": "not measured by public MCP route"
+        }
+      },
+      "failure": "AssertionError: warm MCP exact reconciliation latency target",
+      "warm_measurement_protocol": {
+        "method": "serial alternating pairs with both isolated clients live",
+        "discarded_warmup_calls_each_runtime": 1,
+        "measured_calls_each_runtime": 9,
+        "actual_call_order": [
+          {
+            "runtime": "baseline",
+            "round": 0,
+            "position": 0,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 0,
+            "position": 1,
+            "warmup": true
+          },
+          {
+            "runtime": "candidate",
+            "round": 1,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 1,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 2,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 2,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 3,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 3,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 4,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 4,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 5,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 5,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 6,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 6,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 7,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 7,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 8,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 8,
+            "position": 1,
+            "warmup": false
+          },
+          {
+            "runtime": "candidate",
+            "round": 9,
+            "position": 0,
+            "warmup": false
+          },
+          {
+            "runtime": "baseline",
+            "round": 9,
+            "position": 1,
+            "warmup": false
+          }
+        ],
+        "harness_sha256": "66f2806f3c01375e4965cfc98218fe9e09f7b449b9f0ce3342e2c5c6d0f746cc"
+      },
+      "raw_sha256": "8dccb202e04973ce92454a20dd4e40379701746a5c210be04f50e9f65bf1c526",
+      "source_artifact": {
+        "artifact_id": 13442103916,
+        "name": "indexing-performance-windows-x64",
+        "zip_sha256": "b70162ae08146ce656af18011f6d0fa6b0d4e8e6c3ce38d0ed658c8e8caab7f1"
+      },
+      "package_artifact": {
+        "artifact_id": 13441211061,
+        "zip_sha256": "91e836fff9170d16200a94d8aebe70f4db92fd4ad227a1bf2707b31888f5223f"
+      },
+      "check_count": 360,
+      "failed_checks": [
+        {
+          "name": "warm MCP exact reconciliation latency target",
+          "passed": false
+        }
+      ],
+      "sample_counts": {
+        "baseline": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "offline_same_metadata": 1
+        },
+        "candidate": {
+          "initial": 3,
+          "full": 5,
+          "rebuild": 3,
+          "cold_noop": 6,
+          "sparse": 3,
+          "summary": 9,
+          "detailed": 9,
+          "compatible_open": 9,
+          "semantic_upgrade": 3,
+          "large_initial": 1,
+          "dense_initial": 1,
+          "large_sparse": 3,
+          "dense_sparse": 3,
+          "large_full_convergence": 1,
+          "dense_full_convergence": 1,
+          "offline_same_metadata": 1
+        }
+      },
+      "warm_samples_each_runtime": 9
+    }
+  }
+}

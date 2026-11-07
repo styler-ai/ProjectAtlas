@@ -777,8 +777,7 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                     if candidates.page.truncated {
                         return Err(dependency_closure_limit(
                             this.sources.root,
-                            std::iter::empty(),
-                            GraphLimits::MAX_ROWS as usize + 1,
+                            this.replaced.iter().map(String::as_str),
                         ));
                     }
                     this.candidates.retained_limit = this

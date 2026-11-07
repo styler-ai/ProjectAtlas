@@ -7,6 +7,88 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// A separate SQLite process must still be excluded by its parent's reserved lock.
+#[cfg(unix)]
+#[test]
+fn managed_parent_sqlite_lock_peer() -> io::Result<()> {
+    let Some(path) = std::env::var_os("PROJECTATLAS_TEST_MANAGED_PARENT_LOCK") else {
+        return Ok(());
+    };
+    let connection = rusqlite::Connection::open(path).map_err(io::Error::other)?;
+    connection
+        .busy_timeout(std::time::Duration::ZERO)
+        .map_err(io::Error::other)?;
+    match connection.execute_batch("BEGIN IMMEDIATE") {
+        Err(rusqlite::Error::SqliteFailure(source, _))
+            if matches!(
+                source.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(io::Error::other(source)),
+        Ok(()) => {
+            connection
+                .execute_batch("ROLLBACK")
+                .map_err(io::Error::other)?;
+            Err(io::Error::other(
+                "managed parent SQLite reserved lock was lost",
+            ))
+        }
+    }
+}
+
+/// Check the kernel-visible write exclusion without opening the file in this process.
+#[cfg(unix)]
+fn verify_managed_parent_sqlite_lock(path: &Path) -> io::Result<()> {
+    let peer = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "project_state::tests::managed_parent_sqlite_lock_peer",
+            "--nocapture",
+        ])
+        .env("PROJECTATLAS_TEST_MANAGED_PARENT_LOCK", path)
+        .output()?;
+    if !peer.status.success() {
+        return Err(io::Error::other(format!(
+            "managed parent lock peer failed: {} {}",
+            String::from_utf8_lossy(&peer.stdout),
+            String::from_utf8_lossy(&peer.stderr)
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn refused_managed_database_parents_preserve_live_sqlite_locks() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let database = root.join(STATE_DIRECTORY);
+    let connection = rusqlite::Connection::open(&database).map_err(io::Error::other)?;
+    connection
+        .execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE control(value); BEGIN IMMEDIATE;")
+        .map_err(io::Error::other)?;
+    verify_managed_parent_sqlite_lock(&database)?;
+    for reset in [false, true] {
+        let selected = database.join(DATABASE_FILE.to_ascii_uppercase());
+        let result = if reset {
+            ProjectStateGuard::preflight_database_reset_path(&selected, &root)
+        } else {
+            ProjectStateGuard::preflight_database_path(&selected, &root)
+        };
+        require(
+            !matches!(result, Ok(Some(_))),
+            "regular-file managed parent was admitted",
+        )?;
+        verify_managed_parent_sqlite_lock(&database)?;
+    }
+    connection
+        .execute_batch("ROLLBACK")
+        .map_err(io::Error::other)
+}
+
 #[test]
 fn root_document_creation_preserves_existing_entries_and_race_status() -> io::Result<()> {
     let temp = tempfile::tempdir()?;

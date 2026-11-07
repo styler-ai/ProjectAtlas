@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep full benchmark campaigns out of automated validation and release paths."""
+"""Keep campaigns and original-artifact resource inspection explicitly selected."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py")
+CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py", "indexing_navigation_resources.py", "native_navigation_memory.py")
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 
 
@@ -68,6 +68,61 @@ def campaign_entrypoint(line: str) -> bool:
     )
 
 
+def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int) -> bool:
+    """Admit separately guarded manual measurement or original-artifact inspection."""
+    if "native_navigation_memory.py" in lines[position]:
+        return explicit_navigation_memory_diagnostic(relative, lines, position)
+    supplemental = "indexing_navigation_resources.py" in lines[position]
+    if relative != ".github/workflows/release.yml" or not ("indexing_acceptance.py" in lines[position] or supplemental):
+        return False
+    if any(name in lines[position] for name in ("system_scale.py", "agent_navigation.py")):
+        return False
+    source = "\n".join(lines)
+    event = re.search(r"^on:\n(.*?)(?=^\S)", source, re.MULTILINE | re.DOTALL)
+    if event is None or re.findall(r"^  ([\w-]+):", event[1], re.MULTILINE) != ["workflow_dispatch"]:
+        return False
+    option = re.search(
+        r"^      run_indexing_performance:\n((?:^        [^\n]*\n)+)",
+        event[1] + "\n", re.MULTILINE,
+    )
+    if option is None or "        default: false\n" not in option[1] or "        type: boolean\n" not in option[1]:
+        return False
+    for start in range(position, -1, -1):
+        if lines[start].startswith("      - name:"):
+            guard = ("        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
+                     if supplemental else "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}")
+            return guard in lines[start:position]
+    return False
+
+
+def explicit_navigation_memory_diagnostic(relative: str, lines: list[str], position: int) -> bool:
+    """Keep original-artifact composition inspection off ordinary CI events."""
+    if relative != ".github/workflows/ci.yml":
+        return False
+    source = "\n".join(lines)
+    event = re.search(r"^on:\n(.*?)(?=^\S)", source, re.MULTILINE | re.DOTALL)
+    if event is None or "  workflow_dispatch:\n" not in event[1]:
+        return False
+    option = re.search(r"^      navigation_memory_run_id:\n((?:^        [^\n]*\n)+)", event[1] + "\n", re.MULTILINE)
+    if option is None or '        default: ""\n' not in option[1] or "        type: string\n" not in option[1]:
+        return False
+    isolation = "!(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')"
+    source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null"
+    plan = re.search(r"^  plan:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
+    verify = re.search(r"^  verify:\n(.*?)(?=^  [\w-]+:|\Z)", source, re.MULTILINE | re.DOTALL)
+    if (plan is None or f"    if: ({source_event}) && {isolation}" not in plan[1].splitlines()
+            or verify is None or f"    if: ${{{{ always() && {isolation} }}}}" not in verify[1].splitlines()):
+        return False
+    for start in range(position, -1, -1):
+        if re.fullmatch(r"  [\w-]+:", lines[start]):
+            body = lines[start:position]
+            return (lines[start] == "  navigation-resource-diagnostics:"
+                    and "    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}" in body
+                    and "    runs-on: ubuntu-latest" in body
+                    and "    timeout-minutes: 10" in body)
+    return False
+
+
 def self_test() -> None:
     """Protect the narrow raw-trace boundary and its allowed false positives."""
 
@@ -75,6 +130,73 @@ def self_test() -> None:
         "docs/benchmarks/v0.4-agent-navigation-results.json",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,
     )
+    diagnostic = [
+        "on:", "  workflow_dispatch:", "    inputs:",
+        "      run_indexing_performance:", "        default: false", "        type: boolean",
+        "permissions:", "  contents: read", "jobs:", "  smoke:", "    steps:",
+        "      - name: Explicit diagnostic",
+        "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}",
+        "        run: python docs/benchmarks/harness/indexing_acceptance.py",
+    ]
+    route = ".github/workflows/release.yml"
+    assert explicit_indexing_diagnostic(route, diagnostic, len(diagnostic) - 1)
+    for before, after in [
+        ("        default: false", "        default: true"),
+        ("        type: boolean", "        type: string"),
+        ("  workflow_dispatch:", "  push:"),
+        ("        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}", "        if: ${{ always() }}"),
+    ]:
+        changed = [after if line == before else line for line in diagnostic]
+        assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
+    native = [
+        "on:", "  pull_request:", "  workflow_dispatch:", "    inputs:",
+        "      navigation_memory_run_id:", '        default: ""', "        type: string",
+        "permissions:", "  contents: read", "jobs:", "  navigation-resource-diagnostics:",
+        "    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}",
+        "    runs-on: ubuntu-latest", "    timeout-minutes: 10", "    steps:",
+        "      - run: python3 docs/benchmarks/harness/native_navigation_memory.py",
+    ]
+    source_event = "github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null"
+    plan_if = f"    if: ({source_event}) && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')"
+    verify_if = "    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}"
+    native[10:10] = ["  plan:", plan_if, "  verify:", verify_if]
+    assert campaign_entrypoint(native[-1])
+    assert explicit_indexing_diagnostic(".github/workflows/ci.yml", native, len(native) - 1)
+    assert not explicit_indexing_diagnostic(route, native, len(native) - 1)
+    for before, after in [
+        ('        default: ""', '        default: "17"'),
+        ("        type: string", "        type: boolean"),
+        ("  navigation-resource-diagnostics:", "  ordinary-job:"),
+        ("    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}", "    if: always()"),
+        ("    runs-on: ubuntu-latest", "    runs-on: windows-latest"),
+        ("    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}", "    if: always()"),
+        (plan_if, "    if: ordinary_source"),
+        (plan_if, plan_if + " || true"),
+        (verify_if, verify_if + " || true"),
+        (plan_if, plan_if.replace("if: ", "if: true || ", 1)),
+        (verify_if, verify_if.replace("if: ", "if: true || ", 1)),
+    ]:
+        changed = [after if line == before else line for line in native]
+        assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
+    for entrypoint in ("indexing_acceptance.py", "indexing_navigation_resources.py", "system_scale.py", "agent_navigation.py"):
+        changed = [line.replace("native_navigation_memory.py", entrypoint) for line in native]
+        assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
+    assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
+    supplemental = diagnostic.copy()
+    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
+    supplemental[-1] = "        run: python docs/benchmarks/harness/indexing_navigation_resources.py"
+    assert campaign_entrypoint(supplemental[-1])
+    assert explicit_indexing_diagnostic(route, supplemental, len(supplemental) - 1)
+    assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", supplemental, len(supplemental) - 1)
+    for before, after in [
+        (" && inputs.prepublish_only", ""),
+        (" && inputs.run_indexing_performance", ""),
+        (" && matrix.label == 'macos-arm64-posix'", ""),
+        ("        default: false", "        default: true"),
+        ("  workflow_dispatch:", "  push:"),
+    ]:
+        changed = [line.replace(before, after) for line in supplemental]
+        assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
     assert not is_oversized_tracked_raw_result(
         "docs/benchmarks/fixtures/generated.jsonl",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,
@@ -152,6 +274,8 @@ def self_test() -> None:
 
 def main() -> int:
     self_test()
+    if campaign_entrypoint("python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py"):
+        raise RuntimeError("indexing arithmetic unit tests must remain allowed")
     if campaign_entrypoint("python docs/benchmarks/harness/test_agent_navigation.py"):
         raise RuntimeError("benchmark unit tests must remain allowed")
     if not campaign_entrypoint(
@@ -175,10 +299,9 @@ def main() -> int:
     violations: list[str] = []
     for path in automated_routes:
         relative_path = path.relative_to(root).as_posix()
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if campaign_entrypoint(line):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line_number, line in enumerate(lines, start=1):
+            if campaign_entrypoint(line) and not explicit_indexing_diagnostic(relative_path, lines, line_number - 1):
                 violations.append(f"{relative_path}:{line_number}")
 
     if violations:

@@ -11,6 +11,15 @@ import tarfile
 import zipfile
 
 
+def file_sha256(path):
+    """Hash complete files with bounded reads on the native Python 3.9 hosts."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suffix", required=True, choices=(
@@ -28,8 +37,7 @@ def main():
         "--pattern", asset, "--pattern", "SHA256SUMS", "--dir", str(root),
     ], check=True, timeout=180)
     archive = root / asset
-    with archive.open("rb") as source:
-        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    digest = file_sha256(archive)
     checksums = root / "SHA256SUMS"
     if checksums.read_text(encoding="utf-8").splitlines().count(f"{digest}  {asset}") != 1:
         raise ValueError("Published predecessor archive does not match SHA256SUMS")
@@ -62,7 +70,7 @@ def main():
         package.extractall(source_root)
     bindings = {
         "PROJECTATLAS_PREDECESSOR_EXECUTABLE": executable,
-        "PROJECTATLAS_PREDECESSOR_EXECUTABLE_SHA256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "PROJECTATLAS_PREDECESSOR_EXECUTABLE_SHA256": file_sha256(executable),
         "PROJECTATLAS_PREDECESSOR_SOURCE": source_root,
         "PROJECTATLAS_PREDECESSOR_ARCHIVE": archive,
         "PROJECTATLAS_PREDECESSOR_CHECKSUMS": checksums,

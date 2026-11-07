@@ -13,6 +13,12 @@ on:
     types: [opened, reopened, synchronize, edited]
   merge_group:
   workflow_dispatch:
+    inputs:
+      navigation_memory_run_id:
+        description: "Original completed release run for diagnostic-only Linux memory attribution"
+        required: false
+        default: ""
+        type: string
   schedule:
     - cron: "17 3 * * 1"
 
@@ -29,7 +35,7 @@ jobs:
   plan:
     name: plan
     # A base retarget changes the source diff without changing the head; other edits are metadata-only.
-    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    if: (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null) && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '')
     runs-on: ubuntu-latest
     outputs:
       base: ${{ steps.inputs.outputs.base }}
@@ -246,7 +252,10 @@ jobs:
 
       - name: Manual-only full benchmark policy
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
-        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+        run: |
+          python3 .github/scripts/verify-manual-benchmark-policy.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_native_navigation_memory.py
 
       - name: Published benchmark measurement locks
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
@@ -413,6 +422,33 @@ jobs:
           python3 .github/scripts/verify-rust-toolchain.py --self-test
           python3 .github/scripts/verify-rust-toolchain.py --install
 
+      - name: Native SQLite observer compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Match the interpreter captured for the measurement venv before isolation.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          "$python_command" - <<'PYTHON'
+          from contextlib import closing
+          import json, sqlite3, sys
+          with closing(sqlite3.connect(":memory:")) as connection:
+              print(json.dumps({"executable": sys.executable, "python": sys.version,
+                  "sqlite": sqlite3.sqlite_version,
+                  "source_id": connection.execute("SELECT sqlite_source_id()").fetchone()[0],
+                  "compile_options": [row[0] for row in connection.execute("PRAGMA compile_options")]}))
+          PYTHON
+          PYTHONPATH=docs/benchmarks/harness "$python_command" -m unittest test_indexing_acceptance.DatabaseInspection
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Keep native Python 3.9 syntax/helper and live-WAL coverage. Apple's
+            # SQLite 3.43.2 cannot open sidecarless WAL; the selected measurement
+            # venv must pass that additional case before any timing begins.
+            /usr/bin/python3 .github/scripts/verify-rust-toolchain.py --self-test
+            PYTHONPATH=docs/benchmarks/harness /usr/bin/python3 -m unittest \
+              test_indexing_acceptance.ArchiveIdentity \
+              test_indexing_acceptance.AcceptanceTargets \
+              test_indexing_acceptance.DatabaseInspection.test_reader_observes_live_wal_without_writing_database
+          fi
+
       - name: Affected package target compile
         # Full Linux compiles in rust; full macOS compiles in the all-targets warning gate.
         if: contains(matrix.contracts, 'compile') && (fromJSON(needs.plan.outputs.plan).mode == 'narrow' || runner.os == 'Windows')
@@ -476,27 +512,60 @@ jobs:
 
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
-        # Includes cold compilation of the symbol, CLI, and navigation test targets.
+        # Each native target owns its cold compilation and regression budget.
         timeout-minutes: 20
         shell: bash
         run: |
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
+
+      - name: PHP graph projection platform regression
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 20
+        shell: bash
+        run: |
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
+
+      - name: PHP CLI and MCP platform regression
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 20
+        shell: bash
+        run: |
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
 
       - name: Native source-policy unit regressions
         if: contains(matrix.contracts, 'compile')
-        # Reuse shared cold dependencies built by the preceding PHP regression.
+        # Reuse shared cold dependencies built by the preceding PHP regressions.
         # All-feature-specific compilation and execution retain this separate cap.
         timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p projectatlas-fs --lib --all-features
+          cargo test --locked -p projectatlas-db --lib --all-features sqlite_profile::tests:: -- --nocapture
+          cargo test --locked -p projectatlas-db --lib --all-features tests::native_root_discovery_admits_one_snapshot_and_rechecks_schema -- --exact --nocapture
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            cargo test --locked -p projectatlas-db --lib --all-features database_file_identity::tests:: -- --nocapture
+          fi
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::current_root_discovery_skips_legacy_reads_and_keeps_config_guards -- --exact --nocapture
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::default_mcp_project_root_recovers_custom_predecessor_candidate -- --exact --nocapture
+            cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::settings_report_preserves_verbatim_native_root_projection -- --exact --nocapture
+          fi
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::polling_handoff_preserves_active_control_and_authored_state -- --exact
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::native_policy_overlap_hands_off_initial_and_later_work_through_real_polling -- --exact
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::graph_projection::tests::document_verification_charges_rows_before_all_shortcuts_across_pages -- --exact
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-current-read-attribution.log"
+
+      - name: Upload native current-read stage attribution
+        if: contains(matrix.contracts, 'compile')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-current-read-attribution-${{ matrix.label }}
+          path: ${{ runner.temp }}/native-current-read-attribution.log
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Managed project-state ownership platform regressions
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
@@ -861,6 +930,33 @@ jobs:
           python3 .github/scripts/measure-bounded-documents.py --binary "$binary" --output .tmp/document-resources.json
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture
+
+      - name: Compile optimized native current-read proof
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        # Reuse the preceding shipping/default-feature release dependencies.
+        # The separate unit-test executable still requires code generation/linking.
+        # Keep Intel construction outside the unchanged execution deadline.
+        timeout-minutes: ${{ matrix.label == 'macos-x64' && 30 || 10 }}
+        shell: bash
+        run: cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run
+
+      - name: Optimized native current-read stage attribution
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        # This test-only owner profile is diagnostic, not installed acceptance.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release --locked -p projectatlas-cli --bin projectatlas runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/native-current-read-optimized-attribution.log"
+
+      - name: Upload optimized native current-read stage attribution
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-current-read-optimized-attribution-${{ matrix.label }}
+          path: ${{ runner.temp }}/native-current-read-optimized-attribution.log
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
@@ -1463,10 +1559,50 @@ jobs:
             }
           }
 
+  navigation-resource-diagnostics:
+    name: navigation-resource-diagnostics
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout diagnostic source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify diagnostic controls
+        run: python3 -m unittest discover -s docs/benchmarks/harness -p test_native_navigation_memory.py
+      - name: Inspect original native navigation memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_RUN_ID: ${{ inputs.navigation_memory_run_id }}
+        run: |
+          python3 docs/benchmarks/harness/native_navigation_memory.py \
+            --original-run-id "$ORIGINAL_RUN_ID" \
+            --output-root "$RUNNER_TEMP/navigation-memory-diagnosis"
+      - name: Preserve diagnostic observations
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-navigation-memory-diagnosis
+          path: |
+            ${{ runner.temp }}/navigation-memory-diagnosis/diagnosis.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/original-results.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/original-artifacts.json
+            ${{ runner.temp }}/navigation-memory-diagnosis/*-ordinary/
+            ${{ runner.temp }}/navigation-memory-diagnosis/*-hold/
+          if-no-files-found: warn
+          retention-days: 7
+
   verify:
     name: verify
     # Every native CI suite supplies verify; metadata must validate real source proof.
-    if: always()
+    # An explicit diagnostic is not source proof and must not emit a green verify.
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.navigation_memory_run_id != '') }}
     needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]
     runs-on: ubuntu-latest
     timeout-minutes: 125

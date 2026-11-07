@@ -1208,11 +1208,41 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
     if !release_workflow.contains("permissions:\n  contents: read") {
         return Err(io::Error::other("release workflow must default to contents: read").into());
     }
-    for job in ["package-unix", "package-windows"] {
-        let package_job = workflow_job_block(&release_workflow, job)?;
-        if !package_job.contains("timeout-minutes: 30") {
+    let release_documents = YamlLoader::load_from_str(&release_workflow)?;
+    let release_document = release_documents
+        .first()
+        .ok_or_else(|| io::Error::other("release workflow document is empty"))?;
+    let unix_package_rows =
+        release_document["jobs"]["package-unix"]["strategy"]["matrix"]["include"]
+            .as_vec()
+            .ok_or_else(|| io::Error::other("Unix package matrix is missing"))?;
+    // Bind the expression's selector to the actual Intel package construction row.
+    let mut intel_package_rows = unix_package_rows
+        .iter()
+        .filter(|row| row["label"].as_str() == Some("macos-x64"));
+    let intel_package_row = intel_package_rows
+        .next()
+        .ok_or_else(|| io::Error::other("Intel package timeout selector has no matrix row"))?;
+    if intel_package_rows.next().is_some()
+        || intel_package_row["os"].as_str() != Some("macos-15-intel")
+        || intel_package_row["suffix"].as_str() != Some("x86_64-apple-darwin")
+    {
+        return Err(io::Error::other(
+            "Intel package timeout selector must identify exactly one native Intel construction row",
+        )
+        .into());
+    }
+    for (job, expected_timeout) in [
+        (
+            "package-unix",
+            Yaml::String("${{ matrix.label == 'macos-x64' && 90 || 60 }}".to_owned()),
+        ),
+        ("package-windows", Yaml::Integer(60)),
+    ] {
+        // Inspect the job field, so a step timeout or comment cannot satisfy the policy.
+        if release_document["jobs"][job]["timeout-minutes"] != expected_timeout {
             return Err(io::Error::other(format!(
-                "release package job {job} must have a bounded timeout"
+                "release package job {job} must budget 90 minutes for Intel Mac construction and 60 minutes for other platforms"
             ))
             .into());
         }

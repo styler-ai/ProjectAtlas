@@ -15,6 +15,24 @@ use std::sync::OnceLock;
 #[cfg(test)]
 use projectatlas_core::normalize_native_path_display;
 
+#[cfg(test)]
+thread_local! {
+    /// Complete schema admissions performed by this synchronous test thread.
+    static SCHEMA_INSPECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    /// Complete owned schema captures performed by this synchronous test thread.
+    static SCHEMA_CONTRACT_READS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+/// Observe real schema admissions without relying on process-global cache state.
+#[cfg(test)]
+pub(crate) fn schema_inspection_count() -> usize {
+    SCHEMA_INSPECTIONS.with(std::cell::Cell::get)
+}
+
 /// Current `SQLite` schema version supported by this crate.
 pub(crate) const SCHEMA_VERSION: i64 = 23;
 /// Released 0.3.26 schema accepted by the migration inventory.
@@ -1762,14 +1780,14 @@ fn adopt_legacy_project_root_on_connection(
     }
 }
 
-/// Bind recovery to the opened Unix database rather than a replacement pathname.
+/// Verify the opened Unix database against its VFS pathname, not only a path stat.
 /// Windows SQLite opens without delete sharing, preventing replacement while open.
 #[cfg(unix)]
 #[allow(
     unsafe_code,
     reason = "SQLite exposes opened-file identity only through its VFS control"
 )]
-fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+pub(crate) fn opened_database_still_at_path(connection: &Connection) -> bool {
     let mut moved: std::ffi::c_int = 1;
     // SAFETY: the borrowed connection remains live and exclusively used by this
     // synchronous operation. SQLite borrows the main schema name and writable
@@ -1782,10 +1800,17 @@ fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
             std::ptr::from_mut(&mut moved).cast(),
         )
     };
-    if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
-        return Err(DbError::LegacyRootAdoptionUnavailable);
+    result == rusqlite::ffi::SQLITE_OK && moved == 0
+}
+
+/// Preserve legacy adoption's typed refusal when opened-file authority is unavailable.
+#[cfg(unix)]
+fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+    if opened_database_still_at_path(connection) {
+        Ok(())
+    } else {
+        Err(DbError::LegacyRootAdoptionUnavailable)
     }
-    Ok(())
 }
 
 /// Revalidate a predecessor's legacy root against the caller's native root.
@@ -2285,6 +2310,31 @@ fn inspect_current(
     Ok(preflight)
 }
 
+/// Read a current native root from the same snapshot that admitted its schema.
+pub(crate) fn read_project_root_identity(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
+    let location = inspect_database_location(path)?;
+    if !location.database_exists {
+        return Ok(None);
+    }
+    let connection = open_read_only_connection(path, &location)?;
+    connection.execute_batch("BEGIN DEFERRED")?;
+    let result = (|| {
+        let preflight = inspect_connection(&connection, None, false)?;
+        if preflight.state != SchemaState::Current {
+            return Ok(None);
+        }
+        verify_current_read_profile(&connection)?;
+        crate::project_identity::load_project_root_identity(&connection)
+    })();
+    match result {
+        Ok(identity) => {
+            connection.execute_batch("ROLLBACK")?;
+            Ok(identity)
+        }
+        Err(error) => Err(rollback_after_error(&connection, error)),
+    }
+}
+
 /// Read the existing project identity without mutating or migrating the database.
 pub(crate) fn read_project_root(path: &Path) -> DbResult<Option<String>> {
     let location = inspect_database_location(path)?;
@@ -2309,6 +2359,8 @@ fn inspect_connection(
     expected_root: Option<&str>,
     run_integrity_check: bool,
 ) -> DbResult<SchemaPreflight> {
+    #[cfg(test)]
+    SCHEMA_INSPECTIONS.with(|count| count.set(count.get().saturating_add(1)));
     if run_integrity_check {
         validate_integrity(connection)?;
     }
@@ -2409,8 +2461,10 @@ fn schema_state(connection: &Connection) -> DbResult<SchemaState> {
     let metadata_kind = object_kind(connection, "metadata")?;
     match metadata_kind.as_deref() {
         None => {
+            // The underscore in SQLite's reserved namespace is literal, not
+            // LIKE's single-character wildcard. Keep user lookalikes visible.
             let user_objects = connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'",
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
@@ -3009,58 +3063,136 @@ fn validate_schema_shape(connection: &Connection, state: SchemaState) -> DbResul
             });
         }
     };
-    let found = read_schema_contract(connection)?;
     let released_schema_eight = stored_version == Some(PREVIOUS_SCHEMA_VERSION);
-    let tables_match = if released_schema_eight {
-        released_schema_tables_match(&expected.tables, &found.tables)
-    } else {
-        expected.tables == found.tables
+    validate_schema_tables(connection, expected, released_schema_eight)?;
+    validate_schema_foreign_keys(connection, expected)?;
+    validate_schema_indexes(connection, expected, released_schema_eight)?;
+    validate_extension_objects(connection)?;
+    Ok(())
+}
+
+/// Compare complete fresh tables through one ordered schema cursor.
+fn validate_schema_tables(
+    connection: &Connection,
+    expected: &SchemaContract,
+    released_schema_eight: bool,
+) -> DbResult<()> {
+    let tables_match = {
+        let mut statement = connection.prepare(
+            "SELECT name, sql FROM sqlite_schema \
+             WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut matches = true;
+        for required in &expected.tables {
+            let Some(row) = rows.next()? else {
+                matches = false;
+                break;
+            };
+            let name = row.get::<_, String>(0)?;
+            if name != required.name {
+                matches = false;
+                break;
+            }
+            let definition = row.get::<_, String>(1)?;
+            let actual = TableContract {
+                definition: normalize_table_definition(&definition),
+                columns: table_columns(connection, &name)?,
+                name,
+            };
+            matches = if released_schema_eight {
+                released_schema_tables_match(
+                    std::slice::from_ref(required),
+                    std::slice::from_ref(&actual),
+                )
+            } else {
+                required == &actual
+            };
+            if !matches {
+                break;
+            }
+        }
+        matches && rows.next()?.is_none()
     };
-    if !tables_match {
-        return Err(schema_shape_error(
+    if tables_match {
+        Ok(())
+    } else {
+        // Keep the established complete, bounded diagnostic on a refusal. The
+        // successful hot path never retains all inspected table contracts.
+        let found = read_schema_contract(connection)?;
+        Err(schema_shape_error(
             "tables",
             &expected.tables,
             &found.tables,
-        ));
+        ))
     }
-    if expected.foreign_keys != found.foreign_keys {
-        return Err(schema_shape_error(
-            "foreign_keys",
-            &expected.foreign_keys,
-            &found.foreign_keys,
-        ));
-    }
-    for required in &expected.indexes {
-        let Some(actual) = found
-            .indexes
+}
+
+/// Compare fresh foreign keys by table without retaining the full schema's rows.
+fn validate_schema_foreign_keys(
+    connection: &Connection,
+    expected: &SchemaContract,
+) -> DbResult<()> {
+    for table in &expected.tables {
+        let found = table_foreign_keys(connection, &table.name)?;
+        if !expected
+            .foreign_keys
             .iter()
-            .find(|index| index.name == required.name)
-        else {
-            return Err(schema_shape_error(&required.name, required, &"missing"));
-        };
-        let index_matches = if released_schema_eight {
-            released_schema_index_matches(required, actual)
-        } else {
-            actual == required
-        };
-        if !index_matches {
-            return Err(schema_shape_error(&required.name, required, actual));
-        }
-    }
-    for extra in found
-        .indexes
-        .iter()
-        .filter(|index| !expected.indexes.iter().any(|item| item.name == index.name))
-    {
-        if !is_compatible_extension_index(extra) {
+            .filter(|key| key.table == table.name)
+            .eq(found.iter())
+        {
+            drop(found);
+            let found = read_schema_contract(connection)?;
             return Err(schema_shape_error(
-                &extra.name,
-                &"optional non-unique full index over declared columns",
-                extra,
+                "foreign_keys",
+                &expected.foreign_keys,
+                &found.foreign_keys,
             ));
         }
     }
-    validate_extension_objects(connection)?;
+    Ok(())
+}
+
+/// Validate complete required and extension index metadata one table at a time.
+fn validate_schema_indexes(
+    connection: &Connection,
+    expected: &SchemaContract,
+    released_schema_eight: bool,
+) -> DbResult<()> {
+    for table in &expected.tables {
+        let found = table_indexes(connection, &table.name)?;
+        for required in expected
+            .indexes
+            .iter()
+            .filter(|index| index.table == table.name)
+        {
+            let Some(actual) = found.iter().find(|index| index.name == required.name) else {
+                return Err(schema_shape_error(&required.name, required, &"missing"));
+            };
+            let matches = if released_schema_eight {
+                released_schema_index_matches(required, actual)
+            } else {
+                required == actual
+            };
+            if !matches {
+                return Err(schema_shape_error(&required.name, required, actual));
+            }
+        }
+        for extra in found.iter().filter(|index| {
+            expected
+                .indexes
+                .binary_search_by(|required| required.name.cmp(&index.name))
+                .is_err()
+        }) {
+            if !is_compatible_extension_index(extra) {
+                return Err(schema_shape_error(
+                    &extra.name,
+                    &"optional non-unique full index over declared columns",
+                    extra,
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3561,6 +3693,8 @@ fn predecessor_schema_contract() -> DbResult<&'static SchemaContract> {
 
 /// Read all behavior-relevant schema state through `SQLite` introspection.
 fn read_schema_contract(connection: &Connection) -> DbResult<SchemaContract> {
+    #[cfg(test)]
+    SCHEMA_CONTRACT_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
     let table_names = user_table_names(connection)?;
     let mut tables = Vec::with_capacity(table_names.len());
     let mut indexes = Vec::new();
@@ -3587,19 +3721,22 @@ fn read_schema_contract(connection: &Connection) -> DbResult<SchemaContract> {
 
 /// Return a whitespace-normalized table definition from the durable schema.
 fn table_definition(connection: &Connection, table: &str) -> DbResult<String> {
-    let definition = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-        [table],
-        |row| row.get::<_, String>(0),
-    )?;
-    Ok(definition.split_whitespace().collect::<Vec<_>>().join(" "))
+    let mut statement = connection
+        .prepare_cached("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1")?;
+    let definition = statement.query_row([table], |row| row.get::<_, String>(0))?;
+    Ok(normalize_table_definition(&definition))
+}
+
+/// Preserve the established whitespace-only normalization of table definitions.
+fn normalize_table_definition(definition: &str) -> String {
+    definition.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Return exact user table names in deterministic order.
 fn user_table_names(connection: &Connection) -> DbResult<Vec<String>> {
     let mut statement = connection.prepare(
         "SELECT name FROM sqlite_schema \
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+         WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name",
     )?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -3607,7 +3744,7 @@ fn user_table_names(connection: &Connection) -> DbResult<Vec<String>> {
 
 /// Return complete columns for one `SQLite`-validated table name.
 fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<ColumnContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT cid, name, type, \"notnull\", dflt_value, pk, hidden \
          FROM pragma_table_xinfo(?1) ORDER BY cid",
     )?;
@@ -3627,7 +3764,7 @@ fn table_columns(connection: &Connection, table: &str) -> DbResult<Vec<ColumnCon
 
 /// Return complete logical indexes for one table.
 fn table_indexes(connection: &Connection, table: &str) -> DbResult<Vec<IndexContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1) ORDER BY name",
     )?;
     let rows = statement.query_map([table], |row| {
@@ -3649,7 +3786,7 @@ fn index_columns(
     connection: &Connection,
     index: &str,
 ) -> rusqlite::Result<Vec<IndexColumnContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT seqno, cid, name, \"desc\", coll, key \
          FROM pragma_index_xinfo(?1) ORDER BY seqno",
     )?;
@@ -3668,7 +3805,7 @@ fn index_columns(
 
 /// Return complete foreign-key behavior for one table.
 fn table_foreign_keys(connection: &Connection, table: &str) -> DbResult<Vec<ForeignKeyContract>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT id, seq, \"table\", \"from\", \"to\", on_update, on_delete, match \
          FROM pragma_foreign_key_list(?1) ORDER BY id, seq",
     )?;
@@ -3692,7 +3829,7 @@ fn table_foreign_keys(connection: &Connection, table: &str) -> DbResult<Vec<Fore
 fn validate_extension_objects(connection: &Connection) -> DbResult<()> {
     let mut statement = connection.prepare(
         "SELECT type, name, tbl_name, sql FROM sqlite_schema \
-         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+         WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY type, name",
     )?;
     let objects = statement.query_map([], |row| {
         Ok((
@@ -4020,13 +4157,13 @@ mod tests {
             connection,
             "SELECT type, name, tbl_name, sql
              FROM sqlite_master
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY type, name",
         )?;
         let table_names = query_all_values(
             connection,
             "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY name",
         )?;
         let mut tables = Vec::with_capacity(table_names.len());
@@ -4329,6 +4466,121 @@ mod tests {
     }
 
     #[test]
+    fn foreign_internal_prefix_lookalikes_are_not_initialized() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for (name, view_only) in [
+            ("sqlitex_foreign_view", true),
+            ("ordinary_foreign", false),
+            ("sqlitex_foreign", false),
+            ("SQLITEX_foreign", false),
+            ("sqlite☃foreign", false),
+            ("sqlite!foreign", false),
+        ] {
+            let database = temp.path().join(format!("{name}.db"));
+            {
+                let connection = Connection::open(&database)?;
+                let schema = if view_only {
+                    format!("CREATE VIEW \"{name}\" AS SELECT 'preserve foreign data' AS value;")
+                } else {
+                    format!(
+                        "CREATE TABLE \"{name}\" (value TEXT);\n\
+                         INSERT INTO \"{name}\" VALUES ('preserve foreign data');"
+                    )
+                };
+                connection.execute_batch(&schema)?;
+            }
+            let before = fs::read(&database)?;
+            let inventory = directory_entry_names(temp.path())?;
+            if !matches!(
+                AtlasStore::open(&database),
+                Err(DbError::SchemaShape { .. })
+            ) {
+                return Err(io::Error::other(format!(
+                    "foreign database {name} was not refused before initialization"
+                ))
+                .into());
+            }
+            if !matches!(
+                read_project_root(&database),
+                Err(DbError::SchemaShape { .. })
+            ) {
+                return Err(io::Error::other("foreign database selected a project root").into());
+            }
+            require_unchanged(temp.path(), &database, &before, &inventory)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_admission_rejects_internal_prefix_lookalike_objects() -> Result<(), Box<dyn Error>> {
+        let layouts: [(&str, fn(&Connection) -> DbResult<()>); 3] = [
+            ("current", |connection| initialize(connection, None)),
+            ("released", create_released_schema_eight),
+            ("evolved", create_evolved_released_schema_eight),
+        ];
+        let changes = [
+            "CREATE TABLE sqlitex_extra (value TEXT);",
+            "CREATE TABLE SQLITEX_extra (value TEXT);",
+            "CREATE TABLE \"sqlite☃extra\" (value TEXT);",
+            "CREATE VIEW sqlitex_view AS SELECT 1 AS value;",
+            "CREATE TRIGGER sqlitex_trigger AFTER INSERT ON nodes BEGIN SELECT 1; END;",
+        ];
+        let temp = tempfile::tempdir()?;
+        for (layout, create) in layouts {
+            for (case, change) in changes.iter().enumerate() {
+                let directory = temp.path().join(format!("{layout}-{case}"));
+                fs::create_dir(&directory)?;
+                let database = directory.join("index.db");
+                {
+                    let connection = Connection::open(&database)?;
+                    create(&connection)?;
+                    connection.execute_batch(change)?;
+                }
+                let before = fs::read(&database)?;
+                let inventory = directory_entry_names(&directory)?;
+                if !matches!(
+                    AtlasStore::open(&database),
+                    Err(DbError::SchemaShape { .. })
+                ) {
+                    return Err(io::Error::other(format!(
+                        "{layout} admitted an incompatible lookalike object: {change}"
+                    ))
+                    .into());
+                }
+                require_unchanged(&directory, &database, &before, &inventory)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn internal_prefix_filter_preserves_statistics_and_compatible_indexes()
+    -> Result<(), Box<dyn Error>> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch("ANALYZE;")?;
+        if schema_state(&connection)? != SchemaState::Fresh {
+            return Err(
+                io::Error::other("SQLite internal objects prevented initialization").into(),
+            );
+        }
+        initialize(&connection, None)?;
+        connection.execute_batch(
+            "CREATE INDEX sqlitex_optional_index ON nodes(path);\n\
+             ANALYZE;",
+        )?;
+        validate_schema_shape(&connection, SchemaState::Current)?;
+        let snapshot = current_schema_snapshot(&connection)?;
+        if !snapshot
+            .schema_objects
+            .iter()
+            .any(|row| row.get(1) == Some(&Value::Text("sqlitex_optional_index".to_string())))
+        {
+            return Err(io::Error::other("snapshot omitted a user extension index").into());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn schema_lookalikes_are_refused_without_mutation() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repository");
@@ -4526,6 +4778,139 @@ mod tests {
                 .into());
             }
             require_unchanged(&case, &db_path, &database_before, &inventory_before)?;
+        }
+        Ok(())
+    }
+
+    /// Ordinary admission validates fresh metadata without retaining an owned full schema.
+    #[test]
+    fn current_schema_validation_does_not_materialize_whole_contract() -> Result<(), Box<dyn Error>>
+    {
+        let connection = Connection::open_in_memory()?;
+        initialize(&connection, None)?;
+        schema_contract()?;
+        let before = SCHEMA_CONTRACT_READS.with(std::cell::Cell::get);
+        validate_schema_shape(&connection, SchemaState::Current)?;
+        let after = SCHEMA_CONTRACT_READS.with(std::cell::Cell::get);
+        if after != before {
+            return Err(io::Error::other(format!(
+                "current admission materialized the complete schema: {before} -> {after}"
+            ))
+            .into());
+        }
+
+        connection.execute_batch("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")?;
+        if !matches!(
+            validate_schema_shape(&connection, SchemaState::Current),
+            Err(DbError::SchemaShape { .. })
+        ) {
+            return Err(io::Error::other("changed schema passed current admission").into());
+        }
+        Ok(())
+    }
+
+    /// Parameterized metadata queries reuse preparation, never the inspected schema facts.
+    #[test]
+    fn schema_metadata_reuses_preparation_and_rechecks_changed_shapes() -> Result<(), Box<dyn Error>>
+    {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let connection = Connection::open_in_memory()?;
+        for index in 0..16 {
+            connection.execute_batch(&format!(
+                "CREATE TABLE inspected_{index} (
+                     id INTEGER PRIMARY KEY,
+                     parent INTEGER REFERENCES inspected_0(id),
+                     value TEXT NOT NULL
+                 );
+                 CREATE INDEX inspected_{index}_value ON inspected_{index}(value DESC);"
+            ))?;
+        }
+        let preparations: Arc<[AtomicUsize; 5]> =
+            Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+        let observed = Arc::clone(&preparations);
+        // SQLite authorizes these virtual-table reads when preparing SQL, not
+        // on every execution with a different table/index parameter.
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let slot = match context.action {
+                AuthAction::Read {
+                    table_name: "pragma_table_xinfo",
+                    column_name: "name",
+                } => Some(0),
+                AuthAction::Read {
+                    table_name: "pragma_index_list",
+                    column_name: "name",
+                } => Some(1),
+                AuthAction::Read {
+                    table_name: "pragma_index_xinfo",
+                    column_name: "name",
+                } => Some(2),
+                AuthAction::Read {
+                    table_name: "pragma_foreign_key_list",
+                    column_name: "from",
+                } => Some(3),
+                AuthAction::Read {
+                    table_name: "sqlite_schema" | "sqlite_master",
+                    column_name: "sql",
+                } => Some(4),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                observed[slot].fetch_add(1, Ordering::Relaxed);
+            }
+            Authorization::Allow
+        }))?;
+        let inspected = read_schema_contract(&connection)?;
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        let counts = preparations
+            .each_ref()
+            .map(|count| count.load(Ordering::Relaxed));
+        if counts
+            .iter()
+            .any(|count| *count == 0 || *count >= inspected.tables.len())
+        {
+            return Err(io::Error::other(format!(
+                "schema metadata preparation scaled with table count: {counts:?} for {} tables",
+                inspected.tables.len()
+            ))
+            .into());
+        }
+        // Cache-disabled execution must inspect exactly the same tables,
+        // columns, index ordinals/collations and foreign-key definitions.
+        connection.set_prepared_statement_cache_capacity(0);
+        let uncached = read_schema_contract(&connection)?;
+        if inspected != uncached {
+            return Err(io::Error::other("metadata statement reuse changed schema facts").into());
+        }
+        connection.set_prepared_statement_cache_capacity(16);
+        let _warm = read_schema_contract(&connection)?;
+        connection.execute_batch(
+            "ALTER TABLE inspected_0 ADD COLUMN added TEXT DEFAULT 'fresh';
+             DROP INDEX inspected_1_value;
+             CREATE UNIQUE INDEX inspected_1_parent ON inspected_1(parent) WHERE parent IS NOT NULL;
+             DROP TABLE inspected_2;
+             CREATE TABLE inspected_2 (replacement INTEGER PRIMARY KEY);",
+        )?;
+        let changed = read_schema_contract(&connection)?;
+        connection.set_prepared_statement_cache_capacity(0);
+        if changed != read_schema_contract(&connection)? || changed == inspected {
+            return Err(io::Error::other("statement reuse retained stale schema facts").into());
+        }
+        if !changed.tables.iter().any(|table| {
+            table.name == "inspected_0" && table.columns.iter().any(|column| column.name == "added")
+        }) || !changed
+            .indexes
+            .iter()
+            .any(|index| index.name == "inspected_1_parent" && index.partial)
+            || changed
+                .foreign_keys
+                .iter()
+                .any(|key| key.table == "inspected_2")
+        {
+            return Err(io::Error::other(
+                "schema inspection missed changed column/index/key shape",
+            )
+            .into());
         }
         Ok(())
     }

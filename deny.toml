@@ -40,6 +40,11 @@ multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
 skip = [
+  { crate = "windows-sys@0.52.0", reason = "Canonical cap-std/cap-fs-ext 4.0.3 require winx 0.36.4 for Windows handle-relative filesystem operations; winx retains windows-sys 0.52 while existing runtime APIs use 0.61. Remove when upstream winx converges." },
+  { crate = "windows-targets@0.52.6", reason = "Required by the windows-sys 0.52 binding line of cap-std's winx 0.36.4 Windows backend; notify's 0.60 binding line retains windows-targets 0.53. Remove when the upstream binding ranges converge." },
+  { crate = "windows_x86_64_gnu@0.52.6", reason = "Required x64 GNU import library for the retained windows-sys 0.52/winx binding line; notify's 0.60 binding line requires 0.53. Remove when the upstream binding ranges converge." },
+  { crate = "windows_x86_64_msvc@0.52.6", reason = "Required x64 MSVC import library for the retained windows-sys 0.52/winx binding line; notify's 0.60 binding line requires 0.53. Remove when the upstream binding ranges converge." },
+  { crate = "io-lifetimes@2.0.4", reason = "Canonical cap-std/cap-fs-ext 4.0.3 use io-lifetimes 3 while their fs-set-times 0.20.3 dependency retains 2; remove when the upstream handle-lifetime dependency ranges converge." },
   { crate = "bitflags@1.3.2", reason = "Windows-only windows-permissions 0.2.4 provides safe OsStr-compatible handle-based ACL snapshot/application without project unsafe bindings; it retains bitflags 1 while the remaining graph uses 2. Remove when that wrapper updates its flag dependency or an equivalent safe native handle API replaces it." },
   { crate = "compact_str@0.10.0", reason = "Canonical ECMAScript identifier predicates in pinned oxc_syntax 0.156 require compact_str 0.10 through oxc_span/oxc_str; ratatui 0.30 requires 0.9. Remove when those upstream dependency ranges converge." },
   { crate = "phf@0.14.0", reason = "Pinned oxc_syntax 0.156 and oxc_ast_macros require phf 0.14; cssparser/selectors/web_atoms require 0.13. Remove when the upstream ranges converge." },

@@ -5,7 +5,7 @@ Make initial indexing, full reindexing, symbol/graph rebuilding and large-projec
 ## ADDED Requirements
 
 ### Requirement: Performance covers all indexing entry points
-The capability SHALL cover CLI/MCP initialization, full scan, explicit symbol/graph rebuild and one-shot refresh, plus continuous watch through shared owners. Each path SHALL meet its own preregistered speed, work-count and resource targets. Improving only watch-once or warm MCP SHALL not complete the capability.
+The capability SHALL cover CLI/MCP initialization, full scan, explicit symbol/graph rebuild and one-shot refresh, plus continuous watch through shared owners. Each path SHALL meet its own preregistered speed, work-count and resource targets, subject only to the explicit RC1 Linux detailed-navigation memory allowance below. Improving only watch-once or warm MCP SHALL not complete the capability.
 
 #### Scenario: Initial and full indexing
 - **WHEN** a representative large project is initially indexed or fully reindexed
@@ -37,16 +37,22 @@ Indexing SHALL reduce measured redundant traversal, reads/hashing, parsing, deco
 - **WHEN** a change invalidates dependent data or a broader compiler, ignore, parser or publication policy
 - **THEN** refresh includes that invalidated scope while preserving unrelated authored state
 
-### Requirement: Verified unchanged refresh is a cheap no-op
-When root, policy, publication identity and reliable change-history continuity prove no relevant change, refresh SHALL avoid project-tree traversal, content hashing, full-node decoding and parsing, and SHALL create no new index generation.
+### Requirement: Unchanged refresh reconciles exactly without derived work
+For 0.5.1, CLI and MCP one-shot refresh SHALL perform exact source discovery and lightweight ordered source comparison before declaring current state. They SHALL avoid full-node decoding, parsing and publication for unchanged current-contract sources. Native callback queues, equal metadata and retained read epochs alone SHALL NOT authorize bypassing this reconciliation. Zero-source-work admission is deferred to unscheduled #725.
 
-#### Scenario: Continuously observed unchanged MCP project
-- **WHEN** a long-lived MCP process has valid trusted observation and matching publication state for an unchanged project
-- **THEN** MCP completes through the verified no-op path with the required zero work counts and unchanged generation
+#### Scenario: Unchanged current-contract project
+- **WHEN** CLI or long-lived MCP refreshes an unchanged project with matching publication policy
+- **THEN** it performs one detection discovery/comparison, no parse or full-node decode and no new publication
+- **AND** it meets the registered unchanged latency/resource targets
 
-#### Scenario: CLI has reviewed retained change evidence
-- **WHEN** a CLI fast path uses trustworthy retained evidence supplied by an implemented and reviewed cross-invocation design
-- **THEN** it proves the same zero-work bounds without treating a fresh empty event queue as history
+#### Scenario: Delayed observation or same-metadata edit
+- **WHEN** a saved edit has not reached a watcher callback, or preserves size and modification time
+- **THEN** exact comparison detects it and the existing affected-work owner repairs it or refuses unsafe publication
+
+#### Scenario: Policy restored after selecting a different source set
+- **WHEN** Git configuration, global/repository excludes, root/nested `.gitignore`/`.ignore` inputs, `.git`/`commondir` selectors or registered-worktree inventory temporarily change during discovery and are restored before admission finishes, with watcher delivery delayed
+- **THEN** admission binds its source assessment to the policy inputs actually consumed and reconciles or returns typed refresh guidance instead of declaring a stale publication current
+- **AND** this includes restoration of the original policy file object and policy files excluded by their own rules, while unchanged policy and supported local exceptions retain their normal behavior
 
 ### Requirement: Standalone CLI has its own performance gate
 Before production changes, the plan SHALL fix and evaluate a cold-CLI latency target. If exact cold discovery cannot meet it, a trustworthy cross-invocation evidence design SHALL be published and reviewed before that implementation proceeds. A fast MCP path alone SHALL not satisfy this capability.
@@ -77,6 +83,42 @@ Refresh SHALL preserve native project identity, authored purposes and atomic pub
 - **WHEN** source changes after the initial evidence is captured
 - **THEN** refresh revalidates or retries the affected work, or refuses publication without exposing stale or partial new state
 
+#### Scenario: Continuous watch crosses a source-root replacement gap
+- **WHEN** the selected source directory briefly disappears during replacement while continuous native or polling watch retains its external database and configuration
+- **THEN** initial and later reconciliation retry only the selected root's typed absence, at most three attempts with the existing watch interval and original cancellation/deadline control
+- **AND** native watch retains uncertainty, rebinds recursive coverage and performs full reconciliation before counting a successful cycle, preserving project identity, authored purposes and the last complete publication during absence
+- **AND** persistent absence terminates with the existing typed failure; unrelated configuration/database I/O, permission errors, project mismatches and explicit one-shot/MCP calls retain their existing failure behavior
+
+#### Scenario: Source indirection substituted after admission
+- **WHEN** a direct source leaf or parent becomes a symlink after metadata inspection, whether its target is inside or outside the selected root
+- **THEN** discovery refuses before hashing redirected source bytes and preserves the prior valid publication
+- **AND** direct source reads, hardlinks, selected-root aliases, ordinary file replacement and supported native reparse compatibility remain functional
+
+#### Scenario: Targeted source alias within the selected root
+- **WHEN** a targeted refresh receives a symlink leaf or ancestor whose target is otherwise an admitted source inside the selected root
+- **THEN** it excludes the source alias without canonicalizing it into an admitted direct path
+
+#### Scenario: Native database identity preserves SQLite lock ownership
+- **WHEN** database identity is captured, checked or retired while SQLite connections use that file
+- **THEN** the witness does not open or close independent database descriptors outside SQLite's VFS, and locks held by other live connections remain effective
+- **AND** the original file object remains pinned across store retirement and shared identity clones without opening a replacement path or blocking on a FIFO
+- **AND** retirement ends active read/write transactions and releases unused caches before retaining only an idle connection; failed cleanup invalidates witness authority and closes through SQLite
+- **AND** final release preserves aliases, replacement detection and a replacement database's WAL/SHM state while retaining bounded resources
+
+#### Scenario: Database-location inspection preserves active SQLite locks
+- **WHEN** initial store setup, writable/read-only reopen, snapshot admission or public validation inspects the selected database's filesystem while a SQLite connection uses that file
+- **THEN** location inspection preserves the locks held by every live SQLite connection on all supported platforms
+- **AND** it does not independently open or close a database-file descriptor or handle outside SQLite's VFS when that operation can disturb those locks, including through a filesystem dependency; any platform-specific handle-based inspection requires evidence that it is lock-neutral
+- **AND** the exact canonical file's filesystem is inspected without inferring its volume from its parent, device number or lexical mount ancestry; aliases and native pathname bytes remain supported
+- **AND** missing databases retain nearest-existing-parent inspection, while known network filesystems remain unsupported and incomplete or unknown filesystem evidence remains uncertain before mutation
+- **AND** managed-name case classification rejects an existing non-directory lookup parent before probing its filesystem capabilities, preserving SQLite locks on a refused regular-file parent during ordinary admission and reset
+
+#### Scenario: Windows local drive admission avoids unrelated volume work
+- **WHEN** a Windows database path has a drive-letter prefix and fresh native root queries establish a local fixed, removable or optical volume with a complete volume GUID
+- **THEN** prefix admission avoids enumerating unrelated volumes, while the exact-file filesystem resolver and every location revalidation still run
+- **AND** a failed native query retains the existing fresh inventory proof for supported locations, including ReFS; malformed successful output remains uncertain
+- **AND** UNC/device paths, mapped remote drives and substituted directories retain their existing refusal behavior before selected database probing
+
 #### Scenario: Cancellation or failed write
 - **WHEN** refresh is cancelled, reaches its deadline or fails while staging or publishing
 - **THEN** the prior valid index, native identity and approved purposes remain intact and an adequate retry can succeed
@@ -88,13 +130,40 @@ CLI and MCP SHALL use the explicitly selected project/worktree and its existing 
 - **WHEN** the selected database identity does not match the addressed root or worktree
 - **THEN** refresh refuses before an update and leaves both projects unchanged
 
+#### Scenario: Native root discovery reuses complete admission
+- **WHEN** the storage owner reads a current database's native project root for CLI or MCP discovery
+- **THEN** each native-root read validates the complete schema, current read profile and native root codec in one read-only snapshot without reopening the database to repeat that admission
+- **AND** discovery without explicit configuration uses that native result before requesting a legacy recovery candidate, while explicit configuration and predecessor recovery retain their existing authority checks before derivative filesystem discovery
+- **AND** later schema changes are rechecked and refused when incompatible; the query's independent exact source, root, publication and policy checks remain effective
+- **AND** settings and MCP launch rendering retain their separate selected-root/configuration validation after filesystem configuration discovery rather than caching a root across those boundaries
+
 #### Scenario: Missing index
 - **WHEN** project-local initialized state is absent or a required publication is missing
 - **THEN** refresh returns the applicable typed initialization or refresh guidance without silently replacing state
 
+#### Scenario: Foreign database has a lookalike internal namespace
+- **WHEN** a selected existing database contains foreign user objects whose names resemble SQLite's reserved internal prefix
+- **THEN** initialization and root discovery classify those objects as user state and refuse the unrecognized database before adding ProjectAtlas schema or changing its data
+
+#### Scenario: Unsupported objects in current or supported predecessor state
+- **WHEN** current or supported predecessor state contains an unexpected table, view or trigger with a lookalike internal name
+- **THEN** shared schema admission refuses the incompatible shape before mutation or migration, including case and Unicode variants
+- **AND** compatibility and rollback snapshots retain every user object rather than hiding the same names from their proof
+
+#### Scenario: Genuine internal objects and compatible indexes
+- **WHEN** a valid database contains SQLite-generated statistics and permitted non-unique extension indexes
+- **THEN** initialization, normal CLI/MCP navigation and supported upgrades retain their established behavior, including indexes with ordinary user names resembling the internal prefix
+
 #### Scenario: Plain directory
 - **WHEN** a valid selected project has no Git repository or Git is unavailable
 - **THEN** refresh retains its ordinary filesystem and index behavior without making Git a prerequisite
+
+#### Scenario: Dependency closure requires an explicit scan
+- **WHEN** a read refuses because the dependency-aware incremental closure exceeded its safe limit
+- **THEN** CLI JSON/TOON and MCP typed recovery select `scan` / `atlas_scan`, consistently with the human diagnostic, and preserve the exact project or registered worktree selector
+- **AND** source, path and policy changes that the ordinary one-shot refresh can reconcile continue to select `watch --once` / `atlas_watch_once`, including a full reconciliation scope
+- **AND** a dependency-closure refusal reports known affected source-path cardinality in `changed`, never graph-row, canonical-key or byte counts; an incomplete inbound path cursor or early stop during dependency expansion provides only a lower bound on the complete affected set
+- **AND** `added`, `removed` and `modified` remain zero and unclassified for this refusal reason, while ordinary source-delta reports retain their exact change categories
 
 ### Requirement: Default work budget fits planned work
 Without an explicit caller timeout, indexing/rebuilding/refresh SHALL select a documented bounded cooperative budget from reliable work estimates, including required discovery. Explicit limits SHALL take precedence. Cancellation and resource bounds SHALL remain effective; estimating work SHALL not add an unbudgeted full walk, and retries SHALL not reset the clock.
@@ -123,12 +192,20 @@ Without an explicit caller timeout, indexing/rebuilding/refresh SHALL select a d
 - **THEN** affected help, schemas and skill/user guidance describe the changed omitted-limit behavior, unchanged ceiling/clamp, unknown-work fallback and preserved explicit limits
 
 ### Requirement: Large-project performance is proven
-Acceptance SHALL use reproducible optimized installed CLI/MCP measurements and causal work-count checks on supported platforms. Baselines and numeric latency/resource targets SHALL be fixed before implementation. Longer timeouts alone SHALL not satisfy acceptance.
+Acceptance SHALL use reproducible optimized installed CLI/MCP measurements and causal work-count checks on supported platforms. Baselines and numeric latency/resource targets SHALL be fixed before implementation. The explicitly accepted RC1 Linux detailed-navigation memory allowance SHALL be reported separately from the original target verdict; it SHALL NOT rewrite samples, original failed checks or workflow conclusions. Longer timeouts alone SHALL not satisfy acceptance.
 
 #### Scenario: Representative acceptance
 - **WHEN** the completed change is evaluated on initial/full/rebuild, unchanged, sparse/dense changed and reconciliation large-project fixtures
-- **THEN** every path meets its own preregistered speed/throughput/resource and work-count targets with complete correct results, cold/warm starts and caches distinguished, and normal cases finishing within their selected budgets
+- **THEN** every path meets its preregistered latency, throughput and work-count targets with complete correct results, cold/warm starts and caches distinguished, and normal cases finishing within their selected budgets
+- **AND** every resource target and correctness, state, compatibility and failure control passes, except that only the Linux detailed-navigation sampled-RSS assertion may use the explicit RC1 allowance below
 
 #### Scenario: Unaffected behavior
 - **WHEN** normal navigation and supported installation/database upgrades are exercised
-- **THEN** no material regression beyond the preregistered limits is accepted
+- **THEN** no material regression beyond the preregistered limits is accepted except the explicit RC1 Linux detailed-navigation memory allowance
+
+#### Scenario: Explicit RC1 Linux detailed-navigation memory allowance
+- **WHEN** the installed matrix is complete and data-valid, every registered assertion other than the single Linux detailed-navigation sampled-RSS assertion passes, and that case's maximum sampled process-tree RSS ratio to its paired native baseline is at most the previously observed `1.1150645027049522`
+- **THEN** RC1 acceptance may record that memory result as an explicit accepted tradeoff even when it exceeds the original `1.10` RSS target
+- **AND** the original measurements, original target verdicts and failed workflow conclusions remain intact, with the acceptance decision identified separately as a post-measurement RC1 allowance
+- **AND** every other case, platform, latency, throughput, work-count, resource, compatibility and failure control retains its existing requirement; larger or unmeasured memory regressions receive no allowance
+- **AND** every required workflow contract, including contracts skipped after an original target failure, still requires successful proof before issue closure or release

@@ -98,8 +98,13 @@ For generated or vendored source, verify the repository's ownership and ignore p
 
 Indexing shares one cooperative budget across traversal, source hashing, parsing and publication
 checkpoints. MCP `timeout_seconds` and CLI `symbols build` / `watch` `--timeout-seconds` have a
-30-minute default and ceiling: larger representable budgets are clamped, while unrepresentable
-deadlines fail closed. Continuous watch budgets each refresh separately. The clock starts when indexing
+work-based automatic defaults computed from already-required source inventories and discovery
+counters; unknown work, including a cold initial index, retains 30 minutes. A verified warm no-op
+uses five seconds; known publication work reserves at least 30 seconds plus admitted-source
+and complete-verification work. The ceiling remains 30 minutes. Explicit limits take precedence;
+larger representable requests clamp, zero refuses, and unrepresentable deadlines fail closed.
+The repository's `docs/benchmarks/v0.5.1-indexing.md#automatic-budget-coefficients` defines
+coefficients. Estimation adds no filesystem walk and never resets the operation clock. Continuous watch budgets each refresh separately. The clock starts when indexing
 work control is created: root/config/store setup performed afterward consumes it; earlier startup/target
 selection is outside the budget. Checkpoint-based stopping can exceed the requested wall time. A
 deadline refusal preserves the last valid index, identity and approved purposes; retry with an adequate budget.

@@ -2,11 +2,15 @@
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 mod graph_projection;
+mod index_budget;
 mod module_resolution;
 #[cfg(feature = "optional-parser-supervisor")]
 mod optional_parser_runtime;
 mod policy_watch;
 mod source_observation;
+
+#[cfg(test)]
+use source_observation::read_timing::Stage as ReadStage;
 
 pub(crate) use source_observation::{
     SourceObservationRegistry, SourceReadAdmission, VerifiedReadOutcome, VerifiedReadStamp,
@@ -80,7 +84,7 @@ use projectatlas_fs::worktree::{
 };
 use projectatlas_fs::{
     FsError, RootScanPolicy, ScanLimits, ScanOptions, scan_path_with_policy_controlled, scan_repo,
-    scan_repo_controlled, scan_repo_controlled_with_work,
+    scan_repo_controlled, scan_repo_controlled_with_policy_evidence,
 };
 use projectatlas_service::{
     ClassifiedRankedNode, CoverageDiscoveryReport, FederatedInputWork, FederatedStore,
@@ -125,7 +129,7 @@ pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
 /// Stable serialized recommendation for host-owned purpose curator selection.
 pub(crate) const PURPOSE_CURATOR_RECOMMENDED_REASONING: &str = "lowest_reliable_host_supported";
 /// Default whole-operation deadline when no narrower parser limit is supplied.
-const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_mins(30);
+const MAX_INDEX_WORK_TIMEOUT: Duration = Duration::from_mins(30);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
 const MAX_STAGED_TEXT_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum aggregate retained string bytes across one in-memory publication batch.
@@ -359,6 +363,45 @@ struct CapturedSourceState {
     nodes: Vec<Node>,
     /// A non-indexed document state requires graph publication even with identical nodes.
     document_projection_changed: bool,
+    /// Consumed policy retained through this operation's handoff and publication checks.
+    policies: Arc<VerifiedPolicyInputs>,
+}
+
+/// Policy consumed by exact source and document verification in one operation.
+struct VerifiedPolicyInputs {
+    /// Selection and rule inputs actually consumed by source discovery.
+    source: projectatlas_fs::ScanPolicyEvidence,
+    /// Additional inputs consumed while resolving nonindexed document targets.
+    documents: Option<projectatlas_fs::ScanPolicyEvidence>,
+}
+
+impl VerifiedPolicyInputs {
+    /// Compare consumed policy with current state without losing typed inspection failures.
+    fn is_current(&self, root: &Path, control: &IndexWorkControl) -> Result<bool, CliError> {
+        if !self
+            .source
+            .is_current(control)
+            .map_err(|source| source_inspection_error(root, source))?
+        {
+            return Ok(false);
+        }
+        if let Some(documents) = &self.documents
+            && !documents
+                .is_current(control)
+                .map_err(|source| source_inspection_error(root, source))?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Refuse a read whose consumed policy no longer matches the admission boundary.
+    fn verify(&self, root: &Path, control: &IndexWorkControl) -> Result<(), CliError> {
+        if !self.is_current(root, control)? {
+            return Err(source_changed_during_derivation(root, "."));
+        }
+        Ok(())
+    }
 }
 
 /// Current read snapshot established through exact source verification.
@@ -367,6 +410,22 @@ pub(crate) struct ExactFreshIndexRead {
     pub(crate) store: AtlasStore,
     /// Work consumed before this snapshot could be called current.
     pub(crate) work: SourceVerificationWork,
+    /// Shared only with this operation's source handoff, never a cached observer epoch.
+    policies: Arc<VerifiedPolicyInputs>,
+}
+
+/// A participant held privately until every federated snapshot reaches admission.
+struct FederatedReadAdmission {
+    /// Exact snapshot and consumed policy, retained together until final validation.
+    exact: ExactFreshIndexRead,
+    /// Selected database spelling for the service's later generation checks.
+    database: PathBuf,
+    /// Canonical source root for the independent admission plan.
+    root: PathBuf,
+    /// Optional adapter-owned alias for typed participant errors.
+    worktree: Option<String>,
+    /// Work already spent opening this participant, excluding time holding it idle.
+    input_work: FederatedInputWork,
 }
 
 /// Closed reason why current local source could not be verified.
@@ -424,13 +483,18 @@ pub(crate) struct IndexRefreshRequired {
     pub(crate) reason: IndexRefreshReason,
     /// Safe recovery scope.
     pub(crate) scope: IndexRefreshScope,
-    /// Total added, removed, or modified paths.
+    /// Total added, removed, or modified paths for an ordinary source delta.
+    ///
+    /// A dependency-closure refusal instead counts known affected source paths;
+    /// truncated inbound evidence is a lower bound on the complete closure.
     pub(crate) changed: usize,
-    /// Newly visible paths.
+    /// Newly visible paths; zero/unclassified for a dependency-closure refusal.
     pub(crate) added: usize,
-    /// Paths no longer visible under current source and ignore policy.
+    /// Paths no longer visible; zero/unclassified for a dependency-closure refusal.
     pub(crate) removed: usize,
     /// Existing paths whose source or structural identity changed.
+    /// Zero/unclassified for a dependency-closure refusal, which may include
+    /// dependents whose source did not change.
     pub(crate) modified: usize,
     /// Deterministic bounded path sample for agent recovery.
     pub(crate) sample_paths: Vec<String>,
@@ -450,6 +514,9 @@ pub(crate) enum VerificationWorkLimit {
 /// Bounded typed report returned when source verification is incomplete.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexVerificationIncomplete {
+    /// Typed operation-local root absence, retained only for continuous-watch recovery.
+    #[serde(skip)]
+    pub(crate) unavailable_source_root: Option<PathBuf>,
     /// A policy/admission pass exhausted work; fallback must not restart its quota.
     #[serde(skip)]
     pub(crate) policy_work_limit: Option<VerificationWorkLimit>,
@@ -507,6 +574,21 @@ impl IndexProjectMismatch {
     }
 }
 
+impl IndexRefreshRequired {
+    /// Whether ordinary watch-once recovery would repeat the bounded refusal.
+    ///
+    /// Full scope alone is insufficient: watch-once can reconcile source, path
+    /// and policy drift, but an exhausted dependency closure requires a scan.
+    pub(crate) const fn requires_explicit_scan(&self) -> bool {
+        match self.reason {
+            IndexRefreshReason::DependencyClosureLimit => true,
+            IndexRefreshReason::SourceChanged
+            | IndexRefreshReason::PathsChanged
+            | IndexRefreshReason::PolicyDrift => false,
+        }
+    }
+}
+
 impl fmt::Display for IndexRefreshRequired {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let recovery = self.worktree.as_ref().map_or_else(
@@ -519,7 +601,7 @@ impl fmt::Display for IndexRefreshRequired {
                 "refresh_required: derived index policy differs from the current project configuration; {recovery}"
             );
         }
-        if self.reason == IndexRefreshReason::DependencyClosureLimit {
+        if self.requires_explicit_scan() {
             let recovery = self.worktree.as_ref().map_or_else(
                 || "run a complete `projectatlas scan` or `atlas_scan` before retrying".to_string(),
                 |alias| format!("call `atlas_scan` with `worktree: {alias}` before retrying"),
@@ -635,10 +717,44 @@ pub(crate) fn open_fresh_atlas_store_for_project_controlled(
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<AtlasStore, CliError> {
-    Ok(
-        open_exact_fresh_atlas_store_for_project_controlled(db_path, root, config_path, control)?
-            .store,
-    )
+    let mut exact =
+        open_exact_fresh_atlas_store_for_project_controlled(db_path, root, config_path, control)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
+    if let Err(error) = verify_exact_snapshot_policy(&mut exact, root, config_path, control) {
+        drop(exact.store.finish_index_read_snapshot());
+        return Err(error);
+    }
+    Ok(exact.store)
+}
+
+/// Admit a pinned snapshot against a fresh plan and its actually consumed policy.
+fn verify_exact_snapshot_policy(
+    exact: &mut ExactFreshIndexRead,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
+    let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
+        .map_err(|source| publication_input_error(root, source))?;
+    exact.work.sqlite_read_statements = exact.work.sqlite_read_statements.saturating_add(1);
+    verify_index_project_root(&exact.store, &plan.root)?;
+    exact.work.sqlite_read_statements = exact.work.sqlite_read_statements.saturating_add(1);
+    match verify_index_publication(&exact.store, &plan) {
+        Err(CliError::VerificationIncomplete(report))
+            if report.reason == IndexVerificationReason::PublicationContractMismatch =>
+        {
+            return Err(CliError::RefreshRequired(Box::new(
+                index_policy_refresh_required(root),
+            )));
+        }
+        result => {
+            result?;
+        }
+    }
+    exact.policies.verify(root, control)
 }
 
 /// Open a current snapshot and retain exact freshness work for epoch accounting.
@@ -659,16 +775,32 @@ pub(crate) fn open_exact_fresh_atlas_store_for_project_controlled(
 }
 
 /// Verify exact saved source against the index without publishing a repair.
+#[cfg(test)]
 pub(crate) fn verify_saved_source_matches_index_controlled(
     db_path: &Path,
     root: &Path,
     config_path: Option<&Path>,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
+    verify_saved_source_policy_controlled(db_path, root, config_path, control).map(|_policies| ())
+}
+
+/// Retain the policy consumed by a mutation's fresh saved-source verification.
+fn verify_saved_source_policy_controlled(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    control: &IndexWorkControl,
+) -> Result<Arc<VerifiedPolicyInputs>, CliError> {
     let exact =
         open_exact_saved_source_matches_index_controlled(db_path, root, config_path, control)?;
+    exact.policies.verify(root, control)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_SAVED_SOURCE_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
     exact.store.finish_index_read_snapshot()?;
-    Ok(())
+    Ok(exact.policies)
 }
 
 /// Open an exact current snapshot without publishing a source repair.
@@ -703,7 +835,11 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
         open_exact_index_assessment(db_path, root, config_path, scan_limits, control)?;
     let mut work = assessment.work;
     let Some(delta) = assessment.delta else {
-        return Ok(ExactFreshIndexRead { store, work });
+        return Ok(ExactFreshIndexRead {
+            store,
+            work,
+            policies: assessment.source.policies,
+        });
     };
     if !repair_safe_delta {
         return Err(CliError::RefreshRequired(Box::new(delta.report)));
@@ -713,6 +849,7 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
     }
 
     let refresh_required = delta.report.clone();
+    let policies = Arc::clone(&assessment.source.policies);
     drop(store);
     let repair = (|| {
         let mut writer = open_atlas_store_for_project(db_path, &plan.root)?;
@@ -742,7 +879,11 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     verify_index_publication(&store, &plan)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    Ok(ExactFreshIndexRead { store, work })
+    Ok(ExactFreshIndexRead {
+        store,
+        work,
+        policies,
+    })
 }
 
 /// Capture an exact read snapshot and its reusable source assessment without publication.
@@ -756,18 +897,27 @@ fn open_exact_index_assessment(
     let store = open_atlas_store_read_only_for_project(db_path, root)?;
     let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
         .map_err(|source| publication_input_error(root, source))?;
-    let assessment = match detect_index_freshness_controlled(&store, &plan, scan_limits, control) {
-        Ok(assessment) => assessment,
+    let assessment = assess_open_index_against_plan(&store, &plan, scan_limits, control)?;
+    Ok((store, plan, assessment))
+}
+
+/// Compare one validated read snapshot with the caller's operation-owned plan.
+fn assess_open_index_against_plan(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    scan_limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> Result<IndexFreshnessAssessment, CliError> {
+    match detect_index_freshness_controlled(store, plan, scan_limits, control) {
         Err(CliError::VerificationIncomplete(report))
             if report.reason == IndexVerificationReason::PublicationContractMismatch =>
         {
-            return Err(CliError::RefreshRequired(Box::new(
+            Err(CliError::RefreshRequired(Box::new(
                 index_policy_refresh_required(&plan.root),
-            )));
+            )))
         }
-        Err(error) => return Err(error),
-    };
-    Ok((store, plan, assessment))
+        result => result,
+    }
 }
 
 /// Open an explicit ordered set of current project indexes without mutating any root.
@@ -854,7 +1004,7 @@ pub(crate) fn open_federated_atlas_stores_for_project(
 
     let default_scan_limits = ScanLimits::default();
     let mut remaining_input_bytes = MAX_FEDERATED_INPUT_BYTES;
-    let mut stores: Vec<FederatedStore> = Vec::with_capacity(canonical_roots.len());
+    let mut admissions: Vec<FederatedReadAdmission> = Vec::with_capacity(canonical_roots.len());
     for (order, (root, database)) in canonical_roots.into_iter().zip(databases).enumerate() {
         let started = Instant::now();
         let config = (order == 0).then_some(selected_config).flatten();
@@ -872,8 +1022,8 @@ pub(crate) fn open_federated_atlas_stores_for_project(
         ) {
             Ok(exact) => exact,
             Err(error) => {
-                for store in stores {
-                    drop(store.finish());
+                for admission in admissions {
+                    drop(admission.exact.store.finish_index_read_snapshot());
                 }
                 let error =
                     if let Some(worktree) = worktrees.and_then(|worktrees| worktrees.get(order)) {
@@ -893,11 +1043,60 @@ pub(crate) fn open_federated_atlas_stores_for_project(
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
         let worktree = worktrees.map(|worktrees| worktrees[order].clone());
-        match FederatedStore::new_with_worktree(exact.store, database, root, input_work, worktree) {
+        admissions.push(FederatedReadAdmission {
+            exact,
+            database,
+            root,
+            worktree,
+            input_work,
+        });
+    }
+    #[cfg(test)]
+    if let Some(after) = AFTER_EXACT_POLICY_TEST_HOOK.with_borrow_mut(Option::take) {
+        after()?;
+    }
+    let validation = admissions
+        .iter_mut()
+        .enumerate()
+        .try_for_each(|(order, admission)| {
+            let started = Instant::now();
+            let config = (order == 0).then_some(selected_config).flatten();
+            verify_exact_snapshot_policy(&mut admission.exact, &admission.root, config, control)
+                .map_err(|error| match admission.worktree.as_deref() {
+                    Some(worktree) => federated_worktree_error(error, worktree),
+                    None => error,
+                })?;
+            admission.input_work.sqlite_read_statements =
+                admission.exact.work.sqlite_read_statements;
+            admission.input_work.elapsed_ms = admission
+                .input_work
+                .elapsed_ms
+                .saturating_add(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            Ok::<(), CliError>(())
+        });
+    if let Err(error) = validation {
+        for admission in admissions {
+            drop(admission.exact.store.finish_index_read_snapshot());
+        }
+        return Err(error);
+    }
+    let mut stores: Vec<FederatedStore> = Vec::with_capacity(admissions.len());
+    let mut admissions = admissions.into_iter();
+    while let Some(admission) = admissions.next() {
+        match FederatedStore::new_with_worktree(
+            admission.exact.store,
+            admission.database,
+            admission.root,
+            admission.input_work,
+            admission.worktree,
+        ) {
             Ok(store) => stores.push(store),
             Err(error) => {
                 for store in stores {
                     drop(store.finish());
+                }
+                for admission in admissions {
+                    drop(admission.exact.store.finish_index_read_snapshot());
                 }
                 return Err(CliError::Service(error));
             }
@@ -1255,6 +1454,26 @@ fn detect_index_freshness_controlled(
     assess_source_against_publication(store, plan, scan_limits, control, generation, work)
 }
 
+/// One owning-test transition around real source discovery.
+#[cfg(test)]
+type PolicyTransitionTestHook = Box<dyn FnOnce() -> Result<(), CliError>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Isolate policy transitions around the real source walk on the owning test thread.
+    static SOURCE_WALK_TEST_HOOKS: std::cell::RefCell<Option<(PolicyTransitionTestHook, PolicyTransitionTestHook)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Isolate a policy transition around the actual nonindexed document verifier.
+    static DOCUMENT_POLICY_TEST_HOOKS: std::cell::RefCell<Option<(PolicyTransitionTestHook, PolicyTransitionTestHook)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Restore policy after inner evidence validation, before outer admission checks.
+    static AFTER_EXACT_POLICY_TEST_HOOK: std::cell::RefCell<Option<PolicyTransitionTestHook>> =
+        const { std::cell::RefCell::new(None) };
+    /// Restore policy after a mutation's exact saved-source check, before its final fence.
+    static AFTER_SAVED_SOURCE_TEST_HOOK: std::cell::RefCell<Option<PolicyTransitionTestHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Compare source with the generation whose complete publication contract was verified.
 fn assess_source_against_publication(
     store: &AtlasStore,
@@ -1264,8 +1483,36 @@ fn assess_source_against_publication(
     generation: IndexGeneration,
     mut work: SourceVerificationWork,
 ) -> Result<IndexFreshnessAssessment, CliError> {
-    let scan = scan_repo_controlled_with_work(&plan.root, &plan.scan_options, scan_limits, control)
-        .map_err(|source| source_inspection_error(&plan.root, source))?;
+    #[cfg(test)]
+    let walk_timing = ReadStage::SourceWalk.start();
+    #[cfg(test)]
+    let after_walk = SOURCE_WALK_TEST_HOOKS.with_borrow_mut(|hooks| {
+        hooks
+            .take()
+            .map(|(before, after)| before().map(|()| after))
+            .transpose()
+    })?;
+    let scan = scan_repo_controlled_with_policy_evidence(
+        &plan.root,
+        &plan.scan_options,
+        scan_limits,
+        control,
+    );
+    #[cfg(test)]
+    if let Some(after) = after_walk {
+        after()?;
+    }
+    let (scan, policy) = scan.map_err(|source| source_inspection_error(&plan.root, source))?;
+    if !policy
+        .is_current(control)
+        .map_err(|source| source_inspection_error(&plan.root, source))?
+    {
+        return Err(source_changed_during_derivation(&plan.root, "."));
+    }
+    #[cfg(test)]
+    drop(walk_timing);
+    #[cfg(test)]
+    let _comparison_timing = ReadStage::SQLiteCompare.start();
     work.filesystem_entries = scan.work.entries;
     work.filesystem_bytes = scan.work.source_bytes;
     let current_nodes = scan.nodes;
@@ -1280,14 +1527,32 @@ fn assess_source_against_publication(
         delta.record(Some(node), None);
     }
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    let (document_projection_changed, document_statements) =
-        graph_projection::nonindexed_document_projection_changed(
-            store,
-            &plan.root,
-            &current_nodes,
-            &plan.scan_options,
-            control,
-        )?;
+    #[cfg(test)]
+    let after_documents = DOCUMENT_POLICY_TEST_HOOKS.with_borrow_mut(|hooks| {
+        hooks
+            .take()
+            .map(|(before, after)| before().map(|()| after))
+            .transpose()
+    })?;
+    let documents = graph_projection::nonindexed_document_projection_changed_recorded(
+        store,
+        &plan.root,
+        &current_nodes,
+        &plan.scan_options,
+        control,
+    );
+    #[cfg(test)]
+    if let Some(after) = after_documents {
+        after()?;
+    }
+    let (document_projection_changed, document_statements, document_policy) = documents?;
+    if let Some(policy) = &document_policy
+        && !policy
+            .is_current(control)
+            .map_err(|source| source_inspection_error(&plan.root, source))?
+    {
+        return Err(source_changed_during_derivation(&plan.root, "."));
+    }
     work.sqlite_read_statements = work
         .sqlite_read_statements
         .saturating_add(document_statements);
@@ -1321,6 +1586,10 @@ fn assess_source_against_publication(
             generation,
             nodes: current_nodes,
             document_projection_changed,
+            policies: Arc::new(VerifiedPolicyInputs {
+                source: policy,
+                documents: document_policy,
+            }),
         },
     })
 }
@@ -1490,11 +1759,27 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
         ));
     };
     let selected_root = CanonicalProjectRoot::from_path(selected_root).map_err(|source| {
-        verification_incomplete(
+        let unavailable = match &source {
+            projectatlas_core::CoreError::CanonicalProjectRootIo { path, source } => {
+                path == selected_root && root_absence_kind(source.kind())
+            }
+            // Every caller supplies a previously accepted absolute plan root.
+            // The other InvalidCanonicalProjectRoot case rejects relative paths;
+            // native codec failures have their own distinct error variant.
+            projectatlas_core::CoreError::InvalidCanonicalProjectRoot { path, .. } => {
+                path == selected_root && path.is_absolute()
+            }
+            _ => false,
+        };
+        let mut error = verification_incomplete(
             selected_root,
             IndexVerificationReason::SourceInspectionFailed,
             &CliError::InvalidInput(source.to_string()),
-        )
+        );
+        if let CliError::VerificationIncomplete(report) = &mut error {
+            report.unavailable_source_root = unavailable.then(|| selected_root.to_path_buf());
+        }
+        error
     })?;
     if !store.project_root_identity_matches(&selected_root) {
         return Err(CliError::ProjectMismatch(Box::new(
@@ -1798,10 +2083,13 @@ fn publication_input_error(root: &Path, source: CliError) -> CliError {
 
 /// Preserve typed work failures while adapting ordinary scan uncertainty.
 fn source_inspection_error(root: &Path, source: FsError) -> CliError {
+    let unavailable_source_root =
+        fs_error_is_root_unavailable(&source, root).then(|| root.to_path_buf());
     match source {
         FsError::IndexWork(failure) => failure.into(),
         FsError::RepositoryBoundary { .. } => {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                unavailable_source_root,
                 policy_work_limit: None,
                 project_root: lossless_project_root_display(root),
                 worktree: None,
@@ -1812,6 +2100,7 @@ fn source_inspection_error(root: &Path, source: FsError) -> CliError {
             }))
         }
         other => CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            unavailable_source_root,
             policy_work_limit: None,
             project_root: lossless_project_root_display(root),
             worktree: None,
@@ -1856,6 +2145,8 @@ fn verification_incomplete(
     source: &CliError,
 ) -> CliError {
     CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+        unavailable_source_root: error_is_root_unavailable(source, root)
+            .then(|| root.to_path_buf()),
         policy_work_limit: None,
         project_root: lossless_project_root_display(root),
         worktree: None,
@@ -2132,6 +2423,7 @@ impl ScanRuntimePlan {
     }
 
     /// Reload the effective filesystem and text policy from current local state.
+    #[cfg(test)]
     fn reload(&self) -> Result<Self, CliError> {
         Self::for_path(
             self.config_path_override.as_deref(),
@@ -2965,6 +3257,14 @@ pub(crate) fn config_root_mismatch_error(
     ))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Actual legacy-candidate reads performed by this synchronous test thread.
+    static LEGACY_ROOT_CANDIDATE_READS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Resolve a predecessor root only as a read-only discovery candidate.
 ///
 /// Legacy metadata is a display-only recovery hint. The database-owned
@@ -2977,6 +3277,8 @@ fn legacy_project_root_candidate(
     if !db.exists() {
         return Ok(None);
     }
+    #[cfg(test)]
+    LEGACY_ROOT_CANDIDATE_READS.with(|count| count.set(count.get().saturating_add(1)));
     let Some(project_root) = read_legacy_project_root_candidate_read_only(db)? else {
         return Ok(None);
     };
@@ -3033,8 +3335,9 @@ fn resolve_database_project_root(
 ) -> Result<PathBuf, CliError> {
     let admission = preflight_database_discovery(db, config_path, isolated_binding)?;
     let db = admitted_database_path(db, admission.as_ref());
-    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(config_path) = config_path {
+        // Preserve predecessor-authority refusal before configuration discovery.
+        legacy_project_root_candidate(db, admission.as_ref())?;
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
         if let Some(db_root) = project_root_from_db_path(db) {
@@ -3054,7 +3357,7 @@ fn resolve_database_project_root(
     {
         return canonical_source_project_root(project_root.as_path());
     }
-    if let Some(project_root) = legacy_root {
+    if let Some(project_root) = legacy_project_root_candidate(db, admission.as_ref())? {
         return Ok(project_root);
     }
     if let Some(project_root) = project_root_from_db_path(db) {
@@ -3185,9 +3488,19 @@ fn stage_full_index_publication_from_source(
         .into());
     }
     let contract_fingerprint = plan.publication_contract_fingerprint();
-    let previous_hashes = reuse_unchanged_symbols
-        .then(|| indexed_file_hashes(store, control))
-        .transpose()?;
+    // Policy changes invalidate captured selection, not the supported full
+    // reconciliation operation. Keep the original identity/generation fence,
+    // then discover current nodes through the ordinary full owner.
+    let captured = match captured {
+        Some(source) if source.policies.is_current(&plan.root, control)? => Some(source),
+        _ => None,
+    };
+    let (previous_hashes, previous_work) = if reuse_unchanged_symbols {
+        let (hashes, work) = indexed_file_hashes(store, control)?;
+        (Some(hashes), work)
+    } else {
+        (None, None)
+    };
     let nodes = match captured {
         Some(source) => source.nodes,
         None => scan_repo_controlled(
@@ -3198,6 +3511,13 @@ fn stage_full_index_publication_from_source(
         )
         .map_err(|source| source_inspection_error(&plan.root, source))?,
     };
+    let automatic_timeout = if base_generation == IndexGeneration::ZERO {
+        MAX_INDEX_WORK_TIMEOUT
+    } else {
+        index_budget::replacement_timeout(symbol_options, &nodes, previous_work)
+    };
+    let stage_control = control.with_timeout_ceiling(automatic_timeout);
+    let control = &stage_control;
     control.check(IndexWorkStage::Publication)?;
     let purpose_import = import_legacy_purposes
         .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
@@ -3268,6 +3588,7 @@ fn stage_full_index_publication_from_source(
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     Ok(IndexPublicationBatch {
+        automatic_timeout,
         base_generation,
         contract_fingerprint,
         root: plan.root.clone(),
@@ -3471,8 +3792,11 @@ fn publish_index_batch(
     scan_options: &ScanOptions,
     control: &IndexWorkControl,
 ) -> Result<IndexPublicationOutcome, CliError> {
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     control.check(IndexWorkStage::Publication)?;
     let IndexPublicationBatch {
+        automatic_timeout: _,
         base_generation,
         contract_fingerprint,
         root,
@@ -3615,6 +3939,8 @@ pub(crate) fn run_scan_pipeline_controlled(
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     revalidate_staged_publication_inputs_with_purpose_snapshot(
         plan,
         batch.nodes.expected_nodes(),
@@ -3646,7 +3972,15 @@ pub(crate) fn reconcile_hydrated_index_controlled(
     let assessment =
         detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?;
     let (refresh, source_unchanged) = match assessment.delta {
-        None => (empty_index_refresh_report(plan.text_options), true),
+        None => {
+            check_unchanged_index_budget(
+                symbol_options,
+                control,
+                assessment.work.filesystem_entries,
+                assessment.work.filesystem_bytes,
+            )?;
+            (empty_index_refresh_report(plan.text_options), true)
+        }
         Some(delta) if delta.report.scope == IndexRefreshScope::Incremental => {
             let changes = WatchChangeSet {
                 requires_full_scan: false,
@@ -3722,6 +4056,14 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         nodes.push(node);
         Ok(())
     })?;
+    let work_control = control.with_timeout_ceiling(index_budget::planned_timeout(
+        symbol_options,
+        &nodes,
+        &nodes,
+        false,
+    ));
+    let control = &work_control;
+    control.check(IndexWorkStage::SymbolParsing)?;
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
@@ -5192,6 +5534,8 @@ pub(crate) struct SymbolBuildReport {
 
 /// Filesystem and derived facts prepared before acquiring the `SQLite` writer.
 struct IndexPublicationBatch {
+    /// Selected same-clock budget retained through final validation and publication.
+    automatic_timeout: Duration,
     /// Complete publication generation observed before source preparation.
     base_generation: IndexGeneration,
     /// Derivation contract bound to every staged projection.
@@ -6068,8 +6412,9 @@ pub(crate) fn resolved_mcp_config_path(
 ) -> Result<Option<PathBuf>, CliError> {
     let admission = preflight_database_discovery(db, config, true)?;
     let db = admitted_database_path(db, admission.as_ref());
-    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(path) = config {
+        // Preserve predecessor-authority refusal before configuration discovery.
+        legacy_project_root_candidate(db, admission.as_ref())?;
         return Ok(Some(absolute_path(path)?));
     }
     let mut candidate_roots = Vec::new();
@@ -6077,8 +6422,7 @@ pub(crate) fn resolved_mcp_config_path(
         && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
         candidate_roots.push(project_root.into_path());
-    }
-    if let Some(project_root) = legacy_root {
+    } else if let Some(project_root) = legacy_project_root_candidate(db, admission.as_ref())? {
         candidate_roots.push(project_root);
     }
     let absolute_db = absolute_path(db)?;
@@ -6438,21 +6782,33 @@ impl SymbolPublicationLimits {
     };
 }
 
-/// Create one indexing boundary with the caller timeout capped by the safe default.
+/// Start unknown work at the ceiling while preserving explicit caller limits.
 pub(crate) fn index_work_control(options: &SymbolBuildOptions) -> IndexWorkControl {
     IndexWorkControl::new(IndexCancellation::new(), options.timeout)
-        .with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT)
+        .with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT)
         .with_worker_ceiling(options.effective_workers())
+}
+
+/// Check a refresh no-op against its actual discovery work and the original operation clock.
+pub(crate) fn check_unchanged_index_budget(
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+    entries: u64,
+    bytes: u64,
+) -> Result<(), CliError> {
+    index_budget::unchanged_control(options, control, entries, bytes)
+        .check(IndexWorkStage::Publication)?;
+    Ok(())
 }
 
 /// Create a bounded work boundary for runtime paths without symbol options.
 pub(crate) fn standalone_index_work_control() -> IndexWorkControl {
-    IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_INDEX_WORK_TIMEOUT))
+    IndexWorkControl::new(IndexCancellation::new(), Some(MAX_INDEX_WORK_TIMEOUT))
 }
 
 /// Apply the runtime's safe whole-operation deadline without weakening caller bounds.
 fn bounded_index_work_control(control: &IndexWorkControl) -> IndexWorkControl {
-    control.with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT)
+    control.with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT)
 }
 
 /// Source file queued for symbol parsing.
@@ -7950,6 +8306,7 @@ pub(crate) fn read_indexed_file_content(
         Err(source) => {
             return Err(CliError::VerificationIncomplete(Box::new(
                 IndexVerificationIncomplete {
+                    unavailable_source_root: None,
                     policy_work_limit: None,
                     project_root,
                     worktree: None,
@@ -7982,6 +8339,7 @@ pub(crate) fn read_indexed_file_content(
     if metadata.len() > MAX_INDEXED_NAVIGATION_SOURCE_BYTES {
         return Err(CliError::VerificationIncomplete(Box::new(
             IndexVerificationIncomplete {
+                unavailable_source_root: None,
                 policy_work_limit: None,
                 project_root,
                 worktree: None,
@@ -7997,6 +8355,7 @@ pub(crate) fn read_indexed_file_content(
     }
     let file = fs::File::open(&native).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            unavailable_source_root: None,
             policy_work_limit: None,
             project_root: project_root.clone(),
             worktree: None,
@@ -8011,6 +8370,7 @@ pub(crate) fn read_indexed_file_content(
         .read_to_end(&mut bytes)
         .map_err(|source| {
             CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+                unavailable_source_root: None,
                 policy_work_limit: None,
                 project_root: project_root.clone(),
                 worktree: None,
@@ -8063,6 +8423,7 @@ pub(crate) fn read_indexed_file_content(
     }
     String::from_utf8(bytes).map_err(|source| {
         CliError::VerificationIncomplete(Box::new(IndexVerificationIncomplete {
+            unavailable_source_root: None,
             policy_work_limit: None,
             project_root,
             worktree: None,
@@ -8166,70 +8527,161 @@ pub(crate) fn run_notify_watch_loop(
     max_cycles: usize,
     symbol_options: &SymbolBuildOptions,
 ) -> Result<WatchReport, CliError> {
+    run_notify_watch_loop_with_backend(
+        store,
+        database,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        |handler| RecommendedWatcher::new(handler, Config::default()),
+        &mut |duration| {
+            thread::sleep(duration);
+            Ok(())
+        },
+    )
+}
+
+/// Callback owned by the selected native watch backend.
+type NativeWatchEventHandler = Box<dyn FnMut(notify::Result<Event>) + Send>;
+
+/// A selected pathname can disappear briefly between the two root-replacement renames.
+const MAX_WATCH_ROOT_ATTEMPTS: usize = 3;
+
+/// Recognize absence without treating permission, child-path or policy failures as root gaps.
+fn fs_error_is_root_unavailable(error: &FsError, root: &Path) -> bool {
+    match error {
+        FsError::RootNotDirectory(path) => path == root,
+        FsError::Io { path, source } | FsError::RepositoryBoundary { path, source } => {
+            path == root && root_absence_kind(source.kind())
+        }
+        _ => false,
+    }
+}
+
+/// Only these native failures permit bounded selected-root recovery.
+fn root_absence_kind(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+}
+
+/// Preserve the typed cause even when inspection has already adapted its public diagnostic.
+fn error_is_root_unavailable(error: &CliError, root: &Path) -> bool {
+    match error {
+        CliError::Fs(source) => fs_error_is_root_unavailable(source, root),
+        CliError::Io { path, source } => path == root && root_absence_kind(source.kind()),
+        CliError::VerificationIncomplete(report) => {
+            report.unavailable_source_root.as_deref() == Some(root)
+        }
+        _ => false,
+    }
+}
+
+/// Retry only a retained selected-root absence within the original continuous-refresh control.
+fn reconcile_watch_root_controlled<T>(
+    plan: &ScanRuntimePlan,
+    control: &IndexWorkControl,
+    interval: Duration,
+    wait: &mut dyn FnMut(Duration) -> Result<(), CliError>,
+    mut reconcile: impl FnMut(bool) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let mut attempt = 0;
+    loop {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        let error = match reconcile(attempt != 0) {
+            Ok(report) => return Ok(report),
+            Err(error) => error,
+        };
+        let root_unavailable = error_is_root_unavailable(&error, &plan.root)
+            || plan
+                .config
+                .as_ref()
+                .is_some_and(|config| error_is_root_unavailable(&error, &config.root));
+        attempt += 1;
+        if !root_unavailable || attempt == MAX_WATCH_ROOT_ATTEMPTS {
+            return Err(error);
+        }
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        wait(interval)?;
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+    }
+}
+
+/// Own native reconciliation and polling handoff independently of platform I/O.
+fn run_notify_watch_loop_with_backend<W: Watcher>(
+    store: &mut AtlasStore,
+    database: &Path,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    create_watcher: impl FnOnce(NativeWatchEventHandler) -> notify::Result<W>,
+    wait: &mut dyn FnMut(Duration) -> Result<(), CliError>,
+) -> Result<WatchReport, CliError> {
     let control = index_work_control(symbol_options);
-    let mut current_plan = plan.reload_controlled(&control)?;
-    let watch_root = current_plan
-        .root
-        .canonicalize()
-        .map_err(|source| CliError::Io {
-            path: current_plan.root.clone(),
-            source,
+    let debounce = Duration::from_secs(poll_seconds.max(1));
+    let (mut current_plan, watch_root, runtime_binding) =
+        reconcile_watch_root_controlled(plan, &control, debounce, wait, |_| {
+            let current_plan = plan.reload_controlled(&control)?;
+            let watch_root = current_plan
+                .root
+                .canonicalize()
+                .map_err(|source| CliError::Io {
+                    path: current_plan.root.clone(),
+                    source,
+                })?;
+            let binding = source_observation::SourceBinding::new(
+                database,
+                &watch_root,
+                current_plan.selected_config_path.as_deref(),
+            )?;
+            Ok((current_plan, watch_root, binding))
         })?;
     let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
     let continuity_lost = Arc::new(AtomicBool::new(false));
     let callback_continuity_lost = Arc::clone(&continuity_lost);
     let policy_selection = policy_watch::PolicyWatchSelection::new(watch_root.clone());
     let callback_selection = policy_selection.clone();
-    let runtime_ingress =
-        source_observation::RuntimeEventIngress::new(source_observation::SourceBinding::new(
-            database,
-            &watch_root,
-            current_plan.selected_config_path.as_deref(),
-        )?);
+    let runtime_ingress = source_observation::RuntimeEventIngress::new(runtime_binding);
     let callback_runtime = runtime_ingress.clone();
-    let mut watcher = RecommendedWatcher::new(
-        move |result: notify::Result<Event>| {
-            if let Ok(event) = &result
-                && !callback_runtime.observe(&callback_selection, event)
-            {
-                return;
+    let mut watcher = create_watcher(Box::new(move |result: notify::Result<Event>| {
+        if let Ok(event) = &result
+            && !callback_runtime.observe(&callback_selection, event)
+        {
+            return;
+        }
+        if result.is_err() {
+            callback_selection.require_recursive_rebind();
+        }
+        match sender.try_send(result) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_result)) => {
+                callback_continuity_lost.store(true, Ordering::Release);
             }
-            if result.is_err() {
-                callback_selection.require_recursive_rebind();
+            Err(TrySendError::Disconnected(_result)) => {
+                // Receiver shutdown means the command is exiting.
             }
-            match sender.try_send(result) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_result)) => {
-                    callback_continuity_lost.store(true, Ordering::Release);
-                }
-                Err(TrySendError::Disconnected(_result)) => {
-                    // Receiver shutdown means the command is exiting.
-                }
-            }
-        },
-        Config::default(),
-    )
+        }
+    }))
     .map_err(|source| CliError::Watcher(source.to_string()))?;
-    watcher
-        .watch(&watch_root, RecursiveMode::Recursive)
-        .map_err(|source| CliError::Watcher(source.to_string()))?;
-    let mut registered_policy_directories = std::collections::BTreeSet::new();
-    let mut policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
-        &watch_root,
-        current_plan.selected_config_path.as_deref(),
-        &policy_selection,
-        &mut watcher,
-        &mut registered_policy_directories,
-        &control,
-    )?;
-    let debounce = Duration::from_secs(poll_seconds.max(1));
-    let mut cycles = 0;
-    let mut last_refresh = match policy_selection.reconcile_with_policy_fence(&control, |retry| {
+    reconcile_watch_root_controlled(plan, &control, debounce, wait, |retry| {
         if retry {
             current_plan = plan.reload_controlled(&control)?;
-            policy_selection.require_recursive_rebind();
-            policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
-            policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+        }
+        watcher
+            .watch(&watch_root, RecursiveMode::Recursive)
+            .map_err(|error| policy_selection.recursive_watch_error(error, "start"))
+    })?;
+    let mut registered_policy_directories = std::collections::BTreeSet::new();
+    let mut cycles = 0;
+    let (mut last_refresh, mut policy_inputs) =
+        match reconcile_watch_root_controlled(plan, &control, debounce, wait, |root_retry| {
+            if root_retry {
+                policy_selection.retain_policy_recheck();
+                policy_selection.require_recursive_rebind();
+                current_plan = plan.reload_controlled(&control)?;
+                policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
+            }
+            let mut policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
                 &watch_root,
                 current_plan.selected_config_path.as_deref(),
                 &policy_selection,
@@ -8237,24 +8689,40 @@ pub(crate) fn run_notify_watch_loop(
                 &mut registered_policy_directories,
                 &control,
             )?;
-        }
-        refresh_index_controlled(store, &current_plan, symbol_options, &control)
-    }) {
-        Ok(report) => report,
-        Err(error @ CliError::Watcher(_)) => {
-            drop(watcher);
-            return run_polling_watch_loop_controlled(
-                store,
-                plan,
-                poll_seconds,
-                max_cycles,
-                symbol_options,
-                Some(error.to_string()),
-                &control,
-            );
-        }
-        Err(error) => return Err(error),
-    };
+            let report = policy_selection.reconcile_with_policy_fence(&control, |retry| {
+                if retry {
+                    current_plan = plan.reload_controlled(&control)?;
+                    policy_selection.require_recursive_rebind();
+                    policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
+                    policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+                        &watch_root,
+                        current_plan.selected_config_path.as_deref(),
+                        &policy_selection,
+                        &mut watcher,
+                        &mut registered_policy_directories,
+                        &control,
+                    )?;
+                }
+                refresh_index_controlled(store, &current_plan, symbol_options, &control)
+            })?;
+            Ok((report, policy_inputs))
+        }) {
+            Ok(report) => report,
+            Err(error @ CliError::Watcher(_)) => {
+                drop(watcher);
+                return run_polling_watch_loop_with_wait(
+                    store,
+                    plan,
+                    poll_seconds,
+                    max_cycles,
+                    symbol_options,
+                    Some(error.to_string()),
+                    &control,
+                    wait,
+                );
+            }
+            Err(error) => return Err(error),
+        };
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
         runtime_ingress.begin_drain();
@@ -8270,20 +8738,18 @@ pub(crate) fn run_notify_watch_loop(
         changes.requires_full_scan |= policy_selection.recursive_rebind_pending();
         if changes.has_changes() {
             let control = index_work_control(symbol_options);
-            current_plan = plan.reload_controlled(&control)?;
-            policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
-            policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
-                &watch_root,
-                current_plan.selected_config_path.as_deref(),
-                &policy_selection,
-                &mut watcher,
-                &mut registered_policy_directories,
+            last_refresh = match reconcile_watch_root_controlled(
+                plan,
                 &control,
-            )?;
-            last_refresh = match policy_selection.reconcile_with_policy_fence(&control, |retry| {
-                if retry {
+                debounce,
+                wait,
+                |root_retry| {
+                    if root_retry {
+                        policy_selection.retain_policy_recheck();
+                        policy_selection.require_recursive_rebind();
+                        changes.requires_full_scan = true;
+                    }
                     current_plan = plan.reload_controlled(&control)?;
-                    policy_selection.require_recursive_rebind();
                     policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
                     policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
                         &watch_root,
@@ -8293,21 +8759,37 @@ pub(crate) fn run_notify_watch_loop(
                         &mut registered_policy_directories,
                         &control,
                     )?;
-                    refresh_index_controlled(store, &current_plan, symbol_options, &control)
-                } else {
-                    refresh_index_for_changes_controlled(
-                        store,
-                        &current_plan,
-                        &changes,
-                        symbol_options,
-                        &control,
-                    )
-                }
-            }) {
+                    policy_selection.reconcile_with_policy_fence(&control, |retry| {
+                        if retry {
+                            current_plan = plan.reload_controlled(&control)?;
+                            policy_selection.require_recursive_rebind();
+                            policy_selection
+                                .rebind_recursive_if_required(&mut watcher, &control)?;
+                            policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+                                &watch_root,
+                                current_plan.selected_config_path.as_deref(),
+                                &policy_selection,
+                                &mut watcher,
+                                &mut registered_policy_directories,
+                                &control,
+                            )?;
+                            refresh_index_controlled(store, &current_plan, symbol_options, &control)
+                        } else {
+                            refresh_index_for_changes_controlled(
+                                store,
+                                &current_plan,
+                                &changes,
+                                symbol_options,
+                                &control,
+                            )
+                        }
+                    })
+                },
+            ) {
                 Ok(report) => report,
                 Err(error @ CliError::Watcher(_)) => {
                     drop(watcher);
-                    let mut report = run_polling_watch_loop_controlled(
+                    let mut report = run_polling_watch_loop_with_wait(
                         store,
                         plan,
                         poll_seconds,
@@ -8315,6 +8797,7 @@ pub(crate) fn run_notify_watch_loop(
                         symbol_options,
                         Some(error.to_string()),
                         &control,
+                        wait,
                     )?;
                     report.cycles += cycles;
                     return Ok(report);
@@ -8352,47 +8835,35 @@ fn wait_for_index_event_with_continuity(
     let control = standalone_index_work_control();
     let mut policy = None;
     let mut classify = |event: &Event| {
-        if !event_kind_affects_index(event.kind) && !event.need_rescan() {
-            return Ok(WatchChangeSet::default());
-        }
-        if policy.is_none() {
-            match RootScanPolicy::discover(root, scan_options, &control) {
-                Ok(selected) => policy = Some(selected),
-                Err(error) => {
-                    let root_unavailable = match &error {
-                        FsError::RootNotDirectory(path) => path.as_path() == root,
-                        FsError::Io { path, source } => {
-                            path.as_path() == root
-                                && matches!(
-                                    source.kind(),
-                                    std::io::ErrorKind::NotFound
-                                        | std::io::ErrorKind::NotADirectory
-                                )
-                        }
-                        _ => false,
-                    };
-                    if !root_unavailable {
-                        return Err(CliError::from(error));
-                    }
-                    // Replacement can briefly remove the selected pathname.
-                    // Keep uncertainty until the existing debounce has drained;
-                    // reload/rebind still validate the settled root before refresh.
-                    policy_selection.require_recursive_rebind();
-                    return Ok(WatchChangeSet {
-                        requires_full_scan: true,
-                        ..WatchChangeSet::default()
-                    });
-                }
+        let classified = (|| {
+            if !event_kind_affects_index(event.kind) && !event.need_rescan() {
+                return Ok(WatchChangeSet::default());
             }
+            if policy.is_none() {
+                policy = Some(RootScanPolicy::discover(root, scan_options, &control)?);
+            }
+            let mut changes = if let Some(policy) = &policy {
+                notify_event_changes_with_policy(root, scan_options, event, policy)?
+            } else {
+                WatchChangeSet::default()
+            };
+            changes.requires_full_scan |= policy_inputs.affects(event)
+                || policy_inputs.ancestor_bindings_changed(event, &control)?;
+            Ok::<_, CliError>(changes)
+        })();
+        match classified {
+            Err(error) if error_is_root_unavailable(&error, root) => {
+                // Retain uncertainty through the debounce even if a cached-policy
+                // or ancestor check, rather than discovery, encounters the gap.
+                policy_selection.retain_policy_recheck();
+                policy_selection.require_recursive_rebind();
+                Ok(WatchChangeSet {
+                    requires_full_scan: true,
+                    ..WatchChangeSet::default()
+                })
+            }
+            other => other,
         }
-        let mut changes = if let Some(policy) = &policy {
-            notify_event_changes_with_policy(root, scan_options, event, policy)?
-        } else {
-            WatchChangeSet::default()
-        };
-        changes.requires_full_scan |= policy_inputs.affects(event)
-            || policy_inputs.ancestor_bindings_changed(event, &control)?;
-        Ok::<_, CliError>(changes)
     };
     let mut changes = classify(&first)?;
     loop {
@@ -8426,7 +8897,12 @@ fn wait_for_index_event_with_continuity(
             Ok(_) => {}
             Err(error) => {
                 policy_selection.retain_policy_recheck();
-                return Err(error);
+                if error_is_root_unavailable(&error, root) {
+                    policy_selection.require_recursive_rebind();
+                    changes.requires_full_scan = true;
+                } else {
+                    return Err(error);
+                }
             }
         }
     }
@@ -8679,15 +9155,47 @@ fn run_polling_watch_loop_controlled(
     fallback_reason: Option<String>,
     control: &IndexWorkControl,
 ) -> Result<WatchReport, CliError> {
+    run_polling_watch_loop_with_wait(
+        store,
+        plan,
+        poll_seconds,
+        max_cycles,
+        symbol_options,
+        fallback_reason,
+        control,
+        &mut |duration| {
+            thread::sleep(duration);
+            Ok(())
+        },
+    )
+}
+
+/// Run real polling captures while the caller owns interval waiting.
+fn run_polling_watch_loop_with_wait(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    poll_seconds: u64,
+    max_cycles: usize,
+    symbol_options: &SymbolBuildOptions,
+    fallback_reason: Option<String>,
+    control: &IndexWorkControl,
+    wait: &mut dyn FnMut(Duration) -> Result<(), CliError>,
+) -> Result<WatchReport, CliError> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
     let mut cycles = 0;
-    let mut current_plan = plan.reload_controlled(control)?;
-    let mut last_refresh = refresh_index_controlled(store, &current_plan, symbol_options, control)?;
+    let interval = Duration::from_secs(poll_seconds.max(1));
+    let mut last_refresh = reconcile_watch_root_controlled(plan, control, interval, wait, |_| {
+        let current_plan = plan.reload_controlled(control)?;
+        refresh_index_controlled(store, &current_plan, symbol_options, control)
+    })?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
-        thread::sleep(Duration::from_secs(poll_seconds.max(1)));
-        current_plan = plan.reload()?;
-        last_refresh = refresh_index(store, &current_plan, symbol_options)?;
+        wait(interval)?;
+        let control = index_work_control(symbol_options);
+        last_refresh = reconcile_watch_root_controlled(plan, &control, interval, wait, |_| {
+            let current_plan = plan.reload_controlled(&control)?;
+            refresh_index_controlled(store, &current_plan, symbol_options, &control)
+        })?;
         cycles += 1;
     }
     Ok(WatchReport {
@@ -8712,6 +9220,7 @@ pub(crate) struct IndexRefreshReport {
 }
 
 /// Refresh filesystem and symbol state.
+#[cfg(test)]
 pub(crate) fn refresh_index(
     store: &mut AtlasStore,
     plan: &ScanRuntimePlan,
@@ -8760,8 +9269,20 @@ pub(crate) fn refresh_index_from_assessment_controlled(
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
     verify_captured_source_identity(store, plan, &assessment.source)?;
+    if !assessment.source.policies.is_current(&plan.root, control)? {
+        let reuse = publication_contract_matches(store, plan)?;
+        return refresh_full_index_controlled(store, plan, symbol_options, reuse, control);
+    }
     match assessment.delta {
         None => {
+            let work_control = index_budget::unchanged_control(
+                symbol_options,
+                control,
+                assessment.work.filesystem_entries,
+                assessment.work.filesystem_bytes,
+            );
+            let control = &work_control;
+            control.check(IndexWorkStage::Publication)?;
             graph_projection::cleanup_abandoned_repository_graph_staging(
                 store, &plan.root, control,
             )?;
@@ -8844,6 +9365,8 @@ fn refresh_full_index_from_source_controlled(
         captured,
         control,
     )?;
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     revalidate_staged_publication_inputs_controlled(
         plan,
         batch.nodes.expected_nodes(),
@@ -9038,6 +9561,9 @@ fn attempt_incremental_refresh_controlled(
     let base_generation = publication_base_generation(store)?;
     if let Some(source) = &captured {
         verify_captured_source_identity(store, plan, source)?;
+        if !source.policies.is_current(root, control)? {
+            return Ok(None);
+        }
     }
     let mut baseline_nodes = Vec::new();
     if captured.is_none() {
@@ -9149,10 +9675,24 @@ fn attempt_incremental_refresh_controlled(
         Some(source) => source.nodes,
         None => expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths),
     };
+    let automatic_timeout = index_budget::planned_timeout(
+        symbol_options,
+        &nodes,
+        &expected_nodes,
+        !absent_paths.is_empty(),
+    );
     if nodes.is_empty() && absent_paths.is_empty() && direct_document_paths.is_empty() {
-        revalidate_staged_publication_inputs_controlled(plan, &expected_nodes, None, control)?;
+        let work_control = control.with_timeout_ceiling(automatic_timeout);
+        revalidate_staged_publication_inputs_controlled(
+            plan,
+            &expected_nodes,
+            None,
+            &work_control,
+        )?;
         return Ok(Some(empty_index_refresh_report(plan.text_options)));
     }
+    // Closure work is unknown until its existing staging owner measures old and new rows.
+    // Retain the original bounded control until then; never restart the operation clock.
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     drop(existing_nodes);
@@ -9204,6 +9744,15 @@ fn attempt_incremental_refresh_controlled(
         control,
         MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    let automatic_timeout = index_budget::staged_timeout(
+        symbol_options,
+        automatic_timeout,
+        symbols.retained_bytes,
+        graph.incremental_work_bytes(),
+    );
+    let work_control = control.with_timeout_ceiling(automatic_timeout);
+    let control = &work_control;
+    control.check(IndexWorkStage::Publication)?;
     graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
@@ -9221,6 +9770,7 @@ fn attempt_incremental_refresh_controlled(
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     let batch = IndexPublicationBatch {
+        automatic_timeout,
         base_generation,
         contract_fingerprint,
         root: root.clone(),
@@ -9299,6 +9849,7 @@ fn scan_incremental_path_controlled(
         Ok(false) => Ok(None),
         Err(source) => Err(CliError::VerificationIncomplete(Box::new(
             IndexVerificationIncomplete {
+                unavailable_source_root: None,
                 policy_work_limit: None,
                 project_root: lossless_project_root_display(root),
                 worktree: None,
@@ -9879,13 +10430,15 @@ fn indexed_file_texts_for_nodes_with_limit(
     Ok(rows)
 }
 
-/// Load indexed file hashes for incremental refresh comparison.
+/// Load reusable hashes and accumulate prior work in the same required source cursor.
 fn indexed_file_hashes(
     store: &AtlasStore,
     control: &IndexWorkControl,
-) -> Result<HashMap<String, String>, CliError> {
+) -> Result<(HashMap<String, String>, Option<index_budget::SourceWork>), CliError> {
     let mut hashes = HashMap::new();
+    let mut work = Some(index_budget::SourceWork::default());
     store.visit_source_nodes_controlled(control, |node| {
+        work = work.and_then(|work| work.include(&node));
         if node.kind == NodeKind::File
             && let Some(hash) = node.content_hash
         {
@@ -9893,7 +10446,7 @@ fn indexed_file_hashes(
         }
         Ok(())
     })?;
-    Ok(hashes)
+    Ok((hashes, work))
 }
 
 /// Load indexed file hashes for selected repository paths.
@@ -10452,6 +11005,71 @@ mod tests {
             &true,
             "replacement control identity rejection",
         )
+    }
+
+    /// Native discovery skips legacy reads while explicit configuration retains its guard.
+    #[test]
+    fn current_root_discovery_skips_legacy_reads_and_keeps_config_guards()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("source");
+        fs::create_dir(&root)?;
+        #[cfg(unix)]
+        let root = {
+            let alias = temp.path().join("source-alias");
+            std::os::unix::fs::symlink(&root, &alias)?;
+            alias
+        };
+        fs::create_dir(root.join(".projectatlas"))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = canonical_source_project_root(&root)?;
+        let before = LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get);
+        require_eq(
+            &default_cli_project_root(&database, None, false)?,
+            &expected,
+            "current CLI root discovery",
+        )?;
+        require_eq(
+            &default_mcp_project_root(&database, None)?,
+            &expected,
+            "current MCP root discovery",
+        )?;
+        require_eq(
+            &resolved_mcp_config_path(&database, None)?,
+            &None,
+            "current root without configuration",
+        )?;
+        let config = root.join("projectatlas.toml");
+        fs::write(&config, "[project]\nroot = \".\"\n")?;
+        require_eq(
+            &resolved_mcp_config_path(&database, None)?
+                .map(fs::canonicalize)
+                .transpose()?,
+            &Some(fs::canonicalize(&config)?),
+            "current flat configuration discovery",
+        )?;
+        require_eq(
+            &LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get),
+            &before,
+            "current discovery performed an unnecessary legacy read",
+        )?;
+        require_eq(
+            &default_mcp_project_root(&database, Some(&config))?,
+            &expected,
+            "explicit configuration root",
+        )?;
+        require_eq(
+            &resolved_mcp_config_path(&database, Some(&config))?,
+            &Some(absolute_path(&config)?),
+            "explicit configuration selection",
+        )?;
+        require_eq(
+            &LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get),
+            &before.saturating_add(2),
+            "explicit configuration lost its predecessor-authority checks",
+        )?;
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -11959,14 +12577,95 @@ mod tests {
     }
 
     #[test]
+    fn automatic_budget_survives_staging_and_refuses_late_publication() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("lib.rs"), "pub fn first() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
+        let control = index_work_control(&options);
+        let initial =
+            stage_full_index_publication(&store, &plan, &options, false, false, &control)?;
+        require_eq(
+            &initial.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "unknown initial fallback",
+        )?;
+        publish_index_batch(&mut store, initial, &plan.scan_options, &control)?;
+        let publication = store.index_publication()?;
+        let identity = store.captured_project_binding()?;
+        let mut batch =
+            stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+        require_eq(
+            &(batch.automatic_timeout < MAX_INDEX_WORK_TIMEOUT),
+            &true,
+            "known full-work selection",
+        )?;
+        let unknown_prior =
+            stage_full_index_publication(&store, &plan, &options, false, false, &control)?;
+        require_eq(
+            &unknown_prior.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "replacement without prior work evidence retains fallback",
+        )?;
+        fs::remove_file(temp.path().join("lib.rs"))?;
+        let removed = stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+        require_eq(
+            &removed.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "shrinking replacement retains deletion headroom",
+        )?;
+        fs::write(temp.path().join("lib.rs"), "pub fn first() {}\n")?;
+        let explicit = SymbolBuildOptions::new(1_024, Some(1), Some(1_800));
+        let explicit_batch =
+            stage_full_index_publication(&store, &plan, &explicit, false, false, &control)?;
+        require_eq(
+            &explicit_batch.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "explicit ceiling bypasses estimation",
+        )?;
+        // Inject exhaustion after preparation; publication must retain the selected bound.
+        batch.automatic_timeout = Duration::ZERO;
+        require_eq(
+            &matches!(
+                publish_index_batch(&mut store, batch, &plan.scan_options, &control),
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::DeadlineExceeded { .. }
+                ))
+            ),
+            &true,
+            "staged deadline still protects publication",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "publication preserved on deadline",
+        )?;
+        require_eq(
+            &store.captured_project_binding()?,
+            &identity,
+            "identity preserved on deadline",
+        )?;
+        run_scan_pipeline_controlled(&mut store, &plan, &options, &control)?;
+        require_eq(
+            &store.load_symbols(Some("lib.rs"), None, 10)?.len(),
+            &1,
+            "adequate retry succeeds",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn operation_deadline_preserves_default_ceiling_and_fail_closed_bounds() {
         for (timeout_seconds, expected) in [
-            (None, DEFAULT_INDEX_WORK_TIMEOUT),
+            (None, MAX_INDEX_WORK_TIMEOUT),
             (Some(0), Duration::ZERO),
             (Some(1), Duration::from_secs(1)),
             (
-                Some(DEFAULT_INDEX_WORK_TIMEOUT.as_secs() + 1),
-                DEFAULT_INDEX_WORK_TIMEOUT,
+                Some(MAX_INDEX_WORK_TIMEOUT.as_secs() + 1),
+                MAX_INDEX_WORK_TIMEOUT,
             ),
             (Some(u64::MAX), Duration::ZERO),
         ] {
@@ -13057,7 +13756,7 @@ mod tests {
             &store,
             &cumulative_plan,
             Some(&cumulative_snapshot.fingerprint),
-            &cumulative_control.with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT),
+            &cumulative_control.with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT),
             cumulative_limits,
         );
         if !matches!(
@@ -15216,7 +15915,8 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                         &ScanOptions::default(),
                         &standalone_index_work_control(),
                     ),
-                    Err(FsError::RootNotDirectory(_))
+                    Err(FsError::Io { path, source })
+                        if path == root && source.kind() == io::ErrorKind::NotFound
                 ),
                 &true,
                 "persistent root absence is still refused by reconciliation policy",
@@ -15479,6 +16179,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &preparation_control,
         )?;
         let IndexPublicationBatch {
+            automatic_timeout: _,
             base_generation,
             contract_fingerprint,
             root,
@@ -16114,6 +16815,894 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             }
             Err(source) => Err(source),
         }
+    }
+
+    #[test]
+    fn watch_root_recovery_retains_identity_admission_failures() -> Result<(), Box<dyn Error>> {
+        for temporary_file in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            let retired = temp.path().join("retired");
+            let replacement = temp.path().join("replacement");
+            fs::create_dir(&root)?;
+            fs::create_dir(&replacement)?;
+            fs::write(root.join("source.rs"), "pub fn initial() {}\n")?;
+            fs::write(
+                replacement.join("source.rs"),
+                "pub fn replacement_target() {}\n",
+            )?;
+            let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+            let database = temp.path().join("external.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), Some(10));
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "source.rs",
+                "Retain identity admission responsibility",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let revision = store.authored_purpose_revision()?;
+            let publication = store.index_publication()?;
+            let control = index_work_control(&options);
+            let mut waits = 0;
+            reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    let sampled = AtlasStore::open_read_only(&database)?;
+                    if sampled.index_publication()? != publication {
+                        return Err(CliError::InvalidInput(
+                            "identity gap changed publication".to_string(),
+                        ));
+                    }
+                    if temporary_file {
+                        fs::remove_file(&root).map_err(|source| CliError::Io {
+                            path: root.clone(),
+                            source,
+                        })?;
+                    }
+                    fs::rename(&replacement, &root).map_err(|source| CliError::Io {
+                        path: root.clone(),
+                        source,
+                    })?;
+                    Ok(())
+                },
+                |retry| {
+                    let current_plan = plan.reload_controlled(&control)?;
+                    if !retry {
+                        fs::rename(&root, &retired).map_err(|source| CliError::Io {
+                            path: root.clone(),
+                            source,
+                        })?;
+                        if temporary_file {
+                            fs::write(&root, "transient non-directory").map_err(|source| {
+                                CliError::Io {
+                                    path: root.clone(),
+                                    source,
+                                }
+                            })?;
+                        }
+                    }
+                    // A matching publication enters the real freshness owner,
+                    // whose first source check revalidates the selected identity.
+                    refresh_index_controlled(&mut store, &current_plan, &options, &control)
+                },
+            )?;
+            require_eq(&waits, &1, "identity admission root recovery")?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "identity admission project",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "identity admission authored state",
+            )?;
+            require_eq(
+                &store
+                    .load_node_by_path("source.rs")?
+                    .and_then(|node| node.purpose.purpose),
+                &Some("Retain identity admission responsibility".to_string()),
+                "identity admission purpose",
+            )?;
+            require_eq(
+                &store
+                    .load_symbols(Some("source.rs"), None, 10)?
+                    .iter()
+                    .any(|symbol| symbol.name == "replacement_target"),
+                &true,
+                "identity admission replacement",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn watch_root_recovery_preserves_causes_and_strict_errors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let control = standalone_index_work_control();
+        for case in 0..7 {
+            let mut attempts = 0;
+            let mut waits = 0;
+            reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    Ok(())
+                },
+                |retry| {
+                    attempts += 1;
+                    if retry {
+                        return Ok(());
+                    }
+                    // Already restored roots must retain the cause actually observed.
+                    let error = match case {
+                        0 => CliError::Fs(FsError::Io {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotFound.into(),
+                        }),
+                        1 => source_inspection_error(
+                            &plan.root,
+                            FsError::Io {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotFound.into(),
+                            },
+                        ),
+                        2 => CliError::Fs(FsError::RootNotDirectory(plan.root.clone())),
+                        3 => source_inspection_error(
+                            &plan.root,
+                            FsError::Io {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotADirectory.into(),
+                            },
+                        ),
+                        4 => CliError::Io {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotADirectory.into(),
+                        },
+                        5 => CliError::Fs(FsError::RepositoryBoundary {
+                            path: plan.root.clone(),
+                            source: io::ErrorKind::NotFound.into(),
+                        }),
+                        _ => source_inspection_error(
+                            &plan.root,
+                            FsError::RepositoryBoundary {
+                                path: plan.root.clone(),
+                                source: io::ErrorKind::NotADirectory.into(),
+                            },
+                        ),
+                    };
+                    Err(verification_incomplete(
+                        &plan.root,
+                        IndexVerificationReason::SourceInspectionFailed,
+                        &error,
+                    ))
+                },
+            )?;
+            require_eq(&(attempts, waits), &(2, 1), "retained root cause")?;
+        }
+        let child = plan.root.join("missing-config.toml");
+        for (path, kind) in [
+            (&child, io::ErrorKind::NotFound),
+            (&plan.root, io::ErrorKind::PermissionDenied),
+        ] {
+            let mut waits = 0;
+            let result: Result<(), CliError> = reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    Ok(())
+                },
+                |_| {
+                    Err(source_inspection_error(
+                        &plan.root,
+                        FsError::Io {
+                            path: path.clone(),
+                            source: kind.into(),
+                        },
+                    ))
+                },
+            );
+            require_eq(&result.is_err(), &true, "unrelated error remains strict")?;
+            require_eq(&waits, &0, "unrelated error was retried")?;
+            if let Err(CliError::VerificationIncomplete(report)) = result {
+                require_eq(
+                    &serde_json::to_value(report)?
+                        .get("unavailable_source_root")
+                        .is_none(),
+                    &true,
+                    "private witness serialization",
+                )?;
+            }
+        }
+        let selected = CanonicalProjectRoot::from_path(&plan.root)?;
+        let other = temp.path().join("other");
+        fs::create_dir(&other)?;
+        let indexed = CanonicalProjectRoot::from_path(&other)?;
+        for error in [
+            source_inspection_error(
+                &plan.root,
+                FsError::RepositoryBoundary {
+                    path: child.clone(),
+                    source: io::ErrorKind::NotFound.into(),
+                },
+            ),
+            source_inspection_error(
+                &plan.root,
+                FsError::RepositoryBoundary {
+                    path: plan.root.clone(),
+                    source: io::ErrorKind::PermissionDenied.into(),
+                },
+            ),
+            CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
+                &selected, &indexed,
+            ))),
+            CliError::Io {
+                path: child.clone(),
+                source: io::ErrorKind::NotFound.into(),
+            },
+            CliError::Fs(FsError::RootNotDirectory(child.clone())),
+            CliError::Io {
+                path: plan.root.clone(),
+                source: io::ErrorKind::PermissionDenied.into(),
+            },
+        ] {
+            let expected = error.to_string();
+            let mut error = Some(error);
+            let mut waits = 0;
+            let result: Result<(), CliError> = reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    Ok(())
+                },
+                |_| {
+                    Err(error.take().ok_or_else(|| {
+                        CliError::InvalidInput("strict failure retried".to_string())
+                    })?)
+                },
+            );
+            require_eq(
+                &result.err().ok_or("strict failure accepted")?.to_string(),
+                &expected,
+                "strict typed failure",
+            )?;
+            require_eq(&waits, &0, "strict failure waited")?;
+        }
+        let selection = policy_watch::PolicyWatchSelection::new(plan.root.clone());
+        let root_error = selection.recursive_watch_error(
+            notify::Error::path_not_found().add_path(plan.root.clone()),
+            "restore",
+        );
+        require_eq(
+            &error_is_root_unavailable(&root_error, &plan.root),
+            &true,
+            "typed native root failure",
+        )?;
+        let child_error = selection
+            .recursive_watch_error(notify::Error::path_not_found().add_path(child), "restore");
+        require_eq(
+            &matches!(child_error, CliError::Watcher(_)),
+            &true,
+            "native child failure is not a root gap",
+        )?;
+        for deadline in [false, true] {
+            let control = IndexWorkControl::new(
+                IndexCancellation::new(),
+                deadline.then_some(Duration::from_millis(50)),
+            );
+            let mut attempts = 0;
+            let mut waits = 0;
+            let result: Result<(), CliError> = reconcile_watch_root_controlled(
+                &plan,
+                &control,
+                Duration::from_secs(1),
+                &mut |_| {
+                    waits += 1;
+                    if deadline {
+                        thread::sleep(Duration::from_millis(60));
+                    } else {
+                        control.cancel();
+                    }
+                    Ok(())
+                },
+                |_| {
+                    attempts += 1;
+                    Err(CliError::Io {
+                        path: plan.root.clone(),
+                        source: io::ErrorKind::NotFound.into(),
+                    })
+                },
+            );
+            require_eq(
+                &matches!(result, Err(CliError::IndexWork(_))),
+                &true,
+                "original stopped recovery control",
+            )?;
+            require_eq(&(attempts, waits), &(1, 1), "stopped recovery renewed work")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn polling_watch_recovers_root_gaps_and_bounds_absence() -> Result<(), Box<dyn Error>> {
+        for phase in [0, 1, 2] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            fs::create_dir(&root)?;
+            fs::write(root.join("source.rs"), "pub fn initial() {}\n")?;
+            let plan = ScanRuntimePlan::for_path(None, &root, None)?;
+            let database = temp.path().join("external.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), Some(10));
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "source.rs",
+                "Retain replacement responsibility",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let revision = store.authored_purpose_revision()?;
+            let publication = store.index_publication()?;
+            let original = store.load_node_by_path("source.rs")?;
+            let retired = temp.path().join("retired");
+            let replacement = temp.path().join("replacement");
+            fs::create_dir(&replacement)?;
+            fs::write(
+                replacement.join("source.rs"),
+                "pub fn replacement_target() {}\n",
+            )?;
+            if phase != 1 {
+                fs::rename(&root, &retired)?;
+            }
+            let mut waits = 0;
+            let result = run_polling_watch_loop_with_wait(
+                &mut store,
+                &plan,
+                1,
+                if phase == 1 { 2 } else { 1 },
+                &options,
+                None,
+                &index_work_control(&options),
+                &mut |_| {
+                    waits += 1;
+                    let sampled = AtlasStore::open_read_only(&database)?;
+                    if sampled.index_publication()? != publication {
+                        return Err(CliError::InvalidInput(
+                            "root gap changed publication".to_string(),
+                        ));
+                    }
+                    if phase == 2 {
+                        return Ok(());
+                    }
+                    let (from, to) = if phase == 1 && waits == 1 {
+                        (&root, &retired)
+                    } else {
+                        (&replacement, &root)
+                    };
+                    fs::rename(from, to).map_err(|source| CliError::Io {
+                        path: to.clone(),
+                        source,
+                    })?;
+                    Ok(())
+                },
+            );
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "polling root identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "polling root purposes",
+            )?;
+            if phase == 2 {
+                let error = result.err().ok_or("persistent absence accepted")?;
+                require_eq(
+                    &error_is_root_unavailable(&error, &plan.root),
+                    &true,
+                    "typed persistent absence",
+                )?;
+                require_eq(
+                    &waits,
+                    &(MAX_WATCH_ROOT_ATTEMPTS - 1),
+                    "bounded root recovery",
+                )?;
+                require_eq(
+                    &store.index_publication()?,
+                    &publication,
+                    "persistent absence publication",
+                )?;
+                require_eq(
+                    &store.load_node_by_path("source.rs")?,
+                    &original,
+                    "persistent absence source",
+                )?;
+                require_eq(
+                    &run_single_watch_refresh(&mut store, &plan, &options).is_err(),
+                    &true,
+                    "one-shot remains strict",
+                )?;
+                fs::rename(&replacement, &root)?;
+                run_single_watch_refresh(&mut store, &plan, &options)?;
+            } else {
+                require_eq(
+                    &result?.cycles,
+                    &if phase == 1 { 2 } else { 1 },
+                    "successful polling cycles",
+                )?;
+                require_eq(
+                    &waits,
+                    &if phase == 1 { 2 } else { 1 },
+                    "polling recovery waits",
+                )?;
+            }
+            require_eq(
+                &store
+                    .load_node_by_path("source.rs")?
+                    .and_then(|node| node.purpose.purpose),
+                &Some("Retain replacement responsibility".to_string()),
+                "polling purpose",
+            )?;
+            require_eq(
+                &store
+                    .load_symbols(Some("source.rs"), None, 10)?
+                    .iter()
+                    .any(|symbol| symbol.name == "replacement_target"),
+                &true,
+                "polling replacement source",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_watch_preserves_bindings_through_a_root_replacement_gap() -> Result<(), Box<dyn Error>>
+    {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// Retire the selected source during a real policy-registration batch.
+        struct ReplacementWatcher {
+            handler: NativeWatchEventHandler,
+            root: PathBuf,
+            retired: PathBuf,
+            uncertain: PathBuf,
+            initial: bool,
+            batches: Rc<Cell<usize>>,
+            closed: Rc<Cell<bool>>,
+        }
+
+        struct ReplacementPaths<'a>(&'a mut ReplacementWatcher);
+
+        impl notify::PathsMut for ReplacementPaths<'_> {
+            fn add(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn remove(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn commit(self: Box<Self>) -> notify::Result<()> {
+                let batch = self.0.batches.get() + 1;
+                self.0.batches.set(batch);
+                if batch == 2 {
+                    fs::rename(&self.0.root, &self.0.retired).map_err(notify::Error::io)?;
+                    (self.0.handler)(Ok(Event::new(EventKind::Modify(
+                        notify::event::ModifyKind::Name(notify::event::RenameMode::From),
+                    ))
+                    .add_path(self.0.root.clone())));
+                } else if batch == 1 {
+                    let path = if self.0.initial {
+                        self.0.uncertain.clone()
+                    } else {
+                        self.0.root.join("source.rs")
+                    };
+                    (self.0.handler)(Ok(Event::new(EventKind::Modify(
+                        notify::event::ModifyKind::Data(notify::event::DataChange::Any),
+                    ))
+                    .add_path(path)));
+                }
+                Ok(())
+            }
+        }
+
+        impl Watcher for ReplacementWatcher {
+            fn new<F: notify::EventHandler>(_handler: F, _config: Config) -> notify::Result<Self> {
+                Err(notify::Error::generic(
+                    "replacement watcher requires its controlled namespace schedule",
+                ))
+            }
+
+            fn watch(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+                Box::new(ReplacementPaths(self))
+            }
+
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+
+        impl Drop for ReplacementWatcher {
+            fn drop(&mut self) {
+                self.closed.set(true);
+            }
+        }
+
+        for initial in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            let root = base.join("repo");
+            let replacement = base.join("replacement");
+            fs::create_dir(&root)?;
+            fs::create_dir(&replacement)?;
+            fs::write(root.join("source.rs"), "pub fn initial() {}\n")?;
+            fs::write(
+                replacement.join("source.rs"),
+                "pub fn replacement_target() {}\n",
+            )?;
+            let config = base.join("selected.toml");
+            let root_value =
+                toml::Value::String(root.to_str().ok_or("fixture root is not UTF-8")?.to_owned());
+            fs::write(&config, format!("[project]\nroot = {root_value}\n"))?;
+            let plan = ScanRuntimePlan::for_path(Some(&config), &root, None)?;
+            let database = base.join("external.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), Some(10));
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "source.rs",
+                "Retain authored responsibility across source replacement",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let authored_revision = store.authored_purpose_revision()?;
+            let publication = store.index_publication()?;
+            let closed = Rc::new(Cell::new(false));
+            let backend_closed = Rc::clone(&closed);
+            let batches = Rc::new(Cell::new(0));
+            let backend_batches = Rc::clone(&batches);
+            let selected_root = root.clone();
+            let retired = base.join("retired");
+            let uncertain = base.join("λ-sibling");
+            let mut waits = 0;
+            let report = run_notify_watch_loop_with_backend(
+                &mut store,
+                &database,
+                &plan,
+                1,
+                if initial { 1 } else { 2 },
+                &options,
+                move |handler| {
+                    Ok(ReplacementWatcher {
+                        handler,
+                        root: selected_root,
+                        retired,
+                        uncertain,
+                        initial,
+                        batches: backend_batches,
+                        closed: backend_closed,
+                    })
+                },
+                &mut |duration| {
+                    if duration != Duration::from_secs(1)
+                        || closed.get()
+                        || root.exists()
+                        || waits != 0
+                    {
+                        return Err(CliError::InvalidInput(
+                            "root recovery must wait once while native coverage remains owned"
+                                .to_string(),
+                        ));
+                    }
+                    let sampled = AtlasStore::open_read_only(&database)?;
+                    if sampled.index_publication()? != publication {
+                        return Err(CliError::InvalidInput(
+                            "root gap changed the last complete publication".to_string(),
+                        ));
+                    }
+                    fs::rename(&replacement, &root).map_err(|source| CliError::Io {
+                        path: root.clone(),
+                        source,
+                    })?;
+                    waits += 1;
+                    Ok(())
+                },
+            )?;
+            require_eq(&waits, &1, "one controlled source-root absence")?;
+            require_eq(
+                &report.mode.as_str(),
+                &WATCH_MODE_NOTIFY,
+                "native root recovery",
+            )?;
+            require_eq(
+                &report.cycles,
+                &if initial { 1 } else { 2 },
+                "root recovery cycles",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "replacement identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &authored_revision,
+                "replacement authored revision",
+            )?;
+            let source = store
+                .load_node_by_path("source.rs")?
+                .ok_or("source disappeared")?;
+            require_eq(
+                &source.purpose.purpose.as_deref(),
+                &Some("Retain authored responsibility across source replacement"),
+                "replacement purpose",
+            )?;
+            require_eq(
+                &store
+                    .load_symbols(Some("source.rs"), None, 10)?
+                    .iter()
+                    .any(|symbol| symbol.name == "replacement_target"),
+                &true,
+                "replacement source publication",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_policy_overlap_hands_off_initial_and_later_work_through_real_polling()
+    -> Result<(), Box<dyn Error>> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// Deliver one callback from each controlled native registration batch.
+        struct FenceWatcher {
+            /// Actual runtime callback, including classification and bounded ingress.
+            handler: NativeWatchEventHandler,
+            /// Rechecks reported while each cold reconcile is in progress.
+            uncertain: PathBuf,
+            /// A queued source event starts the later branch after its quiet first capture.
+            source: PathBuf,
+            /// Quiet registration batches preceding sustained overlap.
+            quiet_batches: usize,
+            /// Completed native registration batches across the run.
+            batches: Rc<Cell<usize>>,
+            /// The polling owner must outlive native observer shutdown.
+            closed: Rc<Cell<bool>>,
+        }
+
+        /// Canonical batch lifecycle whose commit delivers the controlled event.
+        struct FencePaths<'a>(&'a mut FenceWatcher);
+
+        impl notify::PathsMut for FencePaths<'_> {
+            fn add(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn remove(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn commit(self: Box<Self>) -> notify::Result<()> {
+                let batch = self.0.batches.get() + 1;
+                self.0.batches.set(batch);
+                if batch > 4 + self.0.quiet_batches {
+                    return Err(notify::Error::generic(
+                        "test stopped unbounded native reconciliation",
+                    ));
+                }
+                let path = if batch > self.0.quiet_batches {
+                    &self.0.uncertain
+                } else {
+                    &self.0.source
+                };
+                (self.0.handler)(Ok(Event::new(EventKind::Modify(
+                    notify::event::ModifyKind::Data(notify::event::DataChange::Any),
+                ))
+                .add_path(path.clone())));
+                Ok(())
+            }
+        }
+
+        impl Watcher for FenceWatcher {
+            fn new<F: notify::EventHandler>(_handler: F, _config: Config) -> notify::Result<Self> {
+                Err(notify::Error::generic(
+                    "controlled watcher requires its explicit event schedule",
+                ))
+            }
+
+            fn watch(&mut self, _path: &Path, _mode: RecursiveMode) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+                Ok(())
+            }
+
+            fn paths_mut(&mut self) -> Box<dyn notify::PathsMut + '_> {
+                Box::new(FencePaths(self))
+            }
+
+            fn kind() -> notify::WatcherKind {
+                notify::WatcherKind::NullWatcher
+            }
+        }
+
+        impl Drop for FenceWatcher {
+            fn drop(&mut self) {
+                self.closed.set(true);
+            }
+        }
+
+        for initial in [true, false] {
+            let temp = tempfile::tempdir()?;
+            let base = temp.path().canonicalize()?;
+            let root = base.join("repo");
+            fs::create_dir(&root)?;
+            let source = root.join("source.rs");
+            fs::write(&source, "pub fn initial() {}\n")?;
+            fs::write(root.join("README.md"), "# Watch responsibility\n")?;
+            let root_value =
+                toml::Value::String(root.to_str().ok_or("fixture root is not UTF-8")?.to_owned());
+            let config = base.join("selected.toml");
+            let config_prefix = format!("[project]\nroot = {root_value}\n[scan]\n");
+            fs::write(
+                &config,
+                format!("{config_prefix}exclude_path_prefixes = []\n"),
+            )?;
+            let plan = ScanRuntimePlan::for_path(Some(&config), &root, Some(1_024))?;
+            let database = root.join(".projectatlas/projectatlas.db");
+            let mut store = open_atlas_store_for_project(&database, &plan.root)?;
+            let options = SymbolBuildOptions::new(1_024, Some(1), None);
+            refresh_index(&mut store, &plan, &options)?;
+            store.set_purpose(
+                "README.md",
+                "Retain watch responsibility",
+                PurposeSource::Agent,
+            )?;
+            let identity = store.project_instance_id()?;
+            let revision = store.authored_purpose_revision()?;
+            fs::write(root.join("ready.rs"), "pub fn ready() {}\n")?;
+            let batches = Rc::new(Cell::new(0));
+            let closed = Rc::new(Cell::new(false));
+            let backend_batches = Rc::clone(&batches);
+            let backend_closed = Rc::clone(&closed);
+            let uncertain = base.join("λ-sibling");
+            let backend_source = source.clone();
+            let mut waits = 0;
+            let expected_batches = if initial { 4 } else { 5 };
+            let report = run_notify_watch_loop_with_backend(
+                &mut store,
+                &database,
+                &plan,
+                1,
+                4,
+                &options,
+                move |handler| {
+                    Ok(FenceWatcher {
+                        handler,
+                        uncertain,
+                        source: backend_source,
+                        quiet_batches: usize::from(!initial),
+                        batches: backend_batches,
+                        closed: backend_closed,
+                    })
+                },
+                &mut |duration| {
+                    if duration != Duration::from_secs(1)
+                        || !closed.get()
+                        || batches.get() != expected_batches
+                    {
+                        return Err(CliError::InvalidInput(
+                            "polling began before bounded native reconciliation and shutdown"
+                                .to_string(),
+                        ));
+                    }
+                    if waits == 0 {
+                        let sampled = AtlasStore::open_read_only(&database)?;
+                        if sampled.load_node_by_path("ready.rs")?.is_none()
+                            || sampled.load_node_by_path("later.rs")?.is_some()
+                        {
+                            return Err(CliError::InvalidInput(
+                                "first polling capture lost pending native work".to_string(),
+                            ));
+                        }
+                        fs::write(
+                            &config,
+                            format!("{config_prefix}exclude_path_prefixes = [\"source.rs\"]\n"),
+                        )
+                        .map_err(|source| CliError::Io {
+                            path: config.clone(),
+                            source,
+                        })?;
+                        let later = root.join("later.rs");
+                        fs::write(&later, "pub fn later() {}\n").map_err(|source| {
+                            CliError::Io {
+                                path: later,
+                                source,
+                            }
+                        })?;
+                    }
+                    waits += 1;
+                    Ok(())
+                },
+            )?;
+            require_eq(
+                &report.mode.as_str(),
+                &WATCH_MODE_POLLING,
+                "automatic handoff mode",
+            )?;
+            require_eq(&report.cycles, &4, "automatic handoff total cycle budget")?;
+            require_eq(
+                &waits,
+                &if initial { 3 } else { 2 },
+                "remaining polling intervals",
+            )?;
+            require_eq(
+                &report
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("bounded native refresh")),
+                &true,
+                "automatic handoff retained its bounded-overlap reason",
+            )?;
+            require_eq(
+                &store.project_instance_id()?,
+                &identity,
+                "handoff project identity",
+            )?;
+            require_eq(
+                &store.authored_purpose_revision()?,
+                &revision,
+                "handoff authored revision",
+            )?;
+            require_eq(
+                &store.load_node_by_path("source.rs")?.is_none(),
+                &true,
+                "later policy applied",
+            )?;
+            require_eq(
+                &store.load_node_by_path("later.rs")?.is_some(),
+                &true,
+                "later source applied",
+            )?;
+            let guide = store
+                .load_node_by_path("README.md")?
+                .ok_or("guide disappeared")?;
+            require_eq(
+                &guide.purpose.status,
+                &PurposeStatus::Approved,
+                "handoff guide approval",
+            )?;
+            require_eq(
+                &guide.purpose.purpose.as_deref(),
+                &Some("Retain watch responsibility"),
+                "handoff guide purpose",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

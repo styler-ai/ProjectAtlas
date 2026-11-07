@@ -691,7 +691,7 @@ pub(super) fn sqlite_table_digests(
         let mut statement = connection.prepare(
             "SELECT name
              FROM sqlite_schema
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table' AND name NOT LIKE 'sqlite!_%' ESCAPE '!'
              ORDER BY name",
         )?;
         statement

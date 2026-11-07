@@ -102,6 +102,15 @@ For an explicit cross-worktree graph question, pass two to eight registered alia
 
 Follow typed recovery: choose one returned selector after `ambiguous`; run the returned alias-preserving init after `init_required`; refresh only the named target after `refresh_required`; select an exact active checkout after `worktree_required`; and never reset, substitute, or silently rebuild an incompatible database. See [Worktree atlas continuity](worktree-lifecycle.md) for ownership and sequence diagrams.
 
+For `refresh_required` with reason `dependency_closure_limit`, follow the returned
+`scan` / `atlas_scan` call. Its `changed` counter describes known affected source
+paths. If a key, candidate or path limit stops dependency expansion early, this
+is a lower bound rather than the total closure size. Graph rows, canonical keys
+and bytes are separate work units and are not changed-file counts. This refusal
+does not classify source edits:
+`added`, `removed` and `modified` are zero and unclassified. Other source-change
+reasons retain their exact added, removed and modified path counts.
+
 ## MCP Server
 
 Prefer the `projectatlas init` or installer-generated project-local MCP config at `.projectatlas/projectatlas.mcp.json`
@@ -235,9 +244,13 @@ default.
 
 Indexing uses one cooperative work budget across traversal, source hashing, parsing and publication
 checkpoints. MCP `atlas_scan`, `atlas_symbols_build` and `atlas_watch_once` expose it as
-`timeout_seconds`; CLI `symbols build` and `watch` expose `--timeout-seconds`. The default and ceiling
-are 30 minutes: larger representable budgets are clamped, while unrepresentable deadlines fail
-closed. Continuous `watch` applies the budget to each refresh, rather than the whole watch session.
+`timeout_seconds`; CLI `symbols build` and `watch` expose `--timeout-seconds`. Omitted limits use work-based cooperative defaults from already-required source inventories
+and discovery counters; unknown work, including a cold initial index, retains 30 minutes.
+The ceiling remains 30 minutes. Explicit limits take precedence, larger representable budgets
+are clamped, zero refuses immediately, and unrepresentable deadlines fail closed.
+The [indexing reference](benchmarks/v0.5.1-indexing.md#automatic-budget-coefficients) defines
+the coefficients. A verified warm no-op uses five seconds; planned source work reserves at
+least 30 seconds plus source and complete-verification work. Continuous `watch` applies the budget to each refresh, rather than the whole watch session.
 The clock starts when indexing work control is created. Root/config/store setup performed afterward
 consumes it; earlier startup/target selection is outside the budget. Checkpoint-based stopping can
 exceed the requested wall time. A deadline refusal preserves the last valid index, identity and approved purposes;

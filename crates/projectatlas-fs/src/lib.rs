@@ -3,9 +3,14 @@
 pub mod worktree;
 
 mod git_config;
+mod policy_evidence;
 mod policy_match;
+mod regular_file;
+mod source_reader;
 
+pub use policy_evidence::{ObservedRootScanPolicy, ScanPolicyEvidence};
 pub use policy_match::{PolicyMatchError, PolicyMatchLimits, PolicyMatchResource, RootScanMatcher};
+pub use regular_file::open_regular_file;
 
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState};
@@ -18,6 +23,7 @@ use projectatlas_core::{
     IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
     normalized_extension, normalized_parent,
 };
+use source_reader::{SourceFileReader, SourceRootReader};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -86,6 +92,82 @@ pub enum FsError {
 
 /// Convenient result alias for scanner operations.
 pub type FsResult<T> = Result<T, FsError>;
+
+/// Validate the selected root using the metadata result from its native spelling.
+fn validate_source_root_metadata(root: &Path, metadata: io::Result<fs::Metadata>) -> FsResult<()> {
+    if root.as_os_str().is_empty() {
+        return Err(FsError::RootNotDirectory(root.to_path_buf()));
+    }
+    match metadata {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(FsError::RootNotDirectory(root.to_path_buf())),
+        Err(source) => Err(FsError::Io {
+            path: root.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod root_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn source_root_metadata_preserves_permission_and_io_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        validate_source_root_metadata(root, fs::metadata(root))?;
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Other,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::NotADirectory,
+        ] {
+            match validate_source_root_metadata(root, Err(kind.into())) {
+                Err(FsError::Io { path, source }) if path == root && source.kind() == kind => {}
+                other => {
+                    return Err(io::Error::other(format!(
+                        "root metadata cause lost: {kind:?}: {other:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_root_admission_distinguishes_absence_from_non_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let file = temp.path().join("file");
+        let absent = temp.path().join("absent");
+        fs::write(&file, "ordinary file")?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        for root in [temp.path(), &file, &absent] {
+            for result in [
+                RootScanPolicy::discover(root, &ScanOptions::default(), &control).map(|_| ()),
+                worktree::discover_repository_structure_controlled(root, &control).map(|_| ()),
+            ] {
+                let valid = if root == temp.path() {
+                    result.is_ok()
+                } else if root == file {
+                    matches!(result, Err(FsError::RootNotDirectory(path)) if path == root)
+                } else {
+                    matches!(result, Err(FsError::Io { path, source }) if path == root && source.kind() == io::ErrorKind::NotFound)
+                };
+                if !valid {
+                    return Err(io::Error::other(
+                        "root admission lost directory/absence distinction",
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Repository scanner configuration.
 #[derive(Clone, Debug)]
@@ -160,6 +242,16 @@ impl RootScanPolicy {
         options: &ScanOptions,
         control: &IndexWorkControl,
     ) -> FsResult<Self> {
+        Self::discover_recorded(root, options, control, None)
+    }
+
+    /// Discover policy with optional operation-owned consumed-input evidence.
+    fn discover_recorded(
+        root: &Path,
+        options: &ScanOptions,
+        control: &IndexWorkControl,
+        capture: Option<&Arc<policy_evidence::PolicyCapture>>,
+    ) -> FsResult<Self> {
         control.check(IndexWorkStage::RepositoryTraversal)?;
         if root.as_os_str().is_empty() {
             return Err(FsError::RootNotDirectory(root.to_path_buf()));
@@ -183,9 +275,14 @@ impl RootScanPolicy {
                 })?
             })
         };
-        if !selected_root.is_dir() {
-            return Err(FsError::RootNotDirectory(root.to_path_buf()));
-        }
+        #[cfg(windows)]
+        let selected_root: Cow<'_, Path> = Cow::Owned(
+            std::path::absolute(selected_root.as_ref()).map_err(|source| FsError::Io {
+                path: root.to_path_buf(),
+                source,
+            })?,
+        );
+        validate_source_root_metadata(root, fs::metadata(selected_root.as_ref()))?;
         let canonical_root = selected_root.canonicalize().map_err(|source| FsError::Io {
             path: root.to_path_buf(),
             source,
@@ -206,7 +303,16 @@ impl RootScanPolicy {
             .git_global(false)
             .require_git(false)
             .current_dir(root.clone());
-        let external = git_config::ExternalGitConfig::discover(&root, control)?;
+        if let Some(capture) = capture {
+            walker.ignore_file_source(Arc::new(policy_evidence::PolicyFileSource(Arc::clone(
+                capture,
+            ))));
+        }
+        let external = git_config::ExternalGitConfig::discover_recorded(
+            &root,
+            control,
+            capture.map(Arc::as_ref),
+        )?;
         if let Some(path) = external.excludes {
             match fs::metadata(&path) {
                 Ok(metadata) => {
@@ -218,7 +324,19 @@ impl RootScanPolicy {
                         });
                     }
                 }
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    if let Some(capture) = capture {
+                        ignore::IgnoreFileSource::absent(
+                            &policy_evidence::PolicyFileSource(Arc::clone(capture)),
+                            &path,
+                            ignore::IgnoreFileKind::Rules,
+                        )
+                        .map_err(|source| FsError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    }
+                }
                 Err(source) => return Err(FsError::Io { path, source }),
             }
         }
@@ -240,7 +358,7 @@ impl RootScanPolicy {
     /// Returns an error when the path cannot be normalized or an ignore
     /// source cannot be parsed safely.
     pub fn excludes_path(&self, path: &Path) -> FsResult<bool> {
-        let absolute = self.absolute_target(path);
+        let absolute = self.absolute_target(path)?;
         if should_skip_path(&self.root, &absolute, &self.options) {
             return Ok(true);
         }
@@ -248,19 +366,33 @@ impl RootScanPolicy {
     }
 
     /// Rebase selected-root aliases without resolving target components.
-    fn absolute_target(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+    fn absolute_target(&self, path: &Path) -> FsResult<PathBuf> {
+        let anchored = if path.is_absolute() {
+            Cow::Borrowed(path)
+        } else {
+            #[cfg(windows)]
+            let selected = self.selected_root_alias.as_deref().unwrap_or(&self.root);
+            #[cfg(not(windows))]
+            let selected = &self.root;
+            Cow::Owned(selected.join(path))
+        };
+        // Use native lexical normalization, not canonicalization: Unix retains
+        // unresolved .. components; Win32 ordinary paths collapse them before
+        // filesystem lookup. Both policy APIs and source admission share this.
+        let absolute = std::path::absolute(anchored.as_ref()).map_err(|source| FsError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(
             match self
                 .selected_root_alias
                 .as_deref()
-                .and_then(|selected| path.strip_prefix(selected).ok())
+                .and_then(|selected| absolute.strip_prefix(selected).ok())
             {
                 Some(relative) => self.root.join(relative),
-                None => path.to_path_buf(),
-            }
-        } else {
-            self.root.join(path)
-        }
+                None => absolute,
+            },
+        )
     }
 }
 
@@ -471,7 +603,44 @@ pub fn scan_repo_controlled_with_work(
     control: &IndexWorkControl,
 ) -> FsResult<ScanOutcome> {
     let policy = RootScanPolicy::discover(root, options, control)?;
+    scan_repo_with_policy(policy, limits, control)
+}
+
+/// Scan once and return transient evidence of the policy inputs actually consumed.
+///
+/// Call [`ScanPolicyEvidence::is_current`] at the enclosing admission/publication
+/// boundary before treating this result as current source under a policy witness.
+/// Existing [`ScanOutcome`] construction and compatibility remain unchanged.
+///
+/// # Errors
+/// Returns the scanner's existing filesystem, resource and cooperative-work errors.
+pub fn scan_repo_controlled_with_policy_evidence(
+    root: &Path,
+    options: &ScanOptions,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<(ScanOutcome, ScanPolicyEvidence)> {
+    let ObservedRootScanPolicy {
+        policy,
+        capture,
+        worktree_prefixes,
+    } = ObservedRootScanPolicy::discover(root, options, limits, control)?;
+    let root = policy.root.clone();
+    let scan = scan_repo_with_policy(policy, limits, control);
+    capture.check_failure()?;
+    let scan = scan?;
+    let evidence = policy_evidence::PolicyCapture::finish(capture, root, worktree_prefixes)?;
+    Ok((scan, evidence))
+}
+
+/// Run the canonical parallel walker using its already compiled root policy.
+fn scan_repo_with_policy(
+    policy: RootScanPolicy,
+    limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> FsResult<ScanOutcome> {
     let root = policy.root;
+    let source_reader = SourceRootReader::open(&root)?;
     let options = policy.options;
     let mut builder = policy.walker;
     let effective_workers = effective_scan_workers(limits, control);
@@ -522,6 +691,7 @@ pub fn scan_repo_controlled_with_work(
         true
     });
     builder.build_parallel().run(|| {
+        let mut source_reader = source_reader.reader();
         let root = root.clone();
         let options = options.clone();
         let nodes = Arc::clone(&nodes);
@@ -539,13 +709,7 @@ pub fn scan_repo_controlled_with_work(
             let entry = match result {
                 Ok(entry) => entry,
                 Err(error) => {
-                    push_error(
-                        &errors,
-                        FsError::Io {
-                            path: root.clone(),
-                            source: io::Error::other(error.to_string()),
-                        },
-                    );
+                    push_error(&errors, walk_entry_error(&root, error));
                     return WalkState::Quit;
                 }
             };
@@ -553,7 +717,7 @@ pub fn scan_repo_controlled_with_work(
             if should_skip_path(&root, path, &options) {
                 return skip_entry_state(&entry);
             }
-            match scanned_node(&root, path, &options, &budget) {
+            match scanned_walk_entry(&root, &entry, &options, &budget, &mut source_reader) {
                 Ok(Some(node)) => {
                     if let Ok(mut guard) = nodes.lock() {
                         guard.push(node);
@@ -601,6 +765,185 @@ pub fn scan_repo_controlled_with_work(
     })
 }
 
+/// Adapt a failed walk without inventing an I/O cause at the selected root.
+fn walk_entry_error(root: &Path, error: ignore::Error) -> FsError {
+    let mut context = &error;
+    let mut native_path = None;
+    let kind = loop {
+        match context {
+            ignore::Error::WithPath { path, err } => {
+                native_path = Some(path.as_path());
+                context = err;
+            }
+            ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+                context = err;
+            }
+            ignore::Error::Io(source) if native_path.is_some() => break source.kind(),
+            // A composite or pathless error cannot attest selected-root absence.
+            _ => break io::ErrorKind::Other,
+        }
+    };
+    FsError::Io {
+        path: native_path.unwrap_or(root).to_path_buf(),
+        source: io::Error::new(kind, error),
+    }
+}
+
+#[cfg(test)]
+mod walk_entry_tests {
+    use super::*;
+
+    fn require_cause(error: FsError, expected_path: &Path, kind: io::ErrorKind) -> FsResult<()> {
+        match error {
+            FsError::Io { path, source }
+                if path == expected_path
+                    && source.kind() == kind
+                    && source.get_ref().is_some_and(
+                        <dyn std::error::Error + Send + Sync>::is::<ignore::Error>,
+                    ) =>
+            {
+                Ok(())
+            }
+            error => Err(state_error(
+                expected_path,
+                &format!("walk cause lost: {error:?}"),
+            )),
+        }
+    }
+
+    fn named_error(path: &Path, kind: io::ErrorKind) -> ignore::Error {
+        ignore::Error::WithPath {
+            path: path.to_path_buf(),
+            err: Box::new(ignore::Error::WithDepth {
+                depth: 0,
+                err: Box::new(ignore::Error::Io(kind.into())),
+            }),
+        }
+    }
+
+    #[test]
+    fn walk_errors_preserve_native_paths_and_keep_ambiguous_failures_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let child = root.join("child");
+        for path in [root, child.as_path()] {
+            for kind in [
+                io::ErrorKind::NotFound,
+                io::ErrorKind::NotADirectory,
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::Other,
+            ] {
+                require_cause(walk_entry_error(root, named_error(path, kind)), path, kind)?;
+            }
+        }
+        let nested = ignore::Error::WithPath {
+            path: root.to_path_buf(),
+            err: Box::new(ignore::Error::WithLineNumber {
+                line: 2,
+                err: Box::new(named_error(&child, io::ErrorKind::NotFound)),
+            }),
+        };
+        require_cause(
+            walk_entry_error(root, nested),
+            &child,
+            io::ErrorKind::NotFound,
+        )?;
+        for error in [
+            ignore::Error::Io(io::ErrorKind::NotFound.into()),
+            ignore::Error::Partial(vec![named_error(root, io::ErrorKind::NotFound)]),
+            ignore::Error::Partial(vec![
+                named_error(root, io::ErrorKind::NotFound),
+                named_error(&child, io::ErrorKind::PermissionDenied),
+            ]),
+            ignore::Error::WithPath {
+                path: root.to_path_buf(),
+                err: Box::new(ignore::Error::InvalidDefinition),
+            },
+        ] {
+            require_cause(walk_entry_error(root, error), root, io::ErrorKind::Other)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_walk_retains_root_replacement_causes_after_source_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for temporary_file in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let physical = temp.path().join("physical");
+            let selected = temp.path().join("alias");
+            fs::create_dir(&physical)?;
+            std::os::unix::fs::symlink(&physical, &selected)?;
+            let root = selected.join("selected");
+            let retired = temp.path().join("retired");
+            fs::create_dir(&root)?;
+            fs::write(root.join("source.rs"), "pub fn retained() {}")?;
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+            // Match the scan owner's canonical root, including aliased temporary parents.
+            let root = policy.root.clone();
+            let source_root = SourceRootReader::open(&root)?;
+            fs::rename(&root, &retired)?;
+            if temporary_file {
+                fs::write(&root, "temporary non-directory")?;
+            }
+            let failures = Arc::new(Mutex::new(Vec::new()));
+            let budget = ScanBudget::new(ScanLimits::default(), control.clone());
+            policy.walker.build_parallel().run(|| {
+                let failures = Arc::clone(&failures);
+                let mut reader = source_root.reader();
+                let root = &root;
+                let budget = &budget;
+                let options = &policy.options;
+                Box::new(move |result| {
+                    let failure = match result {
+                        Err(error) => Some(walk_entry_error(root, error)),
+                        Ok(entry) => {
+                            scanned_walk_entry(root, &entry, options, budget, &mut reader).err()
+                        }
+                    };
+                    if let Some(failure) = failure {
+                        push_error(&failures, failure);
+                    }
+                    WalkState::Continue
+                })
+            });
+            let mut failures = failures
+                .lock()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if failures.len() != 1 {
+                return Err(
+                    io::Error::other(format!("expected one root failure: {failures:?}")).into(),
+                );
+            }
+            let error = failures.pop().ok_or("missing traversal failure")?;
+            if temporary_file {
+                if !matches!(error, FsError::RootNotDirectory(ref path) if path == &root) {
+                    return Err(
+                        io::Error::other(format!("lost non-directory root: {error:?}")).into(),
+                    );
+                }
+                fs::remove_file(&root)?;
+            } else {
+                require_cause(error, &root, io::ErrorKind::NotFound)?;
+            }
+            fs::rename(&retired, &root)?;
+            let nodes = scan_repo_controlled(
+                &root,
+                &ScanOptions::default(),
+                ScanLimits::default(),
+                &control,
+            )?;
+            if !nodes.iter().any(|node| node.path == "source.rs") {
+                return Err(io::Error::other("restored root lost its source").into());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Scan one path into a `ProjectAtlas` node when it is indexable.
 ///
 /// # Errors
@@ -644,68 +987,64 @@ pub fn scan_path_with_policy_controlled(
     budget.claim_entry()?;
     let root = &policy.root;
     let options = &policy.options;
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
+    let absolute = policy.absolute_target(path)?;
     if !absolute.exists() {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let symlink_checked_absolute = path_for_symlink_component_check(&absolute)?;
-    if path_has_symlink_component(root, &symlink_checked_absolute)? {
+    if path_has_symlink_component(root, &absolute, control)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let absolute = symlink_checked_absolute
-        .canonicalize()
-        .map_err(|source| FsError::Io {
-            path: symlink_checked_absolute.clone(),
-            source,
-        })?;
-    if !absolute.starts_with(root) {
+    let Some(absolute) = direct_source_path(root, &absolute) else {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
-    }
+    };
     if policy.excludes_path(&absolute)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    let node = scanned_node(root, &absolute, options, &budget)?;
+    let source_reader = SourceRootReader::open(root)?;
+    let node = scanned_node(
+        root,
+        &absolute,
+        options,
+        &budget,
+        &mut source_reader.uncached(),
+    )?;
     control.check(IndexWorkStage::ScanFinalization)?;
     Ok(node)
 }
 
-/// Return a path with a canonical parent but the leaf component preserved.
-fn path_for_symlink_component_check(absolute: &Path) -> FsResult<PathBuf> {
-    if absolute.is_dir() {
-        return absolute.canonicalize().map_err(|source| FsError::Io {
-            path: absolute.to_path_buf(),
-            source,
-        });
+/// Normalize direct in-root components after unresolved symlink inspection.
+fn direct_source_path(root: &Path, absolute: &Path) -> Option<PathBuf> {
+    let relative = absolute.strip_prefix(root).ok()?;
+    let mut direct = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => direct.push(name),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if direct != root => {
+                direct.pop();
+            }
+            _ => return None,
+        }
     }
-    let Some(parent) = absolute.parent() else {
-        return Ok(absolute.to_path_buf());
-    };
-    let parent = parent.canonicalize().map_err(|source| FsError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
-    if let Some(file_name) = absolute.file_name() {
-        Ok(parent.join(file_name))
-    } else {
-        Ok(parent)
-    }
+    Some(direct)
 }
 
 /// Return whether any path component below root is a symlink.
-fn path_has_symlink_component(root: &Path, absolute: &Path) -> FsResult<bool> {
+fn path_has_symlink_component(
+    root: &Path,
+    absolute: &Path,
+    control: &IndexWorkControl,
+) -> FsResult<bool> {
     let Ok(relative) = absolute.strip_prefix(root) else {
         return Ok(true);
     };
     let mut current = root.to_path_buf();
     for component in relative.components() {
+        control.check(IndexWorkStage::SourceMetadata)?;
         current.push(component.as_os_str());
         if fs::symlink_metadata(&current)
             .map_err(|source| FsError::Io {
@@ -1286,12 +1625,50 @@ fn skip_entry_state(entry: &DirEntry) -> WalkState {
     }
 }
 
-/// Convert one walker entry into an indexed node.
+/// Reuse native Windows directory-entry metadata for preliminary file admission.
+///
+/// This is not source evidence: `file_node` still opens the exact no-follow leaf
+/// and uses its opened metadata and bytes. Unix retains fresh path metadata for
+/// its admitted device/inode fence; directories and targeted paths stay unchanged.
+fn scanned_walk_entry(
+    root: &Path,
+    entry: &ignore::DirEntry,
+    options: &ScanOptions,
+    budget: &ScanBudget,
+    source_reader: &mut SourceFileReader<'_>,
+) -> FsResult<Option<Node>> {
+    if entry.depth() == 0
+        && entry.path() == root
+        && entry.file_type().is_some_and(|kind| !kind.is_dir())
+    {
+        return Err(FsError::RootNotDirectory(root.to_path_buf()));
+    }
+    #[cfg(windows)]
+    if !entry.path_is_symlink() && entry.file_type().is_some_and(|kind| kind.is_file()) {
+        budget.control.check(IndexWorkStage::SourceMetadata)?;
+        let metadata = entry
+            .metadata()
+            .map_err(|source| walk_entry_error(entry.path(), source))?;
+        return file_node(
+            root,
+            entry.path(),
+            &metadata,
+            options,
+            budget,
+            source_reader,
+        )
+        .map(Some);
+    }
+    scanned_node(root, entry.path(), options, budget, source_reader)
+}
+
+/// Convert one freshly inspected source path into an indexed node.
 fn scanned_node(
     root: &Path,
     path: &Path,
     options: &ScanOptions,
     budget: &ScanBudget,
+    source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<Option<Node>> {
     budget.control.check(IndexWorkStage::SourceMetadata)?;
     let metadata = fs::symlink_metadata(path).map_err(|source| FsError::Io {
@@ -1305,7 +1682,7 @@ fn scanned_node(
         return folder_node(root, path).map(Some);
     }
     if metadata.is_file() {
-        return file_node(root, path, &metadata, options, budget).map(Some);
+        return file_node(root, path, &metadata, options, budget, source_reader).map(Some);
     }
     Ok(None)
 }
@@ -1405,6 +1782,7 @@ fn file_node(
     metadata: &fs::Metadata,
     options: &ScanOptions,
     budget: &ScanBudget,
+    source_reader: &mut SourceFileReader<'_>,
 ) -> FsResult<Node> {
     let normalized = normalize_repo_path(root, path)?;
     let extension = normalized_extension(path);
@@ -1427,7 +1805,13 @@ fn file_node(
         })?,
         options.admit_optional_languages,
     );
-    let hashed = hash_file(path, budget, preliminary_language.is_none())?;
+    let (hashed, metadata) = hash_file(
+        path,
+        metadata,
+        budget,
+        preliminary_language.is_none(),
+        source_reader,
+    )?;
     let language = if let Some(detected) = preliminary_language {
         Some(detected.language.to_string())
     } else {
@@ -1516,15 +1900,15 @@ struct HashedFile {
 /// Hash a file with BLAKE3 for stale-purpose detection.
 fn hash_file(
     path: &Path,
+    admitted_metadata: &fs::Metadata,
     budget: &ScanBudget,
     retain_content_prefix: bool,
-) -> FsResult<HashedFile> {
+    source_reader: &mut SourceFileReader<'_>,
+) -> FsResult<(HashedFile, fs::Metadata)> {
     budget.control.check(IndexWorkStage::SourceHash)?;
-    let file = fs::File::open(path).map_err(|source| FsError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    hash_reader(path, file, budget, retain_content_prefix)
+    let (file, metadata) = source_reader.open_file(path, admitted_metadata, &budget.control)?;
+    let hashed = hash_reader(path, file, budget, retain_content_prefix)?;
+    Ok((hashed, metadata))
 }
 
 /// Hash every byte from a reader while observing cancellation and deadline state.
@@ -1579,6 +1963,595 @@ mod tests {
     use std::io;
     use std::process::Command;
     use std::time::Instant;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn source_hash_refuses_indirection_substituted_after_metadata() -> Result<(), Box<dyn Error>> {
+        let mut admitted = Vec::new();
+        for ancestor in [false, true] {
+            for target_in_root in [false, true] {
+                for same_file_object in [false, true] {
+                    let temp = tempfile::tempdir()?;
+                    let root = temp.path().join("repo");
+                    let directory = root.join("src");
+                    fs::create_dir_all(&directory)?;
+                    let source = directory.join("source.rs");
+                    let original = b"fn inside_source() {}\n";
+                    fs::write(&source, original)?;
+                    let metadata = fs::symlink_metadata(&source)?;
+                    let source_reader = SourceRootReader::open(&root)?;
+                    let target = if target_in_root {
+                        if ancestor {
+                            root.join("other")
+                        } else {
+                            directory.join("other")
+                        }
+                    } else {
+                        temp.path().join("outside")
+                    };
+                    fs::create_dir(&target)?;
+                    let redirected = b"fn redirected_source() {}\n";
+                    if same_file_object {
+                        fs::hard_link(&source, target.join("source.rs"))?;
+                    } else {
+                        fs::write(target.join("source.rs"), redirected)?;
+                    }
+                    let budget = ScanBudget::new(
+                        ScanLimits::default(),
+                        IndexWorkControl::new(IndexCancellation::new(), None),
+                    );
+                    require(
+                        file_node(
+                            &root,
+                            &source,
+                            &metadata,
+                            &ScanOptions::default(),
+                            &budget,
+                            &mut source_reader.uncached(),
+                        )?
+                        .content_hash
+                            == Some(blake3::hash(original).to_hex().to_string()),
+                        "regular source fixture was not admitted before substitution",
+                    )?;
+                    if ancestor {
+                        fs::rename(&directory, temp.path().join("saved-directory"))?;
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(
+                            if target_in_root {
+                                Path::new("other")
+                            } else {
+                                &target
+                            },
+                            &directory,
+                        )?;
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_dir(
+                            if target_in_root {
+                                Path::new("other")
+                            } else {
+                                &target
+                            },
+                            &directory,
+                        )?;
+                    } else {
+                        fs::rename(&source, temp.path().join("saved.rs"))?;
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink(
+                            if target_in_root {
+                                PathBuf::from("other/source.rs")
+                            } else {
+                                target.join("source.rs")
+                            },
+                            &source,
+                        )?;
+                        #[cfg(windows)]
+                        std::os::windows::fs::symlink_file(
+                            if target_in_root {
+                                PathBuf::from("other/source.rs")
+                            } else {
+                                target.join("source.rs")
+                            },
+                            &source,
+                        )?;
+                    }
+                    if let Ok(node) = file_node(
+                        &root,
+                        &source,
+                        &metadata,
+                        &ScanOptions::default(),
+                        &budget,
+                        &mut source_reader.uncached(),
+                    ) {
+                        admitted.push(format!(
+                        "ancestor={ancestor}, target_in_root={target_in_root}, same_file_object={same_file_object}, redirected_digest={}",
+                        node.content_hash == Some(blake3::hash(redirected).to_hex().to_string())
+                    ));
+                    }
+                }
+            }
+        }
+        if !admitted.is_empty() {
+            return Err(io::Error::other(format!(
+                "source indirection crossed its metadata admission: {admitted:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn targeted_scan_skips_inside_root_symlink_ancestors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let direct = root.join("direct");
+        fs::create_dir_all(&direct)?;
+        fs::write(direct.join("source.rs"), "fn direct_source() {}\n")?;
+        let alias = root.join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&direct, &alias)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&direct, &alias)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
+        for path in [&alias, &alias.join("source.rs")] {
+            require(
+                scan_path_with_policy_controlled(&policy, path, ScanLimits::default(), &control)?
+                    .is_none(),
+                "targeted scan canonicalized a source alias into an admitted direct path",
+            )?;
+        }
+        require(
+            scan_path_with_policy_controlled(
+                &policy,
+                &direct.join("source.rs"),
+                ScanLimits::default(),
+                &control,
+            )?
+            .is_some(),
+            "targeted scan lost the direct source alongside its excluded alias",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn targeted_scan_keeps_selected_alias_and_direct_parent_components()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("nested"))?;
+        fs::write(root.join("source.rs"), "fn admitted_source() {}\n")?;
+        let alias = temp.path().join("selected");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &alias)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&root, &alias)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&alias, &ScanOptions::default(), &control)?;
+        for path in [
+            alias.join("source.rs"),
+            alias.join("nested/../source.rs"),
+            PathBuf::from("nested/../source.rs"),
+            root.canonicalize()?.join("source.rs"),
+        ] {
+            let node =
+                scan_path_with_policy_controlled(&policy, &path, ScanLimits::default(), &control)?;
+            require(
+                node.is_some_and(|node| node.path == "source.rs"),
+                "selected root alias or ordinary parent traversal changed the direct source",
+            )?;
+        }
+        // A symlink followed by .. is still indirection, even if lexical cleanup
+        // would erase the component and land on a permitted source.
+        let indirect = root.join("indirect");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("nested"), &indirect)?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(root.join("nested"), &indirect)?;
+        let indirect_parent = scan_path_with_policy_controlled(
+            &policy,
+            &alias.join("indirect/../source.rs"),
+            ScanLimits::default(),
+            &control,
+        )?;
+        #[cfg(unix)]
+        require(
+            indirect_parent.is_none(),
+            "parent cleanup erased source indirection",
+        )?;
+        #[cfg(windows)]
+        {
+            require(
+                indirect_parent.is_some_and(|node| node.path == "source.rs"),
+                "native Windows parent normalization changed the selected direct source",
+            )?;
+            for path in [
+                alias.join("missing/../source.rs"),
+                PathBuf::from("missing/../source.rs"),
+            ] {
+                let missing_parent = scan_path_with_policy_controlled(
+                    &policy,
+                    &path,
+                    ScanLimits::default(),
+                    &control,
+                )?;
+                require(
+                    missing_parent.is_some_and(|node| node.path == "source.rs"),
+                    "native Windows absolute or relative missing-parent normalization changed the direct source",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture the actual parallel walker's entry before a deliberate source race.
+    fn parallel_source_entry(root: &Path, path: &Path) -> Result<ignore::DirEntry, Box<dyn Error>> {
+        let selected = Arc::new(Mutex::new(None));
+        WalkBuilder::new(root)
+            .threads(1)
+            .follow_links(false)
+            .build_parallel()
+            .run(|| {
+                let selected = Arc::clone(&selected);
+                Box::new(move |result| {
+                    if result.as_ref().is_ok_and(|entry| entry.path() != path) {
+                        return WalkState::Continue;
+                    }
+                    if let Ok(mut selected) = selected.lock() {
+                        *selected = Some(result);
+                    }
+                    WalkState::Quit
+                })
+            });
+        let selected = Arc::try_unwrap(selected)
+            .map_err(|_remaining| io::Error::other("source entry fixture retained a worker"))?
+            .into_inner()?;
+        Ok(selected.ok_or_else(|| io::Error::other("source entry fixture was not visited"))??)
+    }
+
+    #[test]
+    fn source_node_uses_opened_file_metadata_for_modified_content() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = root.join("source.rs");
+        fs::write(&path, b"fn before_edit() {}\n")?;
+        fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000))?;
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let entry = parallel_source_entry(root, &path)?;
+        let edited = b"fn after_edit_with_a_different_size() {}\n";
+        fs::write(&path, edited)?;
+        let opened_metadata = fs::metadata(&path)?;
+        require(
+            original_metadata.modified()? != opened_metadata.modified()?,
+            "source timestamp fixture did not change",
+        )?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let reader = SourceRootReader::open(root)?;
+        let node = file_node(
+            root,
+            &path,
+            &original_metadata,
+            &ScanOptions::default(),
+            &budget,
+            &mut reader.uncached(),
+        )?;
+        let expected_mtime = system_time_to_ns(opened_metadata.modified()?)
+            .map(|value| i64::try_from(value).unwrap_or(i64::MAX));
+        require(
+            node.content_hash == Some(blake3::hash(edited).to_hex().to_string())
+                && node.mtime_ns == expected_mtime,
+            "source node paired edited bytes with pre-open metadata",
+        )?;
+        let walked = scanned_walk_entry(
+            root,
+            &entry,
+            &ScanOptions::default(),
+            &budget,
+            &mut reader.reader(),
+        )?
+        .ok_or_else(|| io::Error::other("ordinary save lost the admitted source entry"))?;
+        require(
+            walked.content_hash == node.content_hash
+                && walked.mtime_ns == expected_mtime
+                && walked.size_bytes == Some(u64::try_from(edited.len())?),
+            "walker metadata replaced opened source bytes, size or timestamp",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_refuses_leaf_aliases_after_admission() -> Result<(), Box<dyn Error>> {
+        for target_in_root in [false, true] {
+            for same_file_object in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("repo");
+                let directory = root.join("src");
+                fs::create_dir_all(&directory)?;
+                let path = directory.join("source.rs");
+                let original = b"fn original_source() {}\n";
+                fs::write(&path, original)?;
+                let target = if target_in_root {
+                    root.join("target.rs")
+                } else {
+                    temp.path().join("outside.rs")
+                };
+                if same_file_object {
+                    fs::hard_link(&path, &target)?;
+                } else {
+                    fs::write(&target, b"fn redirected_source() {}\n")?;
+                }
+                let entry = parallel_source_entry(&root, &path)?;
+                let reader = SourceRootReader::open(&root)?;
+                let mut cursor = reader.reader();
+                let budget = ScanBudget::new(
+                    ScanLimits::default(),
+                    IndexWorkControl::new(IndexCancellation::new(), None),
+                );
+                let options = ScanOptions::default();
+                require(
+                    scanned_walk_entry(&root, &entry, &options, &budget, &mut cursor)?.is_some_and(
+                        |node| {
+                            node.content_hash == Some(blake3::hash(original).to_hex().to_string())
+                        },
+                    ),
+                    "ordinary walker source was not admitted before substitution",
+                )?;
+                fs::rename(&path, directory.join("saved.rs"))?;
+                std::os::windows::fs::symlink_file(&target, &path)?;
+                require(
+                    scanned_node(&root, &path, &options, &budget, &mut reader.uncached())?
+                        .is_none(),
+                    "fresh path control did not classify the substituted leaf alias",
+                )?;
+                require(
+                    scanned_walk_entry(&root, &entry, &options, &budget, &mut cursor).is_err()
+                        && scanned_walk_entry(
+                            &root,
+                            &entry,
+                            &options,
+                            &budget,
+                            &mut reader.reader(),
+                        )
+                        .is_err(),
+                    "stale walker entry followed or silently dropped a substituted leaf alias",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_refuses_missing_or_directory_source() -> Result<(), Box<dyn Error>> {
+        for becomes_directory in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path();
+            let path = root.join("source.rs");
+            fs::write(&path, b"fn removed_source() {}\n")?;
+            let entry = parallel_source_entry(root, &path)?;
+            let reader = SourceRootReader::open(root)?;
+            fs::remove_file(&path)?;
+            require(
+                entry.metadata()?.is_file() && fs::symlink_metadata(&path).is_err(),
+                "Windows walker fixture did not retain independent preliminary metadata",
+            )?;
+            if becomes_directory {
+                fs::create_dir(&path)?;
+            }
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            let result = scanned_walk_entry(
+                root,
+                &entry,
+                &ScanOptions::default(),
+                &budget,
+                &mut reader.reader(),
+            );
+            require(
+                if becomes_directory {
+                    result.is_err()
+                } else {
+                    matches!(result, Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound)
+                },
+                "cached walker metadata admitted a missing or nonregular source",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_walker_entry_freshly_admits_replaced_nonfiles() -> Result<(), Box<dyn Error>> {
+        for was_directory in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("repo");
+            fs::create_dir(&root)?;
+            let path = root.join("source.rs");
+            if was_directory {
+                fs::create_dir(&path)?;
+            } else {
+                let target = temp.path().join("outside.rs");
+                fs::write(&target, b"fn original_alias_target() {}\n")?;
+                std::os::windows::fs::symlink_file(&target, &path)?;
+            }
+            let entry = parallel_source_entry(&root, &path)?;
+            require(
+                if was_directory {
+                    entry.file_type().is_some_and(|kind| kind.is_dir())
+                } else {
+                    entry.path_is_symlink()
+                },
+                "reverse source fixture did not capture its original nonfile classification",
+            )?;
+            let reader = SourceRootReader::open(&root)?;
+            if was_directory {
+                fs::remove_dir(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+            let saved = b"fn freshly_admissible_source() {}\n";
+            fs::write(&path, saved)?;
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            require(
+                scanned_walk_entry(
+                    &root,
+                    &entry,
+                    &ScanOptions::default(),
+                    &budget,
+                    &mut reader.reader(),
+                )?
+                .is_some_and(|node| {
+                    node.content_hash == Some(blake3::hash(saved).to_hex().to_string())
+                        && node.size_bytes == Some(saved.len() as u64)
+                }),
+                "cached nonfile classification hid a newly regular source",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_atomic_replacement_after_metadata_and_accepts_retry()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let path = root.join("source.rs");
+        fs::write(&path, b"fn before_save() {}\n")?;
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let reader = SourceRootReader::open(root)?;
+        let saved = b"fn after_save() {}\n";
+        let pending = root.join("pending.rs");
+        fs::write(&pending, saved)?;
+        fs::rename(&pending, &path)?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        require(
+            matches!(
+                file_node(
+                    root,
+                    &path,
+                    &original_metadata,
+                    &ScanOptions::default(),
+                    &budget,
+                    &mut reader.uncached()
+                ),
+                Err(FsError::Io { .. })
+            ),
+            "source replacement between metadata and open was not refused",
+        )?;
+        require(
+            file_node(
+                root,
+                &path,
+                &fs::symlink_metadata(&path)?,
+                &ScanOptions::default(),
+                &budget,
+                &mut reader.uncached(),
+            )?
+            .content_hash
+                == Some(blake3::hash(saved).to_hex().to_string()),
+            "fresh metadata retry lost the ordinary editor save",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_walker_metadata_from_a_replaced_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let path = root.join("source.rs");
+        let original = b"fn selected_root_source() {}\n";
+        fs::write(&path, original)?;
+        let reader = SourceRootReader::open(&root)?;
+        let budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::new(IndexCancellation::new(), None),
+        );
+        let options = ScanOptions::default();
+        let original_metadata = fs::symlink_metadata(&path)?;
+        let selected = temp.path().join("selected-root");
+        fs::rename(&root, &selected)?;
+        fs::create_dir(&root)?;
+        fs::write(&path, b"fn replacement_root_source() {}\n")?;
+        let replacement_metadata = fs::symlink_metadata(&path)?;
+        // Model the actual path walker seeing replacement B after the source
+        // reader retained selected root A. Refuse before pairing B's metadata
+        // with A's bytes, even if the original pathname is restored afterward.
+        let refused = file_node(
+            &root,
+            &path,
+            &replacement_metadata,
+            &options,
+            &budget,
+            &mut reader.uncached(),
+        );
+        fs::rename(&root, temp.path().join("replacement-root"))?;
+        fs::rename(&selected, &root)?;
+        require(
+            refused.is_err(),
+            "walker metadata from a replacement root labeled selected-root bytes",
+        )?;
+        require(
+            file_node(
+                &root,
+                &path,
+                &original_metadata,
+                &options,
+                &budget,
+                &mut reader.uncached(),
+            )?
+            .content_hash
+                == Some(blake3::hash(original).to_hex().to_string()),
+            "restored selected root lost direct source admission",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_refuses_fifo_substituted_after_metadata() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let source = root.join("source.rs");
+        fs::write(&source, "fn saved() {}\n")?;
+        let metadata = fs::metadata(&source)?;
+        fs::rename(&source, temp.path().join("saved.rs"))?;
+        nix::unistd::mkfifo(
+            &source,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )?;
+        let checked = source.clone();
+        let source_reader = SourceRootReader::open(&root)?;
+        crate::regular_file::verify_fifo_refusal(&source, move || {
+            let budget = ScanBudget::new(
+                ScanLimits::default(),
+                IndexWorkControl::new(IndexCancellation::new(), None),
+            );
+            matches!(
+                file_node(&root, &checked, &metadata, &ScanOptions::default(), &budget, &mut source_reader.uncached()),
+                Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+            )
+        })
+    }
 
     /// Reader that requests cancellation after yielding its first non-empty chunk.
     struct CancelAfterFirstChunk<R> {
@@ -2602,7 +3575,15 @@ mod tests {
                 scan_repo(&selected, &options)? == canonical_nodes,
                 "selected spelling changed canonical source rows",
             )?;
+            let mut batch = policy.batch_matcher(&control);
             for prefix in [&root, &absolute] {
+                require(
+                    !batch.excludes_path(&prefix.join("kept.rs"))?
+                        && batch.excludes_path(&prefix.join("blocked.rs"))?
+                        && batch.excludes_path(&prefix.join("missing.md"))?
+                        && !batch.excludes_path(&prefix.join("absent.rs"))?,
+                    "selected root spelling changed batch policy admission",
+                )?;
                 require(
                     !policy.excludes_path(&prefix.join("kept.rs"))?,
                     "selected root spelling hid an admitted file",

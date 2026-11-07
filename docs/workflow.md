@@ -23,6 +23,13 @@ unavailable. Ordinary file edits use partial SQLite/symbol refresh; directory/ro
 full scan for correctness. For bounded agent refreshes after edits, use `projectatlas watch --once` or MCP
 `atlas_watch_once`.
 
+Continuous watch retries a briefly absent selected source root up to three times,
+waiting the configured interval between attempts under the original refresh budget.
+After replacement, native watch restores recursive coverage and reconciles the full
+source state. Keep the database and configuration outside a root that will be
+replaced. Persistent absence, unrelated I/O failures and identity mismatches remain
+errors; explicit one-shot CLI/MCP refresh retains its normal refusal and retry behavior.
+
 Exact line slices validate the file through the atlas database, then read the current file from disk. Symbol slices
 use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
 symbol-level slices matter.
@@ -224,7 +231,8 @@ RELEASE_VERSION=v0.5.0
 
 ## CI behavior
 
-- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. Tests retain debug assertions and unoptimized code; release profiles, source/test selectors and time budgets remain unchanged.
+- Rust and native platform jobs use limited dev/test debug metadata (`CARGO_PROFILE_DEV_DEBUG=1`, `CARGO_PROFILE_TEST_DEBUG=1`) to bound hosted disk while independent executable copies and release artifacts coexist. This debug-metadata setting retains debug assertions and unoptimized code; it does not change release profiles, source/test selectors or time budgets.
+- Native release packaging allows 90 minutes on Intel Mac and 60 minutes on the other platforms. The retained Intel failure completed a 25m29s shipping build and 23m32s integration-test build, then reached the former one-hour limit while compiling the separate CLI unit-test executable. All optimized builds, tests, independent target trees and shipping-binary digest guards remain required. These construction budgets do not change product deadlines or performance acceptance limits.
 
 - The accepted-base planner owns logical platform and contract selection; the
   current workflow owns supported runner provisioning. CI provisions the

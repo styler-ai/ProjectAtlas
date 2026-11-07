@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "passed": true,
+  "candidate_origin": "local draft; not installed release acceptance",
+  "source_revision": "9845364433aa74e32235def26422e3156bf05419",
+  "source_dirty": true,
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "machine": "x86_64",
+  "python": "3.14.4",
+  "resource_method": "psutil sampled process-tree RSS at 5ms; I/O and allocations unavailable",
+  "telemetry": "enabled",
+  "runtimes": {
+    "baseline": {
+      "version": "0.5.0",
+      "sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485"
+    },
+    "candidate": {
+      "version": "0.5.0",
+      "sha256": "4f09edeb08d5e6e60c082485adfba3bfdf34c87a5b5c22bb6b05d96a75e0086f"
+    }
+  },
+  "baseline_archive": {
+    "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266"
+  },
+  "summary": {
+    "initial": {
+      "baseline": {
+        "median_seconds": 5.1980750000002445,
+        "maximum_sampled_rss_bytes": 176078848,
+        "median_source_bytes_per_second": 144008.88790561212
+      },
+      "candidate": {
+        "median_seconds": 3.8597074860008433,
+        "maximum_sampled_rss_bytes": 175333376,
+        "median_source_bytes_per_second": 193944.49002030835
+      }
+    },
+    "full": {
+      "baseline": {
+        "median_seconds": 6.81526575099997,
+        "maximum_sampled_rss_bytes": 178061312,
+        "median_source_bytes_per_second": 109837.09621156978
+      },
+      "candidate": {
+        "median_seconds": 5.3869630840017635,
+        "maximum_sampled_rss_bytes": 177451008,
+        "median_source_bytes_per_second": 138970.508675525
+      }
+    },
+    "rebuild": {
+      "baseline": {
+        "median_seconds": 6.507319003001612,
+        "maximum_sampled_rss_bytes": 175972352,
+        "median_source_bytes_per_second": 115039.54234527244
+      },
+      "candidate": {
+        "median_seconds": 5.16619049700239,
+        "maximum_sampled_rss_bytes": 175390720,
+        "median_source_bytes_per_second": 144903.48360835013
+      }
+    },
+    "cold_noop": {
+      "baseline": {
+        "median_seconds": 0.04434569399927568,
+        "maximum_sampled_rss_bytes": 20877312,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.04555165949932416,
+        "maximum_sampled_rss_bytes": 19496960,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "sparse": {
+      "baseline": {
+        "median_seconds": 6.498440718998609,
+        "maximum_sampled_rss_bytes": 177078272,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.12491175600007409,
+        "maximum_sampled_rss_bytes": 25550848,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "summary": {
+      "baseline": {
+        "median_seconds": 0.1820734659995651,
+        "maximum_sampled_rss_bytes": 22757376,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.18191636399933486,
+        "maximum_sampled_rss_bytes": 22110208,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "detailed": {
+      "baseline": {
+        "median_seconds": 0.04218432600100641,
+        "maximum_sampled_rss_bytes": 22290432,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.041118859000562225,
+        "maximum_sampled_rss_bytes": 21499904,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "compatible_open": {
+      "baseline": {
+        "median_seconds": 0.04703150400018785,
+        "maximum_sampled_rss_bytes": 20779008,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.0457297560024017,
+        "maximum_sampled_rss_bytes": 20013056,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "large_sparse": {
+      "baseline": {
+        "median_seconds": 15.998171088998788,
+        "maximum_sampled_rss_bytes": 354459648,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 0.17056243799743243,
+        "maximum_sampled_rss_bytes": 27160576,
+        "median_source_bytes_per_second": null
+      }
+    },
+    "dense_sparse": {
+      "baseline": {
+        "median_seconds": 9.265044232000946,
+        "maximum_sampled_rss_bytes": 261898240,
+        "median_source_bytes_per_second": null
+      },
+      "candidate": {
+        "median_seconds": 7.1500957290008955,
+        "maximum_sampled_rss_bytes": 261476352,
+        "median_source_bytes_per_second": null
+      }
+    }
+  },
+  "scope": "Local optimized Linux draft; four-platform installed RC acceptance remains pending.",
+  "raw_sha256": "aef4b27d8f60ee6cd245954ef63ee617dabb049653fad9564c18b843aa26d3c9",
+  "phase_reuse": {
+    "source_run": "budget-comparison-paired",
+    "phases": [
+      "reference",
+      "navigation",
+      "warm"
+    ],
+    "reason": "same exact binaries; these phases are unchanged by the isolated fault-placement correction"
+  },
+  "superseded_phase_reason": "candidate-only zero refusal preceded a timed expanded update; only expanded phase repeated"
+}

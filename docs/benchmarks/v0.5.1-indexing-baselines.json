@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "baseline_version": "0.5.0",
+  "assets": {
+    "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz": "1b20209332de1039719c7dc4e95cf6c2b64c1e2df06e99e3675e5b3b170823fe",
+    "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz": "2cc8ef67bbf2417fbf3f20fcd1a642a18f73767697b08358d42125f13fc5aa35",
+    "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip": "b2fddfa71f7ad73a816fbeb3111101c1a20b25f2286bd418fdbda73448f127c4",
+    "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266"
+  }
+}

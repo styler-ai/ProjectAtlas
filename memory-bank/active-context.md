@@ -1,66 +1,73 @@
-# ACTIVE #738 — proof publication next
+# Active RC1 checkpoint
 
-739/PR745 normally MERGED at8d8e539ec9051128b3a14d710adfca8a2433d4b3; native739
-CLOSED2026-11-03T00:37:34Z. EntiremainTREEequals reviewed138; full4native/source/
-Rust/requiredverify/pr-stateSUCCESS.35securitydispositions remain individually
-source-bound, fresh28native facts/flows/rules/toolregistries+6reports equal;
-nonrequiredCodeQLred disclosed, no suppression/bypass.21threadsresolved.
-Receipt /tmp/projectatlas-739-native-closure.json. No further739productwork.
+## Objective and ownership
 
-Selected .worktrees/issue-738/fix/document-target-boundary-738, acceptedbase8d8.
-Old8814 preserved; dirtymemorybackup /tmp/projectatlas-738-before-accepted-main*
-andstashdcfb2b21606d7011643ca67f0d4306d48adbfb17 retained. Donotblindlypop/drop.
-PrivateAtlasDBpreserved. NoPRyet; remote branchabsent verified. Only1.1 checked;
-2.1/2.2/3.1/allacceptanceUNCHECKED until completeproof/handoff. Primarywrites;
-independentLunaMax readonly reviews explicitcustomRust/cognition/workspace/DB/
-SQLite andaccepted contain-document-policy-reads proposal/design/spec/tasks.
+Continue until v0.5.1-rc1 is published as a non-draft prerelease with Latest=false and independently verified hosted/assets/install proof. Stable v0.5.0 remains Latest; stable publication and milestone closure require later user instruction. ONE issue at a time: #731/PR737 CLOSED; CURRENT #708/PR728; #715 only after708 is normally merged and natively CLOSED. #725 OUT. Fresh native graph confirms eight other RC1 children CLOSED,708 the sole open child, and715 directly blocked by all nine children.708 has no remaining direct blockers.
 
-Acceptedmain alreadyimplements target_prefix_refusal BEFOREpolicy in shared
-inspect_absent_reason, originalcontrol/cachedcancellation andcumulativeprefix
-allowance (5560e43/8f05759 #739). ALLruntime source nowbyte-identicalto8d8;
-DER26/SEM23 retained. No duplicatehelper, gratuitouscounterbump or shippedcode
-change. Reusedstrongerexisting document_policy_probes_admit_prefixes_before_ignore_reads
-unit; droppedold738duplicate. New176lineCLI/MCP/operator-root E2E +nativeCI
-exactsharedunit/E2Eselectors +227caseinventory/currenthash +738map/releasegraph
-union preserve accepted731/739/741. Design clarifies accepted implementation reuse.
+Own implementation checkout `.worktrees/issue-708`, branch `perf/indexing-budgets-708`. Local, remote and GitHub App head **667ce0c136bcd32b72d5a2cc3a1d587305570756**; main/base84a00144bc1f35ab2c6ff4770181ed0a0983d774. PR728 OPEN/nonmerged, issue708 OPEN. Product/spec/docs are committed and pushed; local Memory may be dirty for continuity. Main integration is `.worktrees/v0.5.1` on `release/0.5.1`: preserve THREE parked715files under `openspec/changes/complete-v051-release-acceptance`: design.md,proposal.md,specs/v051-release-acceptance/spec.md. Their frozen hashes are /tmp/projectatlas-708-single-codegen-parked715.json. No708 source copied there. Primary implements; independent readonly reviewer `review_708_measurement_readiness` uses gpt-6-luna Max. No workers.
 
-Localproof:
-- fmt/diffcheck andstrictOpenSpecPASS; plannedIssueOps58399TERMINAL0=4/4/1.
-- 27350 oldportedunitPASS, thenremoved asduplicateofstrongeracceptedunit.
-- 9268TERMINAL0: allfeatures CLI/MCP E2E1PASS +inventory3PASS.
-- 37011TERMINAL101: defaultCLI/MCP E2E1PASS; inventory2FAIL fromselectororder
-  (84vs84), NOTproductdefect. Fixedmanifestorder;94222TERMINAL0 all3PASS.
-- NativeCIselectorregistration reviewedLuna: all4compilejobs, same5minlimit;
-  actualplatformresults pending. Unitselector nowstrongerexistingcase above.
-- 66772: owningdocumentbatch17PASS beforeduplicate removal; onlysubsequent
-  diagnosticrg lookupfailed127becausetestenvPATHomitsrg. No testfailure.
-- 30163TERMINAL0: oldduplicate causalnegative expectedIgnored/OutsideRoot then
-  byte-restored/positivePASS. Supersededby50728TERMINAL0 SAMEcausalproof for
-  retainedexistingunit, negative101 forintendeduncachedboundary, sourcebyte
-  restoredSHA7fb966d3721fe6f87dbba657be168257ee51326a6c3310cd3ba5ab5369e8a885,
-  positive1PASS. /tmp/projectatlas-738-integrated-shared-prefix-causal.json.
-- 62774TERMINAL0: freshstable050badpolicyseeds plain/Git/linked thenall3
-  upgrade-to-current26/fullbuild/convergence/noop/state/syscallPASS;rollback/
-  reupgradePASS. BothGitcasespreservequotedglobal+sharedexcludes (3ignored),
-  outside3/missing1/unsupported1/resolved1; plain7complete typedrows.
-  Identity/approvedpurposes preserved; zero forbiddenpolicyopens. Upgrades
-  parse2sourcefiles forcombinedsemantic/parserchanges; noDER-onlyzero-parse
-  claim. Subsequentno-opparsed0. Reuse739verified25->26doc-onlyrepair evidence
-  honestly forunchangedowner; completefailure/cancel/handoff beforetask2.2.
-  Artifacts /tmp/projectatlas-738-integrated26-{native,upgrade}-proof.json.
-  ExactacceptedreleaseCLI090ad693... reusedwith explicitartifact-binding.json,
-  productionprefixequality; no newperformanceoruniversalavailabilityclaim.
+## Current retained improvement and independent review
 
-Noactivebuild/test now. NEXT normalcleancommit/push, then PRRefs738/current
-review+four-native execution ofexactcase, remainingproof/handoff andtaskprogress.
-Normal sourceRefs integration+same-owneracceptance-onlyPR permittedbyworkflow;
-may useafterfullsourceacceptance toavoid needlesssource reruns onfinalmetadata.
-Do not bypasschecks or invent exact-head-only proof. Native738CLOSED before708.
+Cargo.toml shipping workspace `[profile.release] codegen-units = 1`; no LTO, environment, feature or benchmark-only override. SHA cfd6ce5e1f1cb4d690e488faf737bcd5ad56155c9c6fac8a9c7e461b97683f27. main.rs guards both single/federated detailed callbacks so JSON no longer encodes discarded TOON; SHA c8423add31e2006fa2f0460699fdd41f98c056d1bd4a61ec3daf5db8c17672bb. Schema.rs remains byte-exact a29 SHA0b7cf45eafbe67e3e79f400e447eeb807aed4b83da83cd5f6d285ef8d36d65b6; Cargo.lock unchanged6d66ae5663a0bbb9f43520feb0a7f82729ad160a950157508ca2e4e4bc6aec62; compiler rustc1.98.0/commit88d9e12ae178fab0fb5cc050a94da85685d449ea/LLVM22.1.8.
 
-Atlas050 exact738brief repeatsKNOWN708closure10001/prosefullscan-nextwatch
-contradiction; existing708owner. No init/reset/fullscanmerelyorientation, bounded
-currentownerbytesfallback. Local07b resolutionmarkermistake NEVERpushed; corrected
-fromexplicit8d8 beforetesting. Originalsources/backups retained.
-GoalACTIVE:738 then708/PR728 then715RC1non-draftLatest=false andindependent
-download/install/verify;stable050Latest. Stablepublication/milestonecloseout
-needlateruserinstruction. Preserveintegration715private3specs andallparkedwork.
+Actual ordinary shipping build succeeded in210.50s; `.text`22,148,153→20,265,801bytes (8.50%less). Cache states differ, so no precise build-time regression ratio. Frozen runtime `~/.cache/projectatlas-benchmarks/release-single-codegen-708-a29/candidate-single-codegen`, SHA a5b8250edac2eaae17173814a72dc74d8005cb9a5819be27b22d4bc68849bc0a. This local artifact was built before the bookkeeping commit; exact source/config hashes bind it.
+
+Scoped comparison /tmp/projectatlas-708-release-single-codegen-local-readback.json and original -local-comparison.json:54samples/60attempts/100checksPASS, all source/binary/harness/state preserved. Detailed maxsampledRSS21,032,960→17,698,816B =15.85%less; median43.5413→42.9522ms =1.35%less. Summary median+3.61%; compatible-open median-2.28%. Comparison is guard-only local69c7artifact vs localCGU1a5b8artifact, NOT published0.5.0 or registered acceptance. Raw passed=false intentionally because registered evaluator was not run. Original Linux/Windows misses remain binding.
+
+Release DB allfeatures276PASS/0fail; release CLI allfeatures527PASS/0fail/2existingignored. Logs /tmp/projectatlas-708-release-single-codegen-{db,cli}-release-tests.log. No local Rust/build/test/measurement active after completed push. Actual shipping CLI wire proof /tmp/projectatlas-708-single-codegen-wire-v2-proof.json PASS: singleJSON/TOON byteexact; federation equal except only work.elapsed_ms/work.input.elapsed_ms; actual stdout byte counters include newline; bound32768 and bothstates preserved aftereachcall. First private wire-proof.json FAILED due my stripped-newline oracle; original script/report/output retained unchanged. v2 corrects only that oracle. Gdb selected JSON case proves discardedTOONencoder3calls→0, /tmp/projectatlas-708-navigation-json-toon-{before-json,after-json}.json. Avoided encoding work is proven, independent CPU-time reduction is not.
+
+Independent Luna Max approved exact five-file production/spec/docs hashes, independently recomputed54/60/100, and supports provisional retention/normal publication/native validation ONLY. /tmp/projectatlas-708-single-codegen-source-review.json, publication-inputs.json, quality-checkpoint.json. Initial unpublished d863commit was refused by strict source policy because my Memory contained private paths and canonical agent IDs resembling root paths. Exact private checkpoint archived, Memory made portable, unpublished commit amended to667ce0c; no external history rewrite. Reviewer verified five files byte-unchanged and transferred approval. All original failed pushes/logs retained; no gate bypass.
+
+## Current publication and live hosted gates
+
+LATEST CI FIX REVIEW: independentLunaMax APPROVED exactworkflowSHAf1f2e59716e3c6b68a03efdb02deaf67f5fedf9932216869c73202962198cc6e anddesignSHAbaa621d762edf236d1351b23f4d752a28e4145d7bcd9b60102f879e8c21d10f9 fornormalpublication/native replay ONLY afterBOTHsource42202565053 andparser42202754993 reachterminal andoriginalevidencepreserved. /tmp/projectatlas-708-native-php-steps-source-review.json. No rustsource/profile/runtime/thresholdchange; same3commands/order/conditions/shell/20minuteper-targetbound. SourcepolicylintPASS. FreshnewheadsourceCI/cleanparser/currentreviews/wholematrixremainrequired. Preparinglocalcommit now; DONOTpushbeforeoriginalrunsterminal.
+
+CURRENT NATIVE FINDING: sourceCI42202565053 IntelMacjob127841250450 FAILEDatPHPstep20minute cap, not assertion. Actualsymboltarget debugbuild9m02s thenPHPassertion0.66sPASS; second CLIdebugtesttarget stillcompiling atcombined20min expiry. OriginalauthenticatedlogSHA1a2d008d6ba8c93b2069442acf8f504f671bf7d958dc1ee8ec4f332e712dd96a, /tmp/projectatlas-708-single-codegen-native-intel-failure.json. Remainingnativejobsandparserstillactive; DO NOTpushnewsourceuntiloldsourceCIterminal to preserve outcomes/avoidautocancellation. NOperformancecampaign dispatched. Primary localfix splits three PHPcommands into3ordered steps, eachsame20minute cap, identicalcommands/if/shell/features/flags; allotherworkflowsemantics equal. StaticYAMLproof /tmp/projectatlas-708-native-php-steps-workflow-proof.json; manualbenchmarkpolicy+strictOpenSpecPASS. Currentdirtyownedfiles now.github/workflows/ci.yml+OpenSpecdesign+Memory. Rust/CargoCGU1sourceunchanged. Reviewpacket /tmp/projectatlas-708-native-php-steps-review-input.json. Freeze667conditionalmeasurementapprovals ashistorical; nativefailure blocks dispatch, newCIheadrequiresnewexactgates/controllerbindings. Existing officialoptionalparserproofpolicy invalidatesCIyml changes; do notrelaxthepolicy orreuseoldhandoffwithoutofficialcompatibility.
+
+LATEST SECURITY: PRIMARY INLINE STATIC phase COMPLETE/ENDED on667ce0c. Full currentPRref RESTcollection normalized first:75alerts/75instances/all7analysesexacthead. All75priorclaims/instances/reportedsourcefiles/citedranges independentlybyte-bound (19files/300ranges); productiondelta review confirms no changedsource/control/sink/boundary for these inputs.75not_actionable, no tests/build/apps/repoedits duringphase, none dismissed/suppressed. Full SecurityApp75structuredresults/head/order/verdictreadbackPASS. App1200charclaimed_sinklimit rejected original three repeatedtrace strings; onlydisplay copies summarized identicalstatementcounts40/36/36, fullrawclaimsretained. /tmp/projectatlas-708-single-codegen-security-{triage,reuse-eligibility,reuse-evidence,app-readback}.json. ScopeCURRENT PRref, notallglobalhistorical401openmetadata;326other/defaultbranchalertsnotassessedinthispass. Ninepriorvendorbenchinputsabsentcurrentref, historicalassessmentretained, no claimtheywerefixedbyus. Independent conditionalmeasurementreadiness nowAPPROVED aftermanifestbindingfix; /tmp/projectatlas-708-single-codegen-{measurement-readiness,collector-review}.json. Allnative/source/parser/handoff prerequisites stillbinding, no performancecampaignyet.
+
+LATEST: current667ce0c all7CodeQLanalyses terminalSUCCESS; Codexcode+security bothCOMPLETED (codefalse/false,securitynull/null notabsenceproof). ExistingLuna found privateproducer manifest-integrity gap beforedispatch. Primary fixed exactmanifestSHA+keyset binding;9causal actual-ASTguardcontrolsPASS. ProducerSHA8b0ed0fa43fe8f072712c4b3b0609b915d815a827c0f5974f1a4c51ae776f7ce;manifestSHAfc4a1b6db4bcbaf9f6d83a5f0a9d5404c4860d7a88a2dd69e5b8da72b33cf6c2. Narrowindependentrecheck running; finishbeforeprimaryinline RESTsecurityphase. No performancecampaign dispatched. Source/native/parserproducers remainactive, no localRustjob.
+
+NORMAL push TERMINAL0, /tmp/projectatlas-708-single-codegen-portable-publish.json and -push.log. All mandatory gates passed:1941Rustexecutions/34groups/0fail/12existingignored, full compile/Clippy/doctests/warning-cleanrustdoc/dependency/source/OpenSpec/IssueOps/benchmarkpolicy/realCLIscan+lint. Pinned strictOpenSpec validate and20indexingharness tests alsoPASS. Initial failedpush receipt /tmp/projectatlas-708-single-codegen-publish.json remains unchanged. PR body8472chars updated viaApp and exact head/body/open/nonmerged readbackPASS, accurately separates local results and priora29failures. Final task acceptance remains incomplete.
+
+Fresh exact667ce0c SOURCE CI **42202565053** LIVE. Latest confirmed plan/repository/windows-security-diagnosticsSUCCESS; Rust and allfour native E2E jobs in progress. Original run https://github.com/styler-ai/ProjectAtlas/actions/runs/42202565053. Fresh exacthead PR-state initiallySUCCESS.
+
+CLEAN all-target parser producer **42202754993** dispatched ONCE and identified LIVE; clean_construction=true,target=all, both construct jobsactive. /tmp/projectatlas-708-single-codegen-parser-dispatch.json/.log/.py. Independent construction gate may run alongside source CI; performance dispatch still requires all source/native/parser and review/security prerequisites. Do not redispatch because observation times out. Prepared verifier /tmp/projectatlas-708-single-codegen-parser-verify.py takes actual run ID; NOT RUN until terminalsuccess. It preserves original method, all9jobs/all6Cargo restore-saveSKIPPED/digest/source-lock-toolchain-capability/150grammarprobesPERTARGET/officialhandoff checks, with exactnewhead and separate paths.
+
+CodeQL **42202558866** LIVE: six language analysesSUCCESS, Rust analysis in progress at last observation. Current-head security triage has NOT started; priora29triage is not newhead proof. Thread-aware fetch39358 TERMINAL0:53reviews/38threads/0unresolved; App flatcomments131. Fresh Codexsummary CURRENT667ce0c: codecompletedfalse/false (no findings), securityrunningnull/null (notabsenceproof). /tmp/projectatlas-708-single-codegen-automated-review.json; no duplicate review request posted. Conditional exact-hash newcampaign controller review now running with existingLuna; packet /tmp/projectatlas-708-single-codegen-measurement-readiness-input.json. No producer executed. Finish that independent review BEFORE starting primaryinline static securityphase. Current hosted observer /tmp/projectatlas-708-single-codegen-hosted-status.py queries allthree exactrun IDs, validates head/repository, writes separate current snapshots and retains firstterminal snapshots; each invocation is finite, no observer remainsrunning after session40976 ended0. Call it boundedly to observe real work, not restart it as a producer.
+
+Authoritative machine-readable continuity /tmp/projectatlas-708-windows-drive-guard-continuation.json, current/newshipping fields; older historical fields are head-bound. Refresh after material results. No new packaged-performance campaign dispatched yet.
+
+## Binding prior packaged result and preserved history
+
+Publisheda29b8cc campaign **42175175941** is valid TERMINAL FAILURE:1439/1441checks. Linux360/361, Windows359/360, bothMac360/360. Every original report/package/nestedarchive/executable/baseline identity authenticated; all4data_valid=true/errors[], each120coldrecords+18measuredwarm+20attemptaudit. ONLYmisses: Linux detailedmaxsampledRSS19,501,056→22,749,184B ratio1.1665616467128754; Windows12,001,280→13,266,944B ratio1.1054607508532424,65,536B over1.10limit. Unchanged1.10limits remain binding. Windows oldcoldnoopRSS/warmMCPmisses pass thiscohort; crosshostdifferences do not prove causality. Keep all older failedcohorts. No waiver, rounding, cancellation or unchangedretry.
+
+/tmp/projectatlas-708-windows-drive-guard-performance-intake-summary-v2.json SHA a7384a3fcbb29cd9ad6fe2b7e46d6a95e066a2341f44f55dd131452cafc5d988; -performance-terminal-receipt.json; authenticated cache `~/.cache/projectatlas-rc1/artifacts/paired-performance-42175175941-dispatch-schema-v2`. Current docs preserve previous1ffcampaign file and add docs/benchmarks/v0.5.1-indexing-drive-campaign.json for all a29checks/artifacts/metrics. Benchmark guide includes exactlocalCGUscope, summaryregression, buildcachecaveat and nativeconditions. OpenSpec design records owning mechanism and rejectedtrials. Tasks untouched.
+
+Original acceptanceharness SHA66f2806f3c01375e4965cfc98218fe9e09f7b449b9f0ce3342e2c5c6d0f746cc remainsUNCHANGED. Private v2collector corrects actual nested dispatch-receipt schema, no fabricatedexitcode; originalproducer/receipt/log/scripts byteexact and isolatedv2cache. Approved collectorSHA6003decba900285444ff69c74eba83a83d01bc20f9854073c9aea86e9c91a246; readerSHA2de49208b0cdf781a5100c60befa1c1738cb38b6e68252e31c7a38b9a6f17229;29privatecontrolsPASS. Originalprotocol/order/samples/normaltelemetry/targets unchanged. Reuse method for genuinely new source campaign, bind actualnewIDs, preserve all oldproof.
+
+REJECTED schema-cacheflush:19,536Bpreparedstmtallocationremoved butRSSonly-4096B andlatency+7.29%; fullyrestoredschema/testsa29. REJECTED ThinLTO:.text+3.38%, no runtimemeasurement. Detailed /tmp/projectatlas-708-navigation-statement-cache-rejected-trial-review.json and /tmp/projectatlas-708-release-code-footprint-thin-disposition.json. Do not reintroduce/repeat. ReadonlyGdbpage/stageattribution is qualified: ASLR/faultaround varied; not registeredRSS, executedfunction proof or Windowscause. No settingschanged; perfparanoid4, sudo-n refusedauth. No further privilegedprofilingneeded.
+
+## Native/security contracts and task state
+
+Preserve proven SQLite-owned lazy identitylease and lock-neutral filelocation inspection. Neveropen/close independentUnix databaseFDs; retireinvalidates→rollback→flushstmt/releasecache→idleonlysuccess, cleanupfailure invalidates/closesviaSQLite. SixWALshared/DELETEreserved capture/validate/drop causalcontrols plusaliases/replacements/FIFO/cleanup; registry16+boundedactiveops. Mac exactpathname rustixstatfs avoidswhichdisk0.7regular-fileclose; non-directorymanaged-nameparent rejectedbeforevolumeprobe. Windows freshdrive/rootGUID helper preserves originalinventoryfallback onAPIerror/ReFS, all exactfileresolution/locationchecks and UNC/device/SUBSTdirectory refusals. NewCGU1 changes no security/identity boundary. No ReFS/SMBhardware or SUBSTphysical-rootfixtureclaim.
+
+Prior a29 sourceCI42168054100 all9SUCCESS and cleanparser42169928123 all9SUCCESS; source-nativeproof prefixes /tmp/projectatlas-708-windows-drive-guard-{native-arm-original,native-intel-original,windows-native-guard-evidence,parser-construction-evidence}.json. BothMac18identity+13FS/profile; Windows4namedcontrols/26driveparity/6debugpairs. Helper timings not wholeCLIperformance. Newheadaffectednativeproof required.
+
+Prior a29 primary INLINE STATIC securityphase COMPLETE/ENDED: all7CodeQLanalysesSUCCESS, aggregateFAIL84OPENalerts, none dismissed/suppressed. Whole84normalized before verdicts;84reportedclaims not_actionable,81wholeclaim/rangebyteboundreuse+3freshtraces. Full84SecurityAppreturn/head/count/orderreadbackPASS. /tmp/projectatlas-708-windows-drive-guard-security-triage.json SHA9d8c6c9be89188cf8c62d35e6cd7d33f1cd5d22bba56cb9776c032d454bfd4fa. Notexhaustive/no-vulnerabilityproof. PriorCodexbot6430194260 codecompletedfalse/false, securitycompletednull/null is NOTabsenceproof; prior complete131comments/53reviews/38threads/0unresolved. Reassess actualcurrenthead. Securitytriage must be PRIMARY INLINE, wholeRESTcollectionnormalized first, noagents/runtime/tests/builds/repoedits duringstaticphase; phaseends before anyfix. Loadskill+requiredreferences/policy. Do not launch unaskeddeepreposcan.
+
+OpenSpec accelerate-incremental-refresh/spec-driven,5/8implementationcomplete1.1,2.1,2.2,2.3,2.5;2.4/3.1/3.2+ALL5acceptanceunchecked. Fresh pinned apply/status /tmp/projectatlas-708-single-codegen-openspec-{apply,status}.json; read every concretecontextFile. Whole11requirement/35scenario sourceaudita29 reusablewithinunchangedscope, not numerical/newprofileacceptance. Mainprotectionlast strictverify+pr-state/app15368/enforceadmins/conversationresolution/no bypass; reverifyatmerge.
+
+Userrequested historical Windows watch-once13.2102692→.3520295s =37.53xASFAST/about3653%FASTER, rounded about38xASFAST/about3700%FASTER is in committed docs with exact1024Rust+1MD,oneexportedfnappend,3samples,bothparseone,coldprocess/warmFScacheconditions. Sparse/dense describe fixtures,notflags. Never say97%faster; keep historicalqualification and reconcile finalpackagedclaims beforepublication.
+
+## Next actions and operating constraints
+
+1. Observe existing exactsourceCI/parser/CodeQL runs; inspect completed threadfetch and fresh Appcomments. Resolve all actionable automated/human feedback. AfterCodeQL languageanalysescomplete, normalize actualcompletecurrentheadRESTalerts and perform primaryinline static securitydisposition; retain all findings/proof gaps.
+2. Authenticate nativeoriginals and cleanparserhandoff; no performance dispatch until prerequisitespass. Then independent exactnewhead measurementreadiness and ONE genuinely new unchanged fourplatformcampaign. Reuse accepted protocols/controls and preserve all failures. If miss, investigate owning mechanism without thresholdchange or unchangedretry.
+3. Onlyfullacceptance permits completing2.4/3.1/3.2/fiveorderedreviews, finaldocs/taskmirror/architecture/gates/currentheadreview/protection/linkage, normalmerge/nativeCLOSEDreadback708. ONLYthen715, refreshingintegration whilepreservingparkedfiles, realpublicCLI/MCP/hostinventoryacceptance, RCfreeze and authorizedRCpublication/independenthostedassetsinstallverification. Stable staysLatest.
+
+Source /tmp/projectatlas-rc1-test-env.sh beforeeveryRust/push/measurement; managedPython/Cargo, sharedCARGO_TARGET_DIR=.worktrees/v0.5.1/target,TMPDIR=~/.cache/projectatlas-test-tmp DISK. ONE localRust/build/test/measurementatatime; nonecurrentlyactive. Shippingexact `cargo build --locked -p projectatlas-cli --release`, defaultfeatures,no overrides. BenchmarkPython `~/.cache/projectatlas-benchmarks/measurement-venv/bin/python` withpsutil7.0.0; managedartifactPython lackspsutil. gh `~/.local/share/projectatlas-tools/gh/v2.103.2/bin/gh`, loginfalse, never sandbox_permissions. PinnedOpenSpec `npx --offline --yes --package @fission-ai/openspec@1.16.0 openspec`. Logs ghapi ENDPOINT --allow-escape-sequences; preferAppmetadata/mutations, ghActions/GraphQL. Keep progressvisible<=60s, waits<=60s.
+
+Aftercompaction read COMPLETE installed `<user-home>/.codex/plugins/cache/projectatlas/projectatlas/0.5.0/skills/projectatlas/SKILL.md` beforeAtlas, then own exactrootMemoryREADME/activecontext. Atlasbrief known policy_drift/full/0changes aftercandidatehooks: preserveDB/purposes, boundedcurrent-sourcefallback, no reset/reindex/installerrepair merelyorientation. ReloadcustomRust/cognition/workspace/no-drift; DB/SQLiteforDBchanges. Read skillrefs beforeacting. CurrentgoalACTIVE, not blocked merelynormaljobs/complexity.
+
+Previous full checkpoint archived byte-exact: `<user-home>/.cache/projectatlas-rc1/continuity/issue-708-before-published-single-codegen-20261106T103003Z.md` SHA256 d34ed1397b2514368f8244ceba6ff906444e6d26561b2917e1fcd940a7e9301e.

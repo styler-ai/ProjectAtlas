@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "scope": "Authenticated complete installed development-candidate campaign; not a published RC1 result. All failed checks retained and unwaived.",
+  "workflow_run_id": 42154898568,
+  "run_url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42154898568",
+  "source_revision": "1ff4c1a8e2ae7484bd4cf8e01cd60ef7d8b5b44d",
+  "workflow_conclusion": "failure",
+  "complete": true,
+  "all_platforms_passed": false,
+  "registered_checks": 1441,
+  "passed_checks": 1439,
+  "authenticated_intake_sha256": "19b1fc2c418a09ba5a3a2548a8a9a3dd0111bed62ae65f24e71aa7cb744f243f",
+  "platforms": {
+    "linux-x64-posix": {
+      "report_artifact_id": 13477370024,
+      "report_artifact_sha256": "9a087b20c94c288439e7f5aa4b5bdb6ab3d8d250e9bc16707fa5c36c4a45b33f",
+      "package_artifact_id": 13474758044,
+      "package_artifact_sha256": "a82f2c568db807fe4b952cfd51e0f85e98cc7f9b255c408aa0cbc316a4966f4e",
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "20b8f03e5eee2f76805121d3ad7cf808d2b4fde624d2d5918d9f7908fb9d056a"
+      },
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "8b3c31835a7d7cb8ad9275157a50a1b4ec2d45d8ec341a8bf0825530a54e1199"
+        }
+      },
+      "source_dirty": true,
+      "data_valid": true,
+      "sample_contract_complete": true,
+      "registered_checks": 361,
+      "passed_checks": 361,
+      "targets_passed": true,
+      "failed_checks": [],
+      "cold_noop": {
+        "baseline": {
+          "median_seconds": 0.05362184749998278,
+          "maximum_sampled_rss_bytes": 19922944,
+          "median_source_bytes_per_second": null
+        },
+        "candidate": {
+          "median_seconds": 0.0466648444999862,
+          "maximum_sampled_rss_bytes": 20213760,
+          "median_source_bytes_per_second": null
+        }
+      },
+      "warm_mcp": {
+        "median_seconds": {
+          "baseline": 0.019632202000025245,
+          "candidate": 0.020136428000000706
+        },
+        "rss": "not measured by public MCP route"
+      }
+    },
+    "macos-x64-posix": {
+      "report_artifact_id": 13477009001,
+      "report_artifact_sha256": "2d2a389fda2f455bcfc850ab53f294d40752532cd84d969108b6998d88fc71da",
+      "package_artifact_id": 13477045126,
+      "package_artifact_sha256": "00cc7ee9a7d30b965150f841041c5d0a09f23ee301ea80e879b6d45b300ed24d",
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-apple-darwin.tar.gz",
+        "sha256": "497a962b83ecfffddec10b309003a0c02b0ef8ae3a818771fd64212b7d054dd7"
+      },
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "425f97ab6facb2ea7a2c2f1b0d99c3fd309640eb44a5c47bd4ac9542923fc5d4"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "0a9103c484d29a4632af770460cc0dbc5eb3b500ed0a04a204fd975192b773a1"
+        }
+      },
+      "source_dirty": true,
+      "data_valid": true,
+      "sample_contract_complete": true,
+      "registered_checks": 360,
+      "passed_checks": 360,
+      "targets_passed": true,
+      "failed_checks": [],
+      "cold_noop": {
+        "baseline": {
+          "median_seconds": 0.11989057250002588,
+          "maximum_sampled_rss_bytes": 12599296,
+          "median_source_bytes_per_second": null
+        },
+        "candidate": {
+          "median_seconds": 0.09895016149999947,
+          "maximum_sampled_rss_bytes": 9646080,
+          "median_source_bytes_per_second": null
+        }
+      },
+      "warm_mcp": {
+        "median_seconds": {
+          "baseline": 0.06046260099992651,
+          "candidate": 0.055556115999934264
+        },
+        "rss": "not measured by public MCP route"
+      }
+    },
+    "macos-arm64-posix": {
+      "report_artifact_id": 13477485709,
+      "report_artifact_sha256": "1540418db59d5ec440f1d65cc3918caf23f24102a2a93b3628157e03617d2af3",
+      "package_artifact_id": 13474718848,
+      "package_artifact_sha256": "4c97bd7ba381dda6ecf4e0f0a2c0056738d2f3d6f2bfc2061f4245fdfbba5c77",
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-aarch64-apple-darwin.tar.gz",
+        "sha256": "b860b6d60dbd22b197609e9af847ebd6e7b97f45e88a6657f8615808100a9d22"
+      },
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "0056f59bd1e75b206ec638a0e48ef8ae5db89d3e1daf4b0193e2bebd1d1724be"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "7ae240fe990d865918c1df386032836cd245b297e3536b45827646ff5641fbf5"
+        }
+      },
+      "source_dirty": true,
+      "data_valid": true,
+      "sample_contract_complete": true,
+      "registered_checks": 360,
+      "passed_checks": 360,
+      "targets_passed": true,
+      "failed_checks": [],
+      "cold_noop": {
+        "baseline": {
+          "median_seconds": 0.13879072949998772,
+          "maximum_sampled_rss_bytes": 15859712,
+          "median_source_bytes_per_second": null
+        },
+        "candidate": {
+          "median_seconds": 0.09494891650001591,
+          "maximum_sampled_rss_bytes": 13697024,
+          "median_source_bytes_per_second": null
+        }
+      },
+      "warm_mcp": {
+        "median_seconds": {
+          "baseline": 0.04376529199998913,
+          "candidate": 0.04111808299990116
+        },
+        "rss": "not measured by public MCP route"
+      }
+    },
+    "windows-x64": {
+      "report_artifact_id": 13476003022,
+      "report_artifact_sha256": "a65f0c12f8abd1aaf080d2ab29f1563a4e6787c08bd001ce3a552af031bf5934",
+      "package_artifact_id": 13475850427,
+      "package_artifact_sha256": "89a26c270b310265e787f336d3bf07d95ef0af6d654765680766970ed7be07ad",
+      "candidate_archive": {
+        "name": "projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip",
+        "sha256": "10a88cc0d1423691c592a324f8ab0841f8dc8a73d47e3bb4bbc6610b5f679eee"
+      },
+      "runtimes": {
+        "baseline": {
+          "version": "0.5.0",
+          "sha256": "87ae41df90b35770841ae6ca7e3d88c25ab99f0e0f83c3e3c85a235a63f30ebc"
+        },
+        "candidate": {
+          "version": "0.5.0",
+          "sha256": "b3d6e63f4e5cf6ebeb5a054d96cf4614639e691b439c75308d227d7b673e3426"
+        }
+      },
+      "source_dirty": true,
+      "data_valid": true,
+      "sample_contract_complete": true,
+      "registered_checks": 360,
+      "passed_checks": 358,
+      "targets_passed": false,
+      "failed_checks": [
+        {
+          "name": "cold_noop sampled RSS target",
+          "passed": false
+        },
+        {
+          "name": "warm MCP exact reconciliation latency target",
+          "passed": false
+        }
+      ],
+      "cold_noop": {
+        "baseline": {
+          "median_seconds": 0.0912389999999732,
+          "maximum_sampled_rss_bytes": 11096064,
+          "median_source_bytes_per_second": null
+        },
+        "candidate": {
+          "median_seconds": 0.08955854999999247,
+          "maximum_sampled_rss_bytes": 12259328,
+          "median_source_bytes_per_second": null
+        }
+      },
+      "warm_mcp": {
+        "median_seconds": {
+          "baseline": 0.03983070000003863,
+          "candidate": 0.04383589999997639
+        },
+        "rss": "not measured by public MCP route"
+      }
+    }
+  }
+}
