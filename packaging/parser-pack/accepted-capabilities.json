@@ -18,7 +18,7 @@
   },
   "runtime": {
     "consumer": "projectatlas-parser-worker",
-    "projectatlas_version": "0.5.0",
+    "projectatlas_version": "0.5.1-rc1",
     "tree_sitter_version": "0.26.13",
     "minimum_abi": 13,
     "maximum_abi": 15
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "fad24119d3530999e28f232e3adb4e5c5bf1405429db4fc4c7fe7246693d59bc"
+  "capability_set_digest": "9f3c781d0d9d46b45957694c5c7b32e40b134932f68849757de163f937b4d15c"
 }

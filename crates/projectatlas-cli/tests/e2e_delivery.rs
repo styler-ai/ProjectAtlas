@@ -584,13 +584,18 @@ const CLI_E2E_SOURCE_PATHS: &[&str] = &[
     "crates/projectatlas-cli/tests/e2e_worktrees.rs",
 ];
 
+const NATIVE_PROJECT_STATE_CONTRACTS_PATH: &str =
+    ".github/scripts/native-project-state-contracts.sh";
+
 const CLI_E2E_WORKFLOW_PATHS: &[&str] = &[
     ".github/workflows/ci.yml",
+    NATIVE_PROJECT_STATE_CONTRACTS_PATH,
     RELEASE_WORKFLOW_PATH,
     ".github/workflows/optional-parser-pack.yml",
 ];
 
-const CLI_E2E_SELECTOR_PREFIXES: &[&str] = &["--test e2e", "--test=e2e"];
+const CLI_E2E_SELECTOR_PREFIXES: &[&str] =
+    &["--test e2e", "--test=e2e", "run_lifecycle", "run_worktrees"];
 
 /// Return one `SQLite` sidecar path for exact no-mutation assertions.
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -1619,6 +1624,23 @@ fn cli_e2e_inventory_contract_rejects_source_and_selector_drift() -> Result<(), 
         "workflow selector drift",
     )?;
     fs::write(&ci_path, &ci_source)?;
+
+    let native_path = fixture.path().join(NATIVE_PROJECT_STATE_CONTRACTS_PATH);
+    let native_source = fs::read_to_string(&native_path)?;
+    let weakened_native = native_source.replacen(
+        "run_lifecycle automatic_state_admission_preserves_cli_mcp_navigation",
+        "run_lifecycle omitted_automatic_state_admission",
+        1,
+    );
+    if weakened_native == native_source {
+        return Err(io::Error::other("native selector tamper did not change its owner").into());
+    }
+    fs::write(&native_path, weakened_native)?;
+    require_cli_e2e_contract_rejection(
+        assert_cli_e2e_inventory_contract(fixture.path()),
+        "workflow selector drift",
+    )?;
+    fs::write(&native_path, native_source)?;
 
     let legacy_spaced_selector_source = format!("{ci_source}\n    cargo test --test e2e\n");
     fs::write(&ci_path, legacy_spaced_selector_source)?;
@@ -5157,20 +5179,47 @@ gate_status={gate_status}
         )
         .into());
     }
-    let release_commands = release.replace("\\\n", " ");
-    let packaged_contract_builds = release_commands
-        .lines()
-        .filter(|line| line.contains("cargo test") && line.contains("--no-run"))
-        .collect::<Vec<_>>();
-    if packaged_contract_builds.len() != 2
-        || packaged_contract_builds.iter().any(|line| {
-            !line.contains("cargo test --locked --release --all-features -p projectatlas-cli")
-        })
-    {
-        return Err(io::Error::other(
-            "Unix and Windows packaged contract runners must compile all feature-gated contracts",
-        )
-        .into());
+    for job in ["package-unix", "package-windows"] {
+        let commands = workflow_job_block(&release, job)?.replace("\\\n", " ");
+        let builds = commands
+            .lines()
+            .filter(|line| line.contains("cargo test") && line.contains("--no-run"))
+            .collect::<Vec<_>>();
+        let integration_builds = builds
+            .iter()
+            .filter(|line| line.contains("--test e2e_delivery"))
+            .count();
+        let unit_builds = builds
+            .iter()
+            .filter(|line| {
+                line.contains("--bin projectatlas") && line.contains("--message-format=json")
+            })
+            .count();
+        if builds.len() != 2
+            || integration_builds != 1
+            || unit_builds != 1
+            || builds.iter().any(|line| {
+                !line.contains("cargo test --locked --release --all-features -p projectatlas-cli")
+            })
+        {
+            return Err(io::Error::other(format!(
+                "{job} must compile all feature-gated integration and unit contract owners"
+            ))
+            .into());
+        }
+    }
+    for mode in ["ownership", "macos-volumes"] {
+        let invocation = format!("bash {NATIVE_PROJECT_STATE_CONTRACTS_PATH} {mode}");
+        if !ci.contains(&invocation)
+            || !release.contains(&format!(
+                "{invocation} --contract-bin contract-artifacts/bin"
+            ))
+        {
+            return Err(io::Error::other(format!(
+                "source CI and installed release acceptance must invoke native cohort {mode}"
+            ))
+            .into());
+        }
     }
     let declared_channel = toolchain
         .lines()
