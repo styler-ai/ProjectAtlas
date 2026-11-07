@@ -130,6 +130,13 @@ CLI and MCP SHALL use the explicitly selected project/worktree and its existing 
 - **WHEN** the selected database identity does not match the addressed root or worktree
 - **THEN** refresh refuses before an update and leaves both projects unchanged
 
+#### Scenario: Native root discovery reuses complete admission
+- **WHEN** the storage owner reads a current database's native project root for CLI or MCP discovery
+- **THEN** each native-root read validates the complete schema, current read profile and native root codec in one read-only snapshot without reopening the database to repeat that admission
+- **AND** discovery without explicit configuration uses that native result before requesting a legacy recovery candidate, while explicit configuration and predecessor recovery retain their existing authority checks before derivative filesystem discovery
+- **AND** later schema changes are rechecked and refused when incompatible; the query's independent exact source, root, publication and policy checks remain effective
+- **AND** settings and MCP launch rendering retain their separate selected-root/configuration validation after filesystem configuration discovery rather than caching a root across those boundaries
+
 #### Scenario: Missing index
 - **WHEN** project-local initialized state is absent or a required publication is missing
 - **THEN** refresh returns the applicable typed initialization or refresh guidance without silently replacing state

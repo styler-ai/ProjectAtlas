@@ -17,10 +17,20 @@ use projectatlas_core::normalize_native_path_display;
 
 #[cfg(test)]
 thread_local! {
+    /// Complete schema admissions performed by this synchronous test thread.
+    static SCHEMA_INSPECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     /// Complete owned schema captures performed by this synchronous test thread.
     static SCHEMA_CONTRACT_READS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+}
+
+/// Observe real schema admissions without relying on process-global cache state.
+#[cfg(test)]
+pub(crate) fn schema_inspection_count() -> usize {
+    SCHEMA_INSPECTIONS.with(std::cell::Cell::get)
 }
 
 /// Current `SQLite` schema version supported by this crate.
@@ -2300,6 +2310,31 @@ fn inspect_current(
     Ok(preflight)
 }
 
+/// Read a current native root from the same snapshot that admitted its schema.
+pub(crate) fn read_project_root_identity(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
+    let location = inspect_database_location(path)?;
+    if !location.database_exists {
+        return Ok(None);
+    }
+    let connection = open_read_only_connection(path, &location)?;
+    connection.execute_batch("BEGIN DEFERRED")?;
+    let result = (|| {
+        let preflight = inspect_connection(&connection, None, false)?;
+        if preflight.state != SchemaState::Current {
+            return Ok(None);
+        }
+        verify_current_read_profile(&connection)?;
+        crate::project_identity::load_project_root_identity(&connection)
+    })();
+    match result {
+        Ok(identity) => {
+            connection.execute_batch("ROLLBACK")?;
+            Ok(identity)
+        }
+        Err(error) => Err(rollback_after_error(&connection, error)),
+    }
+}
+
 /// Read the existing project identity without mutating or migrating the database.
 pub(crate) fn read_project_root(path: &Path) -> DbResult<Option<String>> {
     let location = inspect_database_location(path)?;
@@ -2324,6 +2359,8 @@ fn inspect_connection(
     expected_root: Option<&str>,
     run_integrity_check: bool,
 ) -> DbResult<SchemaPreflight> {
+    #[cfg(test)]
+    SCHEMA_INSPECTIONS.with(|count| count.set(count.get().saturating_add(1)));
     if run_integrity_check {
         validate_integrity(connection)?;
     }

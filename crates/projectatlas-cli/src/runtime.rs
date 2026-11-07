@@ -3257,6 +3257,14 @@ pub(crate) fn config_root_mismatch_error(
     ))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Actual legacy-candidate reads performed by this synchronous test thread.
+    static LEGACY_ROOT_CANDIDATE_READS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Resolve a predecessor root only as a read-only discovery candidate.
 ///
 /// Legacy metadata is a display-only recovery hint. The database-owned
@@ -3269,6 +3277,8 @@ fn legacy_project_root_candidate(
     if !db.exists() {
         return Ok(None);
     }
+    #[cfg(test)]
+    LEGACY_ROOT_CANDIDATE_READS.with(|count| count.set(count.get().saturating_add(1)));
     let Some(project_root) = read_legacy_project_root_candidate_read_only(db)? else {
         return Ok(None);
     };
@@ -3325,8 +3335,9 @@ fn resolve_database_project_root(
 ) -> Result<PathBuf, CliError> {
     let admission = preflight_database_discovery(db, config_path, isolated_binding)?;
     let db = admitted_database_path(db, admission.as_ref());
-    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(config_path) = config_path {
+        // Preserve predecessor-authority refusal before configuration discovery.
+        legacy_project_root_candidate(db, admission.as_ref())?;
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
         if let Some(db_root) = project_root_from_db_path(db) {
@@ -3346,7 +3357,7 @@ fn resolve_database_project_root(
     {
         return canonical_source_project_root(project_root.as_path());
     }
-    if let Some(project_root) = legacy_root {
+    if let Some(project_root) = legacy_project_root_candidate(db, admission.as_ref())? {
         return Ok(project_root);
     }
     if let Some(project_root) = project_root_from_db_path(db) {
@@ -6401,8 +6412,9 @@ pub(crate) fn resolved_mcp_config_path(
 ) -> Result<Option<PathBuf>, CliError> {
     let admission = preflight_database_discovery(db, config, true)?;
     let db = admitted_database_path(db, admission.as_ref());
-    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(path) = config {
+        // Preserve predecessor-authority refusal before configuration discovery.
+        legacy_project_root_candidate(db, admission.as_ref())?;
         return Ok(Some(absolute_path(path)?));
     }
     let mut candidate_roots = Vec::new();
@@ -6410,8 +6422,7 @@ pub(crate) fn resolved_mcp_config_path(
         && let Some(project_root) = read_project_root_identity_read_only(db)?
     {
         candidate_roots.push(project_root.into_path());
-    }
-    if let Some(project_root) = legacy_root {
+    } else if let Some(project_root) = legacy_project_root_candidate(db, admission.as_ref())? {
         candidate_roots.push(project_root);
     }
     let absolute_db = absolute_path(db)?;
@@ -10994,6 +11005,63 @@ mod tests {
             &true,
             "replacement control identity rejection",
         )
+    }
+
+    /// Native discovery skips legacy reads while explicit configuration retains its guard.
+    #[test]
+    fn current_root_discovery_skips_legacy_reads_and_keeps_config_guards()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("source");
+        fs::create_dir(&root)?;
+        fs::create_dir(root.join(".projectatlas"))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = canonical_source_project_root(&root)?;
+        let before = LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get);
+        require_eq(
+            &default_cli_project_root(&database, None, false)?,
+            &expected,
+            "current CLI root discovery",
+        )?;
+        require_eq(
+            &default_mcp_project_root(&database, None)?,
+            &expected,
+            "current MCP root discovery",
+        )?;
+        require_eq(
+            &resolved_mcp_config_path(&database, None)?,
+            &None,
+            "current root without configuration",
+        )?;
+        let config = root.join("projectatlas.toml");
+        fs::write(&config, "[project]\nroot = \".\"\n")?;
+        require_eq(
+            &resolved_mcp_config_path(&database, None)?,
+            &Some(absolute_path(&config)?),
+            "current flat configuration discovery",
+        )?;
+        require_eq(
+            &LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get),
+            &before,
+            "current discovery performed an unnecessary legacy read",
+        )?;
+        require_eq(
+            &default_mcp_project_root(&database, Some(&config))?,
+            &expected,
+            "explicit configuration root",
+        )?;
+        require_eq(
+            &resolved_mcp_config_path(&database, Some(&config))?,
+            &Some(absolute_path(&config)?),
+            "explicit configuration selection",
+        )?;
+        require_eq(
+            &LEGACY_ROOT_CANDIDATE_READS.with(std::cell::Cell::get),
+            &before.saturating_add(2),
+            "explicit configuration lost its predecessor-authority checks",
+        )?;
+        Ok(())
     }
 
     #[cfg(windows)]

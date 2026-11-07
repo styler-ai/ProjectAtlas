@@ -16,6 +16,44 @@ The one-shot cost is therefore tied to all entries and source bytes, with sortin
 
 ## Decisions
 
+### Reuse one admitted snapshot for native root discovery
+
+Cold root discovery first asks for a legacy recovery candidate even when the
+database has the current native identity. It then reads the native root through
+compatibility preflight followed by a second read-only open and complete schema
+admission. Normal query admission follows separately. These repeated admissions
+are real work in the pre-service path; local stopped-process observations do not
+establish that they caused the hosted Linux RSS regression.
+
+Resolve the current native root using one storage-owned read-only transaction:
+inspect the complete schema and version, verify the current read profile, and
+decode the native root from that same snapshot. Finish or roll back through the
+existing SQLite owner. Keep all live table, column, foreign-key, index and
+extension checks and the authoritative DDL-derived expected contract. No generated
+schema artifact, new dependency, persistent cache or schema version is needed.
+
+For discovery without an explicit configuration, try the native root first and
+only request a legacy candidate when no current root is available. Explicit
+configuration retains its existing predecessor-authority check before configuration
+discovery. Ambiguous predecessor projections must still fail before their display
+text can become a filesystem path. Missing state, supported predecessor recovery,
+native aliases and current-schema errors retain their existing behavior. The
+query's later exact source, root, publication and policy fences remain required.
+
+The one-admission guarantee applies to each native-root reader invocation.
+Settings and MCP launch rendering retain their separate selected-root/configuration
+validation after filesystem configuration discovery. This slice does not cache a
+root result across those existing validation boundaries or claim one database read
+for an entire rendering operation.
+
+The mechanism is an existing concrete snapshot and ordinary optional-root control
+flow, rather than another schema representation or a retained connection cache.
+Causal admission counters must show one complete inspection per native-root read,
+while a later schema edit is still refused. Reuse the current/legacy/configuration,
+alias, read-profile, mutation and migration controls, then measure the ordinary
+shipping route before retaining a performance claim. This belongs to tasks 2.4,
+3.1 and 3.2; the original installed RSS failure remains unwaived.
+
 ### Construct arguments only for the selected CLI command
 
 The completed four-platform campaign on `242c23c` passed 1,440 of 1,441

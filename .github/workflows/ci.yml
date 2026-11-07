@@ -542,8 +542,14 @@ jobs:
           set -euo pipefail
           cargo test --locked -p projectatlas-fs --lib --all-features
           cargo test --locked -p projectatlas-db --lib --all-features sqlite_profile::tests:: -- --nocapture
+          cargo test --locked -p projectatlas-db --lib --all-features tests::native_root_discovery_admits_one_snapshot_and_rechecks_schema -- --exact --nocapture
           if [[ "$RUNNER_OS" != "Windows" ]]; then
             cargo test --locked -p projectatlas-db --lib --all-features database_file_identity::tests:: -- --nocapture
+          fi
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::current_root_discovery_skips_legacy_reads_and_keeps_config_guards -- --exact --nocapture
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::default_mcp_project_root_recovers_custom_predecessor_candidate -- --exact --nocapture
+            cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::tests::settings_report_preserves_verbatim_native_root_projection -- --exact --nocapture
           fi
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
           cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::

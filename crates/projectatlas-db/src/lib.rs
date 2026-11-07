@@ -6690,18 +6690,7 @@ pub fn preflight_project_binding_read_only(path: &Path, root: &Path) -> DbResult
 /// Returns an error if the database cannot be opened read-only or the identity
 /// row contains an invalid versioned codec payload.
 pub fn read_project_root_identity_read_only(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
-    let location = sqlite_profile::inspect_database_location(path)?;
-    if !location.database_exists {
-        return Ok(None);
-    }
-    let (preflight, _) = schema::inspect_compatibility(path, None)?;
-    if preflight.state != schema::SchemaState::Current {
-        return Ok(None);
-    }
-    let connection = schema::open_current_read_only(path, None)?.0;
-    let identity = project_identity::load_project_root_identity(&connection)?;
-    connection.execute_batch("ROLLBACK")?;
-    Ok(identity)
+    schema::read_project_root_identity(path)
 }
 
 /// Verify the current project database schema, identity, and full integrity read-only.
@@ -10499,6 +10488,49 @@ mod tests {
         if fs::read(&database)? != before {
             return Err(io::Error::other(
                 "malformed project-root identity refusal mutated the database",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Native discovery reuses one complete admission and rechecks changed schema.
+    #[test]
+    fn native_root_discovery_admits_one_snapshot_and_rechecks_schema() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("atlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let expected = CanonicalProjectRoot::from_path(&root)?;
+        let before = schema::schema_inspection_count();
+        let discovered = read_project_root_identity_read_only(&database)?;
+        if discovered != Some(expected) {
+            return Err(
+                io::Error::other("native root discovery returned the wrong identity").into(),
+            );
+        }
+        let inspections = schema::schema_inspection_count().saturating_sub(before);
+        if inspections != 1 {
+            return Err(io::Error::other(format!(
+                "native root discovery repeated full admission: {inspections} inspections"
+            ))
+            .into());
+        }
+
+        Connection::open(&database)?
+            .execute_batch("ALTER TABLE nodes ADD COLUMN unexpected TEXT;")?;
+        let bytes = fs::read(&database)?;
+        let before = schema::schema_inspection_count();
+        if !matches!(
+            read_project_root_identity_read_only(&database),
+            Err(DbError::SchemaShape { .. })
+        ) || schema::schema_inspection_count().saturating_sub(before) != 1
+            || fs::read(&database)? != bytes
+        {
+            return Err(io::Error::other(
+                "native root discovery cached schema facts or changed rejected storage",
             )
             .into());
         }
