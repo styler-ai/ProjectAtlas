@@ -111,6 +111,12 @@ Broader ABAP, COBOL, Fortran, Ruby, and SQL navigation is planned for [0.6.0](ht
 
 [Release notes](docs/v0.5.0-release-notes.md) · [Native packages](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0)
 
+## 0.5.1 release candidate
+
+RC1 brings the indexing and refresh improvements together for installed-product acceptance. See the [candidate notes](docs/v0.5.1-rc1-release-notes.md) and, after publication, [candidate packages](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.1-rc1).
+
+`v0.5.1-rc1` must be published as a prerelease and does not replace the preceding stable GitHub Latest release. The stable installation default remains `v0.5.0`.
+
 ## Install
 
 **Point your coding agent at this repository and ask it to install ProjectAtlas, preferably with the marketplace plugin.**

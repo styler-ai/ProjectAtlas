@@ -6,7 +6,12 @@ Large repositories need the complete indexing and refresh performance work befor
 
 - Establish #715 as the feature-free release owner for `v0.5.1-00`. Every accepted implementation issue has #715 as its sole direct parent and blocks release acceptance.
 - Admit the complete #708 performance work through its updated 0.5.1 specification: initial indexing, full reindexing, one-shot refresh, unchanged projects, large change sets and bounded work budgets.
+- Consume #721 bounded relation defaults and explicit compatibility behavior, plus #722 Python parenthesized-import and semantic-upgrade repair, through their own accepted owners.
+- Consume #731's broader binding repair, #732's accepted dependency remediation, #738's derived document-target admission fix, #739's consistent external Git exclusion policy and #741's automatic project-state admission before SQLite access and generated writes as required RC1 children. Reconcile all confirmed review/self-hosting defects with an accepted implementation owner before publication.
+- Under task 2.2, evaluate the current Dependabot, CodeQL and automated code/security review inventory against supported trust boundaries, recording dispositions and unresolved proof gaps. Scanner leads are not automatically confirmed defects; confirmed defects block RC1 until fixed, reviewed and accepted under their owning child.
+- Under tasks 2.2 and 2.3, construct optimized document contracts before bounded resource execution and retain completed measurement reports after later failures. Preserve the shipping build, execution limits, samples and required selectors; compilation or missing evidence cannot count as product acceptance.
 - Freeze accepted main only after every implementation issue and required review closes. Verify the complete installed command/tool inventory and measured large-project improvements on all supported platforms.
+- Ship guidance for when and why to use the existing commands: restore project/source/architecture context after every compaction, reconcile requirements and freshness, and inspect bounded improvement or dead-code candidates without treating partial static evidence as proof.
 - Use the existing package and release workflow for an RC, remediation and later stable promotion. Verify assets, checksums, installed identities, preserved state and GitHub Latest independently; close the release owner last.
 
 ## Capabilities
@@ -21,13 +26,13 @@ None. Implementation behavior belongs to its accepted child specification.
 
 ## Impact
 
-Release planning, native milestone hierarchy and blockers, the existing release workflow, complete installed CLI/MCP/host acceptance, and the performance measurements supplied by #708. No product code, version bump, dependency or schema change belongs to this planning change.
+Release planning, native milestone hierarchy and blockers, the existing release workflow, complete installed CLI/MCP/host acceptance, shipped agent guidance, and the performance measurements supplied by #708. Product implementation, dependency and schema changes remain with the accepted child owners. After their acceptance, #715 owns the required RC version and packaging metadata through the existing pipeline.
 
 ## Release Scope
 
 #718 is an additional documentation-only child and blocker for accurate protected-branch CI guidance. It changes no runtime behavior or release pipeline.
 
-Planning only. #708 is the required direct child and blocker of #715 for the complete 0.5.1 performance scope. Implementation, measurements and installed acceptance remain pending; scheduling does not authorize publication.
+All nine accepted implementation children are closed. #708 owns the agreed exact-reconciliation performance scope; zero-source-work warm admission is deferred to unscheduled #725. #721 owns bounded relations and #722 the confirmed Python fix. Every child directly blocks #715. Exact candidate freezing, versioned installed acceptance and RC publication remain incomplete. RC publication is authorized for this work; stable promotion requires a later instruction. The separate specification/source traceability verification and purpose-integration work remains with unscheduled RC2 issue #751; this release's guidance does not claim that verification is complete.
 
 ## Non-Goals
 

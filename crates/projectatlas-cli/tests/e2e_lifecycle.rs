@@ -2377,7 +2377,7 @@ fn persistent_mcp_stdin_does_not_block_repository_startup_probes() -> Result<(),
         ))
         .into());
     }
-    session.shutdown()
+    session.shutdown().map(|_report| ())
 }
 
 #[cfg(feature = "optional-parser-supervisor")]
@@ -5643,6 +5643,12 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
         parameters: &Value,
         refused: bool,
     ) -> Result<String, Box<dyn Error>> {
+        let started = Instant::now();
+        support::trace_mcp_test_phase(format_args!(
+            "managed document writer request: adapter={}, tool={tool}, root={}, refused={refused}",
+            if session.is_some() { "mcp" } else { "cli" },
+            root.display()
+        ));
         if let Some(session) = session {
             // Explicit-config cases use a separately bound MCP session and
             // deliberately keep its startup selection. Shared-session calls
@@ -5660,13 +5666,25 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
             // Administrative tools retain their established typed error payload
             // inside a successful MCP transport result. Assert its exact cause
             // below rather than confusing transport status with admission.
-            let text = session.call_tool(tool, parameters)?;
+            let response = session.call_tool(tool, parameters);
+            support::trace_mcp_test_phase(format_args!(
+                "managed document writer response: adapter=mcp, tool={tool}, elapsed_ms={}, transport_ok={}",
+                started.elapsed().as_millis(),
+                response.is_ok()
+            ));
+            let text = response?;
             if !refused && text.starts_with("error:") {
                 return Err(io::Error::other(format!("MCP {tool} failed: {text}")).into());
             }
             return Ok(text);
         }
-        let output = command(executable, root).args(arguments).output()?;
+        let output = command(executable, root).args(arguments).output();
+        support::trace_mcp_test_phase(format_args!(
+            "managed document writer response: adapter=cli, tool={tool}, elapsed_ms={}, spawned={}",
+            started.elapsed().as_millis(),
+            output.is_ok()
+        ));
+        let output = output?;
         if output.status.success() == refused {
             return Err(io::Error::other(format!(
                 "document command {arguments:?} expected refusal={refused}: {} {}",
@@ -5686,12 +5704,19 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
     let executable = mcp_contract_executable();
     let control = temp.path().join("control");
     fs::create_dir(&control)?;
+    support::trace_mcp_test_phase(format_args!(
+        "managed document writer phase: initialize control {}",
+        control.display()
+    ));
     let initialized = command(&executable, &control)
         .args(["init", "--no-scan"])
         .output()?;
     if !initialized.status.success() {
         return Err(io::Error::other(String::from_utf8_lossy(&initialized.stderr)).into());
     }
+    support::trace_mcp_test_phase(format_args!(
+        "managed document writer phase: start shared MCP control session"
+    ));
     let mut session =
         McpContractSession::spawn(&executable, &control, &control.join(DATABASE_PATH))?;
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -8936,25 +8961,290 @@ fn run_mcp_contract_json(
 
 #[test]
 fn mcp_test_shutdown_runs_after_primary_failure_without_hiding_it() -> Result<(), Box<dyn Error>> {
+    // A consumed child can still own a stdout sender blocked on its bounded queue.
+    let (sender, responses) = mpsc::sync_channel::<io::Result<String>>(1);
+    sender.send(Ok("queued response".to_owned()))?;
+    let reader = thread::spawn(move || {
+        drop(sender.send(Ok("blocked response".to_owned())));
+    });
+    let (finished, completion) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        drop(McpContractSession {
+            child: None,
+            stdin: None,
+            responses,
+            stdout_reader: Some(reader),
+            stderr_reader: None,
+            next_request_id: 1,
+        });
+        finished.send(())
+    });
+    completion
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("MCP cleanup retained a blocked response sender: {source}"),
+            )
+        })?;
+    worker
+        .join()
+        .map_err(|_panic| io::Error::other("MCP cleanup worker panicked"))??;
+
     let mut shutdown_attempted = false;
     let result = complete_mcp_test_after_shutdown(
-        Err::<(), Box<dyn Error>>(io::Error::other("primary MCP test failure").into()),
+        Err::<(), Box<dyn Error>>(
+            io::Error::new(io::ErrorKind::TimedOut, "primary MCP test failure").into(),
+        ),
         || {
             shutdown_attempted = true;
-            Err(io::Error::other("secondary MCP shutdown failure").into())
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "secondary MCP shutdown failure").into())
         },
     );
     if !shutdown_attempted {
         return Err(io::Error::other("MCP test shutdown was not attempted").into());
     }
-    match result {
-        Err(error) if error.to_string() == "primary MCP test failure" => Ok(()),
-        Err(error) => Err(io::Error::other(format!(
-            "MCP shutdown hid the primary test failure: {error}"
+    let error = result
+        .err()
+        .ok_or_else(|| io::Error::other("MCP test failure was discarded"))?;
+    if !error.to_string().contains("primary MCP test failure")
+        || !error.to_string().contains("secondary MCP shutdown failure")
+        || error
+            .source()
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .map(io::Error::kind)
+            != Some(io::ErrorKind::TimedOut)
+    {
+        return Err(io::Error::other(format!(
+            "MCP completion lost primary or shutdown evidence: {error}"
         ))
-        .into()),
-        Ok(()) => Err(io::Error::other("MCP test failure was discarded").into()),
+        .into());
     }
+    let status = StdCommand::new(mcp_contract_executable())
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("MCP completion control child did not exit cleanly").into());
+    }
+    let clean_report = || -> Result<support::McpShutdownReport, Box<dyn Error>> {
+        let mut stderr = io::Cursor::new(vec![b'e'; 65_536]);
+        let capture = support::McpStderrCapture::read(&mut stderr)?;
+        if capture.prefix != vec![b'e'; 4_096]
+            || capture.total_bytes != 65_536
+            || stderr.position() != 65_536
+        {
+            return Err(io::Error::other("MCP stderr was not bounded and fully drained").into());
+        }
+        Ok(support::McpShutdownReport {
+            status,
+            stderr: capture,
+        })
+    };
+    if complete_mcp_test_after_shutdown(Ok(7), clean_report)? != 7 {
+        return Err(io::Error::other("MCP completion changed the successful value").into());
+    }
+    let primary = complete_mcp_test_after_shutdown(
+        Err::<(), Box<dyn Error>>(io::Error::new(io::ErrorKind::TimedOut, "only primary").into()),
+        clean_report,
+    )
+    .err()
+    .ok_or_else(|| io::Error::other("MCP completion lost the only primary failure"))?;
+    if primary
+        .source()
+        .and_then(|error| error.downcast_ref::<io::Error>())
+        .map(io::Error::kind)
+        != Some(io::ErrorKind::TimedOut)
+        || !primary.to_string().contains("child_status=")
+        || !primary
+            .to_string()
+            .contains("stderr_bytes=65536, stderr_truncated=true, stderr_prefix=eeee")
+        || primary.to_string().len() > 4_400
+    {
+        return Err(io::Error::other(
+            "MCP completion lost the primary type or clean child evidence",
+        )
+        .into());
+    }
+    let shutdown = complete_mcp_test_after_shutdown(Ok(()), || {
+        Err(io::Error::new(io::ErrorKind::BrokenPipe, "only shutdown").into())
+    })
+    .err()
+    .ok_or_else(|| io::Error::other("MCP completion lost the only shutdown failure"))?;
+    if shutdown.downcast_ref::<io::Error>().map(io::Error::kind) != Some(io::ErrorKind::BrokenPipe)
+    {
+        return Err(io::Error::other("MCP completion changed the shutdown failure type").into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Exercise the actual shutdown/pipe owner after a failed primary request.
+        let mut child = StdCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "printf 'native stderr detail\\n' >&2; printf '%65536s' '' >&2; cat >/dev/null",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdin = child.stdin.take();
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("control stderr was not piped"))?;
+        let (_sender, responses) = mpsc::channel();
+        let session = McpContractSession {
+            child: Some(child),
+            stdin,
+            responses,
+            stdout_reader: None,
+            stderr_reader: Some(thread::spawn(move || {
+                support::McpStderrCapture::read(stderr)
+            })),
+            next_request_id: 1,
+        };
+        let error = complete_mcp_test_after_shutdown(
+            Err::<(), Box<dyn Error>>(
+                io::Error::new(io::ErrorKind::TimedOut, "primary pipe timeout").into(),
+            ),
+            || session.shutdown(),
+        )
+        .err()
+        .ok_or_else(|| io::Error::other("clean pipe shutdown discarded the primary failure"))?;
+        if error
+            .source()
+            .and_then(|source| source.downcast_ref::<io::Error>())
+            .map(io::Error::kind)
+            != Some(io::ErrorKind::TimedOut)
+            || !error.to_string().contains("child_status=exit status: 0")
+            || !error.to_string().contains(
+                "stderr_bytes=65557, stderr_truncated=true, stderr_prefix=native stderr detail",
+            )
+            || error.to_string().len() > 4_400
+        {
+            return Err(io::Error::other(format!(
+                "clean pipe shutdown lost bounded failure evidence: {error}"
+            ))
+            .into());
+        }
+        // A one-shot response failure must also survive both reaped and handed-off cleanup.
+        for refuse_termination in [false, true] {
+            let mut packet = None;
+            let mut handoff = |child, stdout_reader, stderr_reader| {
+                packet = Some(support::McpStdioCleanupPacket {
+                    child,
+                    stdout_reader,
+                    stderr_reader,
+                });
+            };
+            let result = support::run_mcp_stdio_with_env_and_test_delay_and_kill_and_handoff(
+                Path::new("/bin/sh"),
+                Path::new("."),
+                &[
+                    "-c".to_owned(),
+                    "printf 'invalid-response\\n'; cat >/dev/null".to_owned(),
+                ],
+                &[r#"{"id":1,"jsonrpc":"2.0","method":"initialize"}"#],
+                &[],
+                Duration::ZERO,
+                None,
+                true,
+                None,
+                None,
+                &mut |child| {
+                    if refuse_termination {
+                        Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "control refused termination",
+                        ))
+                    } else {
+                        child.kill()
+                    }
+                },
+                Some(&mut handoff),
+            );
+            let handed_off = packet.is_some();
+            if let Some(packet) = packet {
+                support::reap_mcp_stdio_packet(packet)?;
+            }
+            let error = result
+                .err()
+                .ok_or_else(|| io::Error::other("one-shot MCP discarded its invalid response"))?;
+            if error
+                .source()
+                .and_then(|source| source.downcast_ref::<serde_json::Error>())
+                .is_none()
+                || !error.to_string().contains("MCP shutdown also failed:")
+                || !error.to_string().contains("still running at deadline")
+                || handed_off != refuse_termination
+                || (refuse_termination
+                    && !error.to_string().contains("control refused termination"))
+            {
+                return Err(io::Error::other(format!(
+                    "one-shot MCP lost primary/cleanup evidence: {error}"
+                ))
+                .into());
+            }
+        }
+        let host = tempfile::tempdir()?;
+        let directory = host.path().join("host diagnostics with spaces");
+        fs::create_dir(&directory)?;
+        let profiler = host.path().join("profiler with spaces");
+        fs::write(
+            &profiler,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" = 43 ]; then printf 'profiler failure detail\n' >&2; exit 7; fi
+if [ "$1" = 44 ]; then printf '%40000s' '' >"$5"; printf '%8000s' '' >&2; exit 0; fi
+[ "$1" = 42 ] && [ "$2" = 1 ] && [ "$3" = 1 ] && [ "$4" = -file ]
+printf 'bounded profile\n' >"$5"
+printf 'profiler diagnostic detail\n' >&2
+"#,
+        )?;
+        fs::set_permissions(&profiler, fs::Permissions::from_mode(0o700))?;
+        let profile = support::capture_mcp_timeout_profile(&profiler, 42, &directory)?;
+        if !profile.profiler_status.success()
+            || profile.report_prefix != b"bounded profile\n"
+            || profile.profiler_log_prefix != b"profiler diagnostic detail\n"
+        {
+            return Err(io::Error::other(
+                "MCP profiler lost selected paths, argv or captured evidence",
+            )
+            .into());
+        }
+        let failed = support::capture_mcp_timeout_profile(&profiler, 43, &directory)?;
+        if failed.profiler_status.code() != Some(7)
+            || failed.profiler_log_prefix != b"profiler failure detail\n"
+            || fs::read_dir(&directory)?.next().is_some()
+        {
+            return Err(io::Error::other(
+                "MCP profiler lost failure output or retained owned temporary files",
+            )
+            .into());
+        }
+        let clipped = support::capture_mcp_timeout_profile(&profiler, 44, &directory)?;
+        if !clipped.profiler_status.success()
+            || clipped.report_prefix.len() != 32_768
+            || clipped.profiler_log_prefix.len() != 4_096
+            || fs::read_dir(&directory)?.next().is_some()
+        {
+            return Err(io::Error::other(
+                "MCP profiler exceeded its retained prefixes or leaked owned files",
+            )
+            .into());
+        }
+        if !support::capture_mcp_timeout_profile(&profiler, 42, Path::new("relative diagnostics"))
+            .is_err_and(|error| error.kind() == io::ErrorKind::InvalidInput)
+        {
+            return Err(io::Error::other(
+                "MCP profiler accepted an implicit relative diagnostic root",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Persistent real MCP session used by E2E contract clients.
@@ -8963,7 +9253,7 @@ struct McpContractSession {
     stdin: Option<ChildStdin>,
     responses: Receiver<io::Result<String>>,
     stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<support::McpStderrCapture>>>,
     next_request_id: u64,
 }
 
@@ -9026,7 +9316,7 @@ impl McpContractSession {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stdout was not piped"))?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
@@ -9049,11 +9339,7 @@ impl McpContractSession {
                 }
             }
         });
-        let stderr_reader = thread::spawn(move || {
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output)?;
-            Ok(output)
-        });
+        let stderr_reader = thread::spawn(move || support::McpStderrCapture::read(stderr));
         let mut session = Self {
             child: Some(child),
             stdin: Some(stdin),
@@ -9148,6 +9434,9 @@ impl McpContractSession {
             .get("name")
             .and_then(Value::as_str)
             .map_or_else(|| method.to_owned(), |tool| format!("{method} {tool}"));
+        support::trace_mcp_test_phase(format_args!(
+            "MCP contract request flushed: id={request_id}, method={label}"
+        ));
         self.wait_for_response(request_id, &label)
     }
 
@@ -9167,6 +9456,80 @@ impl McpContractSession {
         Ok(request_id)
     }
 
+    /// Observe a failed request without retrying or extending its deadline.
+    // Keep this portable body lint-checked everywhere; only Mac callers invoke it.
+    fn record_request_timeout(&mut self, request_id: u64, method: &str) {
+        let directory = std::env::var_os(support::MCP_DIAGNOSTIC_DIR_ENV).map_or_else(
+            || std::path::PathBuf::from("/private/tmp"),
+            std::path::PathBuf::from,
+        );
+        if let Some(child) = self.child.as_mut() {
+            let before = child.try_wait();
+            drop(writeln!(
+                io::stderr().lock(),
+                "MCP timeout observation: request={request_id}, method={method}, child_pid={}, child_state_before={before:?}, diagnostic_directory={}",
+                child.id(),
+                directory.display()
+            ));
+            if matches!(before, Ok(None)) {
+                match support::capture_mcp_timeout_profile(
+                    Path::new("/usr/bin/sample"),
+                    child.id(),
+                    &directory,
+                ) {
+                    Ok(profile) => drop(writeln!(
+                        io::stderr().lock(),
+                        "MCP timeout profiler: profiler_status={}, report_prefix={}\nprofiler_log_prefix={}\nreport/log prefixes capped at32768/4096bytes; owned host files removed",
+                        profile.profiler_status,
+                        String::from_utf8_lossy(&profile.report_prefix),
+                        String::from_utf8_lossy(&profile.profiler_log_prefix)
+                    )),
+                    Err(source) => drop(writeln!(
+                        io::stderr().lock(),
+                        "MCP timeout profiler unavailable: {source}"
+                    )),
+                }
+            } else {
+                drop(writeln!(
+                    io::stderr().lock(),
+                    "MCP timeout profiler skipped because the child is no longer proven live"
+                ));
+            }
+            let after = child.try_wait();
+            drop(writeln!(
+                io::stderr().lock(),
+                "MCP timeout observation: child_pid={}, child_state_after={after:?}",
+                child.id()
+            ));
+        }
+        // Retain bounded late-arrival evidence while still returning
+        // the original deadline failure and closing this session.
+        for _ in 0..8 {
+            match self.responses.try_recv() {
+                Ok(Ok(line)) => drop(writeln!(
+                    io::stderr().lock(),
+                    "MCP queued frame after deadline: request={request_id}, bytes={}, prefix={}",
+                    line.len(),
+                    String::from_utf8_lossy(&line.as_bytes()[..line.len().min(4_096)])
+                )),
+                Ok(Err(source)) => {
+                    drop(writeln!(
+                        io::stderr().lock(),
+                        "MCP stdout after deadline: {source}"
+                    ));
+                    break;
+                }
+                Err(state) => {
+                    drop(writeln!(
+                        io::stderr().lock(),
+                        "MCP response queue after deadline: {state}"
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
     /// Wait for one previously sent request under the contract deadline.
     fn wait_for_response(
         &mut self,
@@ -9179,6 +9542,8 @@ impl McpContractSession {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                #[cfg(target_os = "macos")]
+                self.record_request_timeout(request_id, method);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("MCP contract request {request_id} for {method} timed out"),
@@ -9191,33 +9556,7 @@ impl McpContractSession {
                 .map_err(|error| {
                     #[cfg(target_os = "macos")]
                     if matches!(error, mpsc::RecvTimeoutError::Timeout) {
-                        // Capture the still-owned child after failure; this neither
-                        // extends the request deadline nor retries the operation.
-                        if let Some(child) = &self.child {
-                            let sampled = (|| -> io::Result<_> {
-                                let mut report = tempfile::NamedTempFile::new()?;
-                                // Bound the report file before sample writes it;
-                                // capture only a bounded prefix and clean up on drop.
-                                let output = Command::new("/bin/sh")
-                                    .args(["-c", "exec >/dev/null 2>&1; ulimit -c 0 && ulimit -f 256 && exec /usr/bin/sample \"$1\" 1 1 -file \"$2\"", "projectatlas-mcp-timeout"])
-                                    .arg(child.id().to_string())
-                                    .arg(report.path())
-                                    .timeout(Duration::from_secs(5))
-                                    .output()?;
-                                let mut bytes = Vec::new();
-                                report.as_file_mut().take(32_768).read_to_end(&mut bytes)?;
-                                Ok((output.status, bytes))
-                            })();
-                            match sampled {
-                                Ok((status, bytes)) => {
-                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample: request={request_id}, method={method}, pid={}, status={status}\n{}\nreport prefix capped at 32768 bytes; owned report removed after capture",
-                                        child.id(), String::from_utf8_lossy(&bytes)));
-                                }
-                                Err(source) => {
-                                    drop(writeln!(io::stderr().lock(), "MCP timeout child sample unavailable: {source}"));
-                                }
-                            }
-                        }
+                        self.record_request_timeout(request_id, method);
                     }
                     let kind = match error {
                         mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
@@ -9336,11 +9675,12 @@ impl McpContractSession {
     }
 
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+    fn shutdown(mut self) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         self.stdin.take();
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(10))
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
+        let mut timed_out = false;
         let status = loop {
             let child = self
                 .child
@@ -9351,16 +9691,13 @@ impl McpContractSession {
             }
             if Instant::now() >= deadline {
                 child.kill()?;
-                let _status = child.wait()?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP contract server did not exit after stdin closed",
-                )
-                .into());
+                timed_out = true;
+                break child.wait()?;
             }
             thread::sleep(Duration::from_millis(25));
         };
         self.child.take();
+        support::disconnect_mcp_test_responses(&mut self.responses);
         if let Some(reader) = self.stdout_reader.take() {
             reader
                 .join()
@@ -9372,14 +9709,17 @@ impl McpContractSession {
             .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
             .join()
             .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr)
-            ))
-            .into());
+        if timed_out || !status.success() {
+            let kind = if timed_out {
+                io::ErrorKind::TimedOut
+            } else {
+                io::ErrorKind::Other
+            };
+            return Err(io::Error::new(kind, format!(
+                "MCP contract server completion: shutdown_timed_out={timed_out}, child_status={status}, {stderr}"
+            )).into());
         }
-        Ok(())
+        Ok(support::McpShutdownReport { status, stderr })
     }
 }
 
@@ -9392,6 +9732,7 @@ impl Drop for McpContractSession {
             drop(child.wait());
         }
         self.child.take();
+        support::disconnect_mcp_test_responses(&mut self.responses);
         if let Some(reader) = self.stdout_reader.take() {
             drop(reader.join());
         }

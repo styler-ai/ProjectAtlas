@@ -63,7 +63,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
+use std::io::{self, BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -1056,7 +1056,7 @@ fn impact_analysis_deadline_and_mcp_cancellation_release_resources() -> Result<(
         .into());
     }
     Connection::open(&database)?.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
-    session.shutdown()
+    session.shutdown().map(|_report| ())
 }
 
 #[test]
@@ -9180,7 +9180,7 @@ struct McpContractSession {
     stdin: Option<ChildStdin>,
     responses: Receiver<io::Result<String>>,
     stdout_reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stderr_reader: Option<thread::JoinHandle<io::Result<support::McpStderrCapture>>>,
     next_request_id: u64,
 }
 
@@ -9243,7 +9243,7 @@ impl McpContractSession {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stdout was not piped"))?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("MCP contract stderr was not piped"))?;
@@ -9266,11 +9266,7 @@ impl McpContractSession {
                 }
             }
         });
-        let stderr_reader = thread::spawn(move || {
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output)?;
-            Ok(output)
-        });
+        let stderr_reader = thread::spawn(move || support::McpStderrCapture::read(stderr));
         let mut session = Self {
             child: Some(child),
             stdin: Some(stdin),
@@ -9525,11 +9521,12 @@ impl McpContractSession {
     }
 
     /// Close stdin and require a clean bounded process exit.
-    fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
+    fn shutdown(mut self) -> Result<support::McpShutdownReport, Box<dyn Error>> {
         self.stdin.take();
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(10))
             .ok_or_else(|| io::Error::other("MCP contract shutdown deadline overflowed"))?;
+        let mut timed_out = false;
         let status = loop {
             let child = self
                 .child
@@ -9540,16 +9537,13 @@ impl McpContractSession {
             }
             if Instant::now() >= deadline {
                 child.kill()?;
-                let _status = child.wait()?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP contract server did not exit after stdin closed",
-                )
-                .into());
+                timed_out = true;
+                break child.wait()?;
             }
             thread::sleep(Duration::from_millis(25));
         };
         self.child.take();
+        support::disconnect_mcp_test_responses(&mut self.responses);
         if let Some(reader) = self.stdout_reader.take() {
             reader
                 .join()
@@ -9561,14 +9555,17 @@ impl McpContractSession {
             .ok_or_else(|| io::Error::other("MCP contract stderr reader was consumed"))?
             .join()
             .map_err(|_panic| io::Error::other("MCP contract stderr reader panicked"))??;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "MCP contract server failed: {}",
-                String::from_utf8_lossy(&stderr)
-            ))
-            .into());
+        if timed_out || !status.success() {
+            let kind = if timed_out {
+                io::ErrorKind::TimedOut
+            } else {
+                io::ErrorKind::Other
+            };
+            return Err(io::Error::new(kind, format!(
+                "MCP contract server completion: shutdown_timed_out={timed_out}, child_status={status}, {stderr}"
+            )).into());
         }
-        Ok(())
+        Ok(support::McpShutdownReport { status, stderr })
     }
 }
 
@@ -9581,6 +9578,7 @@ impl Drop for McpContractSession {
             drop(child.wait());
         }
         self.child.take();
+        support::disconnect_mcp_test_responses(&mut self.responses);
         if let Some(reader) = self.stdout_reader.take() {
             drop(reader.join());
         }

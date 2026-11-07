@@ -33,6 +33,58 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **WHEN** a selected root/database mismatches or initialized state is missing
 - **THEN** the installed candidate returns typed recovery guidance without substituting or resetting a database
 
+#### Scenario: Installer fixtures preserve the operator installation
+- **WHEN** an installer acceptance fixture constructs or runs a native installer child
+- **THEN** its host home, profile, Codex and XDG paths are explicitly bound to fixture-owned state, with controlled per-test overrides retained
+- **AND** missing fixture-home authority is rejected before spawning instead of inheriting the operator home
+- **AND** an older runtime, forwarder and host state outside that fixture remain unchanged while the installer keeps its intentional operator upgrade/quarantine behavior inside the selected test context
+
+#### Scenario: Native MCP acceptance failures retain causal evidence
+- **WHEN** a native MCP acceptance request fails or reaches its existing deadline
+- **THEN** the fixture records adapter/root/phase timing and actual MCP child state separately from the profiler outcome, and retains the typed primary failure alongside clean child completion evidence or any shutdown failure
+- **AND** stderr collection retains a fixed prefix and total/truncation metadata while draining the remaining bytes, bounded diagnostic artifacts use an explicit host directory outside mounted fixture images, queued stdout producers cannot block reader cleanup, and owned diagnostic files are removed
+- **AND** the original request deadline, single attempt and failure outcome remain authoritative; diagnostics do not retry an operation or replace its required acceptance proof
+
+#### Scenario: Native image construction encounters a busy host resource
+- **WHEN** macOS fixture construction exits with status 1 and the exact diagnostic `hdiutil: create failed - Resource busy`
+- **THEN** setup may make at most three construction attempts using fresh private image paths, retaining each attempt's error and requiring verified absence of attachments for every preceding attempt before retrying
+- **AND** an existing output, another error, a mapped image or unverifiable attachment state stops construction without overwriting or forcibly detaching an image
+- **AND** teardown refuses to delete the fixture while any image beneath it remains mapped, including a partial creation without an explicit attachment receipt
+- **AND** all four filesystem variants and both Mac architectures retain their required native checks, original deadlines and one execution per successfully constructed fixture; setup recovery never retries a failed product request or numerical cohort
+
+#### Scenario: Cold document contracts require optimized construction
+- **WHEN** the native document acceptance executable has not been compiled for the required release profile
+- **THEN** CI constructs the locked `e2e_navigation` target with `--no-run` before the existing document resource step, within a separate 60-minute Intel or 30-minute other-platform construction bound
+- **AND** the resource step retains its default shipping build after precompilation, original 30-minute bound, sampler limits, samples and required execution selectors
+- **AND** completed reports survive a later failure, while a successful resource step without its required report fails instead of silently skipping artifact validation
+- **AND** compilation, console medians without complete report identity, and skipped execution do not establish product acceptance
+
+### Requirement: Security and review findings receive current evidence-based disposition
+The release owner SHALL evaluate current dependency, scanner and automated-review findings against exact accepted source and supported trust boundaries before RC1. Confirmed defects and material unresolved proof gaps SHALL block acceptance. Repairs SHALL preserve legitimate product capabilities.
+
+#### Scenario: A finding arrives after dependency remediation is accepted
+- **WHEN** a scanner or self-hosted workflow reports a new potential defect after #732 closes
+- **THEN** task 2.2 evaluates reachability, safeguards, positive workflows and proof gaps without blindly dismissing the lead or treating it as a confirmed vulnerability
+- **AND** a confirmed defect enters its owning RC1 child such as #731, #738, #739 or #741, and publication waits for its independently reviewed, accepted correction and affected installed proof
+
+### Requirement: Shipped guidance explains intent, triggers and evidence limits
+The packaged skill SHALL explain when and why to use the existing command families, require exact-checkout Atlas reorientation after every compaction, and guide bounded source/architecture/specification/freshness reflection during the active task. The short-command reference SHALL retain the corresponding functionality and call-trigger descriptions. Guidance SHALL preserve supported root selection and typed recovery without an automatic full scan or an inferred specification association.
+
+#### Scenario: An agent resumes after compaction
+- **WHEN** project, source-ownership or architecture context needed for the active task has been lost
+- **THEN** the skill directs the agent to read repository continuity instructions, select its own exact checkout and use the existing Atlas startup funnel to recover that context
+- **AND** existing valid project state and authored purposes are preserved, with refresh selected from actual freshness evidence
+
+#### Scenario: An agent reflects before completion
+- **WHEN** a meaningful task boundary, review feedback or completion review prompts reconsideration of obsolete paths, duplication, simpler designs or stale requirements
+- **THEN** the skill uses bounded navigation and current source/caller/export/registry evidence, records uncertainty and keeps improvements within the authorized task
+- **AND** partial graphs, generated purposes, resolved links or zero inbound rows are not treated as proof of dead code or specification conformance
+
+#### Scenario: The reviewed guide reaches an installed candidate
+- **WHEN** native packages and plugin delivery are accepted
+- **THEN** the installed skill and command reference match the reviewed candidate's guidance and version bindings
+- **AND** the separate complete specification/source relation and purpose-integration verification remains outside RC1 under #751
+
 ### Requirement: Performance proof covers the complete indexing topic
 Acceptance SHALL verify #708's preregistered speed, work-count and resource targets using the exact optimized installed candidate with normal telemetry. Initial indexing, full reindexing, cold CLI refresh, warm MCP, no-op, sparse/dense changes and required reconciliation SHALL have distinct measured cases.
 
@@ -46,6 +98,11 @@ The installed candidate SHALL preserve native identity, approved purposes and th
 #### Scenario: Interrupted refresh or upgrade
 - **WHEN** the operation fails or is cancelled at an owning failure boundary
 - **THEN** no partial index or wrong-root state is exposed and recovery preserves authored data
+
+#### Scenario: Confirmed Python fix upgrades an unchanged stable index
+- **WHEN** the exact installed candidate refreshes an unchanged 0.5.0 index containing the confirmed parenthesized Python import reproduction
+- **THEN** both local import targets and supported aliased callers resolve, native identity and approved purpose text/status survive, and the next unchanged refresh does not publish again
+- **AND** predecessor rollback preserves authored state, with required one-time semantic reconciliation measured separately from current-contract opens
 
 ### Requirement: Publication and closure follow verified acceptance
 An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Later authorized stable promotion SHALL repeat exact hosted and installed proof and independently verify assets, checksums, identities, Latest and downstream pins. #715 SHALL close last after every child and stable readback pass.
