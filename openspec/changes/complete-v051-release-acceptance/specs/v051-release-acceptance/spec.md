@@ -45,6 +45,13 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** stderr collection retains a fixed prefix and total/truncation metadata while draining the remaining bytes, bounded diagnostic artifacts use an explicit host directory outside mounted fixture images, queued stdout producers cannot block reader cleanup, and owned diagnostic files are removed
 - **AND** the original request deadline, single attempt and failure outcome remain authoritative; diagnostics do not retry an operation or replace its required acceptance proof
 
+#### Scenario: Native image construction encounters a busy host resource
+- **WHEN** macOS fixture construction exits with status 1 and the exact diagnostic `hdiutil: create failed - Resource busy`
+- **THEN** setup may make at most three construction attempts using fresh private image paths, retaining each attempt's error and requiring verified absence of attachments for every preceding attempt before retrying
+- **AND** an existing output, another error, a mapped image or unverifiable attachment state stops construction without overwriting or forcibly detaching an image
+- **AND** teardown refuses to delete the fixture while any image beneath it remains mapped, including a partial creation without an explicit attachment receipt
+- **AND** all four filesystem variants and both Mac architectures retain their required native checks, original deadlines and one execution per successfully constructed fixture; setup recovery never retries a failed product request or numerical cohort
+
 ### Requirement: Security and review findings receive current evidence-based disposition
 The release owner SHALL evaluate current dependency, scanner and automated-review findings against exact accepted source and supported trust boundaries before RC1. Confirmed defects and material unresolved proof gaps SHALL block acceptance. Repairs SHALL preserve legitimate product capabilities.
 

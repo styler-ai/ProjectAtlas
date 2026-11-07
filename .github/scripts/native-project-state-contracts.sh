@@ -238,6 +238,32 @@ else:
         print("unmounted:" + whole[0])
 PY
 }
+native_image_mappings_absent() {
+  local scope="$1" snapshot
+  shift
+  snapshot="$(mktemp "$fixture/image-state.XXXXXX")" || return
+  hdiutil info -plist > "$snapshot" || return
+  python3 - "$scope" "$snapshot" "$@" <<'PY'
+import os, plistlib, sys
+scope, snapshot, *paths = sys.argv[1:]
+if scope not in ("exact", "tree") or not paths or (scope == "tree" and len(paths) != 1):
+    raise SystemExit("invalid fixture image mapping scope")
+selected = [os.path.realpath(path) for path in paths]
+with open(snapshot, "rb") as stream:
+    images = plistlib.load(stream)["images"]
+if not isinstance(images, list):
+    raise SystemExit("fixture image mappings are not a list")
+for image in images:
+    path = image.get("image-path") if isinstance(image, dict) else None
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise SystemExit("fixture image mapping has no identifiable path")
+    observed = os.path.realpath(path)
+    if (scope == "exact" and observed in selected) or (
+        scope == "tree" and os.path.commonpath([selected[0], observed]) == selected[0]
+    ):
+        raise SystemExit("fixture image remains mapped: " + path)
+PY
+}
 detach_native_volume() {
   local target="$1" elevated="$2" image_path="$3" receipt="$4"
   local state="unknown" device="" attempt admitted=false
@@ -322,21 +348,65 @@ cleanup() {
     detach_native_volume "$volume" false "$image" "$volume_receipt" || return 1
     mounted=false
   fi
+  if [ -e "$fixture/image-creation-refused" ]; then
+    echo "Preserving failed image construction fixture: $fixture" >&2
+    return 1
+  fi
+  # A failed create may never have reached the explicit attach bookkeeping.
+  native_image_mappings_absent tree "$fixture" || return
   rm -rf "$fixture"
 }
 trap cleanup EXIT
 mkdir "$volume"
 create_case_image() {
-  local filesystem="$1"
+  local filesystem="$1" name="$2" requested="$3" attempt output log status
+  local -a attempted_images=()
   # APFSX is diskutil's personality; hdiutil uses this full name.
   if [ "$filesystem" = APFSX ]; then
     filesystem="Case-sensitive APFS"
   fi
-  hdiutil create -size 128m -fs "$filesystem" -volname "$2" -ov "$3"
+  for attempt in 1 2 3; do
+    if [ "$attempt" -gt 1 ]; then
+      if ! native_image_mappings_absent exact "${attempted_images[@]}"; then
+        touch "$fixture/image-creation-refused"
+        return 1
+      fi
+    fi
+    output="$requested"
+    if [ "$attempt" -gt 1 ]; then output="${requested%.dmg}.attempt-$attempt.dmg"; fi
+    if [ -e "$output" ] || [ -L "$output" ]; then
+      echo "Refusing existing native image output: $output" >&2
+      touch "$fixture/image-creation-refused"
+      return 1
+    fi
+    attempted_images+=("$output")
+    log="$(mktemp "$fixture/image-create.XXXXXX")" || return
+    echo "Creating native case image: filesystem=$filesystem path=$output attempt=$attempt/3" >&2
+    if LC_ALL=C hdiutil create -size 128m -fs "$filesystem" -volname "$name" "$output" > "$log" 2>&1; then
+      cat "$log" >&2
+      printf '%s\n' "$output"
+      return 0
+    else
+      status=$?
+    fi
+    cat "$log" >&2
+    # Preserve a post-failure snapshot even when no retry is permitted.
+    if ! native_image_mappings_absent exact "${attempted_images[@]}"; then
+      touch "$fixture/image-creation-refused"
+      return "$status"
+    fi
+    if [ "$status" -ne 1 ] || ! grep -Fxq 'hdiutil: create failed - Resource busy' "$log"; then
+      touch "$fixture/image-creation-refused"
+      return "$status"
+    fi
+    if [ "$attempt" -lt 3 ]; then sleep 2; fi
+  done
+  echo "Native case image construction exhausted three resource-busy attempts" >&2
+  touch "$fixture/image-creation-refused"
+  return 1
 }
 for filesystem in APFS APFSX HFS+ HFSX; do
-  image="$fixture/$filesystem.dmg"
-  create_case_image "$filesystem" ProjectAtlasCase "$image"
+  image="$(create_case_image "$filesystem" ProjectAtlasCase "$fixture/$filesystem.dmg")"
   volume_receipt="$fixture/$filesystem-attach.plist"
   # Track attempted attachments too: a failed attach may be partial.
   mounted=true
@@ -346,8 +416,7 @@ for filesystem in APFS APFSX HFS+ HFSX; do
   if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
     nested_filesystem=APFS
   fi
-  nested_image="$fixture/nested-$filesystem.dmg"
-  create_case_image "$nested_filesystem" ProjectAtlasNested "$nested_image"
+  nested_image="$(create_case_image "$nested_filesystem" ProjectAtlasNested "$fixture/nested-$filesystem.dmg")"
   # The runner's unprivileged mount is refused below another volume.
   # Scope elevation to this disposable image and return its root to
   # the runner before executing any product command.

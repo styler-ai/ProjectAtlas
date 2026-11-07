@@ -9457,11 +9457,12 @@ impl McpContractSession {
     }
 
     /// Observe a failed request without retrying or extending its deadline.
-    #[cfg(target_os = "macos")]
+    // Keep this portable body lint-checked everywhere; only Mac callers invoke it.
     fn record_request_timeout(&mut self, request_id: u64, method: &str) {
-        let directory = std::env::var_os(support::MCP_DIAGNOSTIC_DIR_ENV)
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("/private/tmp"));
+        let directory = std::env::var_os(support::MCP_DIAGNOSTIC_DIR_ENV).map_or_else(
+            || std::path::PathBuf::from("/private/tmp"),
+            std::path::PathBuf::from,
+        );
         if let Some(child) = self.child.as_mut() {
             let before = child.try_wait();
             drop(writeln!(
