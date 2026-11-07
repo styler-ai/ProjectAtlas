@@ -1221,6 +1221,17 @@ the already-required shipping release dependencies. Retain separate native log
 artifacts for both profiles; preserve the exact test and its source, policy,
 snapshot, publication and observer assertions.
 
+Construct the separate optimized CLI unit-test executable in an explicit
+`cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run`
+step before executing that proof. Shipping dependency reuse does not eliminate
+this executable's code generation and linking: source run 42334409701 exhausted
+the former combined ten-minute step on Intel while still compiling, before any
+test assertion. Allow that construction step 30 minutes only for `macos-x64`,
+retaining ten minutes elsewhere. Keep the exact diagnostic execution command,
+its ten-minute deadline, default features, ordinary release profile, assertions
+and artifact upload. Preserve the failed original and require fresh native proof;
+this changes neither product deadlines nor installed performance acceptance.
+
 The test warms one registry before five repeated admissions on its 1,024 generated
 one-function sources plus the observer helper's source fixture. It attributes
 inclusive owner durations and work counts;

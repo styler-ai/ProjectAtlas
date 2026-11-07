@@ -6715,6 +6715,91 @@ exit 0
 fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root()?;
     let ci = fs::read_to_string(workspace_root.join(".github/workflows/ci.yml"))?;
+    // Construct the independent unit-test executable before its execution budget.
+    let validate_current_read = |workflow: &str| -> Result<(), Box<dyn Error>> {
+        let build = workflow_job_step(
+            workflow,
+            "e2e-smoke",
+            "Compile optimized native current-read proof",
+        )?;
+        let execute = workflow_job_step(
+            workflow,
+            "e2e-smoke",
+            "Optimized native current-read stage attribution",
+        )?;
+        let condition = "contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')";
+        let command = "cargo test --release --locked -p projectatlas-cli --bin projectatlas";
+        if build["if"].as_str() != Some(condition)
+            || execute["if"].as_str() != Some(condition)
+            || build["shell"].as_str() != Some("bash")
+            || execute["shell"].as_str() != Some("bash")
+            || (build["continue-on-error"] != Yaml::BadValue
+                && build["continue-on-error"] != Yaml::Boolean(false))
+            || (execute["continue-on-error"] != Yaml::BadValue
+                && execute["continue-on-error"] != Yaml::Boolean(false))
+            || build["timeout-minutes"].as_str()
+                != Some("${{ matrix.label == 'macos-x64' && 30 || 10 }}")
+            || execute["timeout-minutes"].as_i64() != Some(10)
+            || build["run"].as_str().map(str::trim)
+                != Some(format!("{command} --no-run").as_str())
+            || execute["run"].as_str().map(str::trim)
+                != Some(format!("set -euo pipefail\n{command} runtime::source_observation::tests::native_current_read_preserves_publication_with_stage_attribution -- --exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\"").as_str())
+        {
+            return Err(io::Error::other("current-read construction and execution contracts drifted").into());
+        }
+        let mut previous = None;
+        for name in [
+            "Document resource proof",
+            "Compile optimized native current-read proof",
+            "Optimized native current-read stage attribution",
+            "Upload optimized native current-read stage attribution",
+        ] {
+            let position = workflow
+                .find(&format!("      - name: {name}\n"))
+                .ok_or_else(|| io::Error::other("current-read proof stage missing"))?;
+            if previous.is_some_and(|before| position <= before) {
+                return Err(io::Error::other("current-read proof stages reordered").into());
+            }
+            previous = Some(position);
+        }
+        Ok(())
+    };
+    validate_current_read(&ci)?;
+    for (before, after) in [
+        (
+            "${{ matrix.label == 'macos-x64' && 30 || 10 }}",
+            "${{ matrix.label == 'macos-arm64' && 30 || 10 }}",
+        ),
+        ("${{ matrix.label == 'macos-x64' && 30 || 10 }}", "30"),
+        (
+            "      - name: Compile optimized native current-read proof\n",
+            "      - name: Compile optimized native current-read proof\n        continue-on-error: true\n",
+        ),
+        (
+            "      - name: Optimized native current-read stage attribution\n",
+            "      - name: Optimized native current-read stage attribution\n        continue-on-error: true\n",
+        ),
+        (
+            "cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run",
+            "cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run || true",
+        ),
+        (
+            "# This test-only owner profile is diagnostic, not installed acceptance.\n        timeout-minutes: 10",
+            "# This test-only owner profile is diagnostic, not installed acceptance.\n        timeout-minutes: 30",
+        ),
+        (
+            "--exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\"",
+            "--exact --nocapture 2>&1 | tee \"$RUNNER_TEMP/native-current-read-optimized-attribution.log\" || true",
+        ),
+    ] {
+        let changed = ci.replacen(before, after, 1);
+        if changed == ci || validate_current_read(&changed).is_ok() {
+            return Err(io::Error::other(format!(
+                "current-read weakened construction proof accepted: {before:?}"
+            ))
+            .into());
+        }
+    }
     let planner = fs::read_to_string(workspace_root.join(".github/scripts/affected-ci-proof.py"))?;
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [

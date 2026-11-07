@@ -925,9 +925,17 @@ jobs:
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture
           cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture
 
-      - name: Optimized native current-read stage attribution
+      - name: Compile optimized native current-read proof
         if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         # Reuse the preceding shipping/default-feature release dependencies.
+        # The separate unit-test executable still requires code generation/linking.
+        # Keep Intel construction outside the unchanged execution deadline.
+        timeout-minutes: ${{ matrix.label == 'macos-x64' && 30 || 10 }}
+        shell: bash
+        run: cargo test --release --locked -p projectatlas-cli --bin projectatlas --no-run
+
+      - name: Optimized native current-read stage attribution
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         # This test-only owner profile is diagnostic, not installed acceptance.
         timeout-minutes: 10
         shell: bash
