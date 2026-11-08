@@ -26,6 +26,68 @@ Run the existing RC-first process with independently verified tag/head, non-draf
 
 Commit identity records provenance; it is not by itself a reason to repeat expensive proof. Reuse passed evidence only when its behavior-relevant source, dependencies, lockfile, toolchain, shipping profile, workflow, configuration, platform and artifact identities still match. New candidate versions, packaging or guidance require their affected construction and validation, including exact final installed identities. Unknown input changes fail closed. Preserve the preregistered performance harness, targets, samples and original failures; do not repeat an unchanged numerical cohort merely to obtain a passing result.
 
+### Preserve exact Windows shipping identity across constructions
+
+The current package diagnostic reproduces a Windows identity gap with the same
+hosted image, Rust/Cargo, lockfile and ordinary shipping command. The two
+59,160,576-byte executables differ in 28 bytes: the COFF timestamp, timestamps in
+three debug-directory entries and the CodeView/PDB GUID. Every other image byte
+and all other package members match. This is build-metadata nondeterminism, not
+evidence of a runtime performance regression. The original packages, full hashes
+and reports remain authoritative historical observations.
+
+The existing exact executable SHA-and-size rule remains unchanged. Do not mask
+fields for acceptance, rewrite an executable after linking, replace its identity
+with a section hash, or infer that a passing native job repairs numerical
+provenance. Final publication rebuilds the runtime, so another numerical run alone
+cannot resolve a build that changes identity again before shipping.
+
+Use Cargo's normal Windows x64 MSVC target configuration for reproducible linker
+output (`/Brepro`), rather than an environment or benchmark-only profile override.
+Keep the existing default features, optimization, LTO and code-generation settings,
+normal debug/installer behavior, target matrix and all native gates. Other targets
+must retain their current compiler arguments. The guarantee is for the supported
+shipping executable under matching declared inputs; it does not promise that
+arbitrary external toolchains, unsupported targets or every native grammar DLL
+have globally reproducible output. Parser packs retain their separate authenticated
+single-producer handoff and worker/lifecycle proof.
+
+In the existing Windows package build, construct the normal optimized executable
+twice in separate fresh Cargo target trees and require complete executable SHA and
+size equality before packaging. Record both identities and retain differing bytes
+on failure. The second construction must compile independently, rather than copy
+a cached executable or silently reuse the first target directory. Preserve the
+job's existing construction bound, installed tests, authoritative packaged digest,
+independent contract target and all four native platforms. The corrected real
+Windows route is required; configuration text or synthetic matching files alone
+cannot establish reproducibility.
+
+Treat the changed Windows link configuration as an affected measurement-owning
+build input. Before dispatch, preregister the existing full Windows campaign with
+its original baseline, samples, targets and controls, including semantic upgrade.
+Its exact measured executable must match final publication. Do not repeat the
+unchanged other-platform numerical cohorts: reuse them only after their own
+complete source/build/measurement-input and fresh package-byte reconciliation.
+Retain the original Windows report rather than relabeling it as a pass for a
+different hash. All four current native installed gates remain mandatory.
+
+### Keep supplemental attribution within its producing campaign
+
+The ARM semantic-upgrade diagnostic passed its installed product contracts and
+all scoped measurements, then the unconditional supplemental navigation profiler
+rejected the absence of detailed-navigation samples. That profiler intentionally
+requires nine detailed samples per runtime plus the full campaign's navigation
+fixtures. The new semantic-only scope does not produce them.
+
+Admit that supplemental execution and its artifact upload only for the existing
+explicit full-campaign route, retaining the current platform selection, timeout,
+single execution and report-integrity checks. Semantic-upgrade execution continues
+to require its own complete parsing, graph, latency/RSS, identity, purpose, no-op
+and rollback proof; it does not manufacture full-navigation samples or silently
+claim profiler acceptance. Keep the profiler's rejection of an incomplete full
+report and retain the original failed workflow separately from its valid scoped
+report. Prove both scope branches causally without repeating unchanged samples.
+
 ### Preserve version-bound capability provenance
 
 The registry deliberately binds ProjectAtlas-owned parser provenance to the Cargo package version. Follow its existing release policy: preserve all historical seals, advance the accepted capability-set version from 19 to 20 for `0.5.1-rc1`, and generate the current seal and language documentation from the registry. Regenerate the parser accepted-capability manifest and checksum through its existing generator. Retain grammar membership, capability strength, detector and semantic-provider policy, upstream grammar/license/source/ABI inputs and fixture corpus; derived catalog and manifest digests change with the exact registry identity. Verify normal unchanged-index reconciliation and authored-state preservation through the existing installed upgrade and lifecycle proof rather than rewriting an older seal or bypassing digest checks.

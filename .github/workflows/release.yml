@@ -441,7 +441,7 @@ jobs:
     name: package windows-x64
     needs: verify
     runs-on: windows-latest
-    # Allow both independent optimized trees: shipping runtime and test contracts.
+    # Keep shipping, independent reproducibility, and contract construction bounded.
     timeout-minutes: 60
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
@@ -460,7 +460,19 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cargo build --locked -p projectatlas-cli --release
+        run: |
+          & ./.github/scripts/verify-windows-shipping-reproducibility.ps1 `
+            -FirstTarget (Join-Path $env:GITHUB_WORKSPACE "target") `
+            -SecondTarget (Join-Path $env:RUNNER_TEMP "projectatlas-shipping-repro-target") `
+            -ProofRoot (Join-Path $env:RUNNER_TEMP "projectatlas-shipping-repro-proof")
+
+      - name: Upload Windows shipping reproducibility proof
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-shipping-reproducibility
+          path: ${{ runner.temp }}/projectatlas-shipping-repro-proof/
+          if-no-files-found: warn
 
       - name: Build packaged contract runner
         shell: pwsh
@@ -1126,7 +1138,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Supplemental native navigation resource attribution
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && inputs.indexing_performance_scope == 'full' && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         timeout-minutes: 5
         shell: bash
         run: |
@@ -1142,7 +1154,7 @@ jobs:
             --output-root "$RUNNER_TEMP/projectatlas-indexing-navigation-resources"
 
       - name: Upload supplemental native navigation resources
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && inputs.indexing_performance_scope == 'full' && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: indexing-navigation-resources-${{ matrix.label }}
