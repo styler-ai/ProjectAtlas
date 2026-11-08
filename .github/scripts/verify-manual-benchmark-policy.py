@@ -37,6 +37,25 @@ def indexing_platform_guard(*, windows: bool = False) -> str:
             f"inputs.indexing_performance_platform == {target})")
 
 
+def indexing_diagnostic_guard(*, supplemental: bool, windows: bool = False) -> str:
+    """Keep manual scope and platform admission shared by execution and upload."""
+    conditions = "always() && " if supplemental else ""
+    conditions += "inputs.prepublish_only && inputs.run_indexing_performance"
+    if supplemental:
+        conditions += " && inputs.indexing_performance_scope == 'full' && matrix.label == 'macos-arm64-posix'"
+    return "        if: ${{ " + conditions + " && " + indexing_platform_guard(windows=windows) + " }}"
+
+
+def assert_supplemental_upload_guard(source: str) -> None:
+    """Require the artifact consumer to keep its full-campaign producer guard."""
+    marker = "      - name: Upload supplemental native navigation resources\n"
+    assert source.count(marker) == 1, "Expected one supplemental navigation upload step"
+    block = source.split(marker, 1)[1].split("      - name:", 1)[0]
+    assert indexing_diagnostic_guard(supplemental=True) in block.splitlines(), (
+        "Supplemental navigation upload must retain its full-only manual/platform guard"
+    )
+
+
 def assert_release_measurement_input_validation(source: str) -> None:
     """Exercise the actual workflow's input guard without packaging or measurements."""
     step = source.split("      - name: Validate explicit performance diagnostic\n", 1)[1].split("      - name:", 1)[0]
@@ -141,14 +160,11 @@ def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int)
         return False
     job = next((line for line in reversed(lines[:position])
                 if re.fullmatch(r"  [\w-]+:", line)), "")
-    selection = indexing_platform_guard(windows=job == "  prepublish-installer-smoke-windows:")
+    guard = indexing_diagnostic_guard(
+        supplemental=supplemental, windows=job == "  prepublish-installer-smoke-windows:",
+    )
     for start in range(position, -1, -1):
         if lines[start].startswith("      - name:"):
-            conditions = "always() && " if supplemental else ""
-            conditions += "inputs.prepublish_only && inputs.run_indexing_performance"
-            if supplemental:
-                conditions += " && matrix.label == 'macos-arm64-posix'"
-            guard = "        if: ${{ " + conditions + " && " + selection + " }}"
             return guard in lines[start:position]
     return False
 
@@ -221,6 +237,26 @@ def self_test() -> None:
     assert not explicit_indexing_diagnostic(route, wrong_windows, len(wrong_windows) - 1)
     source = (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
     assert_release_measurement_input_validation(source)
+    assert_supplemental_upload_guard(source)
+    upload_marker = "      - name: Upload supplemental native navigation resources\n"
+    upload = upload_marker + source.split(upload_marker, 1)[1].split("      - name:", 1)[0]
+    for before, after in [
+        (" && inputs.indexing_performance_scope == 'full'", ""),
+        ("inputs.indexing_performance_scope == 'full'", "inputs.indexing_performance_scope == 'semantic-upgrade'"),
+        (" && inputs.prepublish_only", ""),
+        (" && inputs.run_indexing_performance", ""),
+        (" && matrix.label == 'macos-arm64-posix'", ""),
+        (" && " + indexing_platform_guard(), ""),
+    ]:
+        assert before in upload
+        changed_upload = upload.replace(before, after, 1)
+        changed_source = source.replace(upload, changed_upload, 1)
+        try:
+            assert_supplemental_upload_guard(changed_source)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("Supplemental upload accepted removal/change of " + before)
     for before in ("if platform not in platforms:",
                    'if platform != "all" and os.environ["REQUESTED_PERFORMANCE"] != "true":'):
         assert before in source
@@ -265,7 +301,7 @@ def self_test() -> None:
         assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
     assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
     supplemental = diagnostic.copy()
-    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && " + indexing_platform_guard() + " }}"
+    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && inputs.indexing_performance_scope == 'full' && matrix.label == 'macos-arm64-posix' && " + indexing_platform_guard() + " }}"
     supplemental[-1] = "        run: python docs/benchmarks/harness/indexing_navigation_resources.py"
     assert campaign_entrypoint(supplemental[-1])
     assert explicit_indexing_diagnostic(route, supplemental, len(supplemental) - 1)
@@ -273,6 +309,8 @@ def self_test() -> None:
     for before, after in [
         (" && inputs.prepublish_only", ""),
         (" && inputs.run_indexing_performance", ""),
+        (" && inputs.indexing_performance_scope == 'full'", ""),
+        ("inputs.indexing_performance_scope == 'full'", "inputs.indexing_performance_scope == 'semantic-upgrade'"),
         (" && matrix.label == 'macos-arm64-posix'", ""),
         ("        default: false", "        default: true"),
         ("  workflow_dispatch:", "  push:"),

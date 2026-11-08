@@ -6,3 +6,8 @@ projectatlas-lints = "run --locked --package projectatlas-lints --bin cargo-proj
 # source download even when ProjectAtlas only repackages pinned native bundles.
 TSLP_OFFLINE = { value = "1", force = true }
 TSLP_LINK_MODE = { value = "dynamic", force = true }
+
+# Keep ordinary Windows shipping builds byte-identical across constructions.
+# Linker timestamps and PDB identifiers must not invalidate exact artifact proof.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/Brepro"]

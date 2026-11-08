@@ -22,6 +22,13 @@ The release owner SHALL freeze accepted main and exact artifacts only after ever
 - **WHEN** any required indexing path, performance target, correctness case or review remains incomplete
 - **THEN** candidate acceptance and publication remain blocked
 
+#### Scenario: Windows linker metadata breaks exact runtime identity
+- **WHEN** matching ordinary Windows x64 MSVC shipping inputs are constructed independently for measurement and publication
+- **THEN** the normal target configuration produces reproducible linker metadata, and the Windows package gate verifies two independent fresh optimized target-tree constructions have identical complete executable SHA and size before packaging
+- **AND** default features, shipping optimization, debug/installer capabilities, all native package gates, other targets' compiler arguments and the existing construction bound remain intact
+- **AND** configuration checks or cached copies do not replace real native construction; a mismatch retains both original identities and bytes and blocks acceptance without PE postprocessing, metadata masking or a weaker identity
+- **AND** changed Windows build inputs receive the preregistered existing full Windows performance campaign with unchanged samples, limits and controls before publication; unaffected platform measurements are retained only after their own exact runtime and input reconciliation
+
 ### Requirement: Every supported installed route is exercised
 The candidate SHALL reconcile and safely execute the complete CLI command/nested-command and MCP tool inventory, including unchanged routes, on Windows x64, Linux x64, macOS Intel and Apple Silicon as supported. Mutations SHALL use isolated project and host state.
 
@@ -127,6 +134,12 @@ The installed candidate SHALL preserve native identity, approved purposes and th
 - **AND** unknown labels or a non-`all` selection without explicit performance opt-in fail before packaging instead of silently skipping every measurement
 - **AND** earlier reports are reused only after positive exact measured-runtime, container/checksum, baseline, harness/fixture/target/requirement, interpreter/OS/toolchain/configuration and measurement-step reconciliation; routing-only changes need explicit comparison rather than a workflow-file exemption
 - **AND** original report provenance, samples, limits and failures remain intact, every missing or affected result is obtained, and a skipped cohort without accepted matching evidence cannot satisfy release acceptance
+
+#### Scenario: Scoped upgrade execution does not imply detailed-navigation samples
+- **WHEN** the explicitly selected campaign is `semantic-upgrade`
+- **THEN** it retains every scoped latency/RSS, parsing/graph, state, no-op and rollback assertion and its original report, without executing or claiming the supplemental full-navigation profiler
+- **AND** the full campaign still runs its selected supplemental attribution and upload within their original bounds, requires its original detailed samples and fixtures, and refuses an incomplete full report
+- **AND** causal scope-routing and incomplete-report controls pass without repeating an unchanged numerical cohort or reclassifying the original failed workflow
 
 ### Requirement: Publication and closure follow verified acceptance
 An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Later authorized stable promotion SHALL repeat exact hosted and installed proof and independently verify assets, checksums, identities, Latest and downstream pins. #715 SHALL close last after every child and stable readback pass.
