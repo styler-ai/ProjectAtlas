@@ -39,6 +39,11 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** missing fixture-home authority is rejected before spawning instead of inheriting the operator home
 - **AND** an older runtime, forwarder and host state outside that fixture remain unchanged while the installer keeps its intentional operator upgrade/quarantine behavior inside the selected test context
 
+#### Scenario: Installer and readiness children inherit conflicting outer state
+- **WHEN** the acceptance host exports an XDG state directory outside the installer fixture
+- **THEN** the readiness-hook child uses the fixture state directory that owns the installer's receipt, while stale runtime and registry/configuration checks remain effective
+- **AND** outside state and operator runtime/configuration remain unchanged; the product continues to respect explicitly selected XDG paths
+
 #### Scenario: Native MCP acceptance failures retain causal evidence
 - **WHEN** a native MCP acceptance request fails or reaches its existing deadline
 - **THEN** the fixture records adapter/root/phase timing and actual MCP child state separately from the profiler outcome, and retains the typed primary failure alongside clean child completion evidence or any shutdown failure
@@ -115,6 +120,13 @@ The installed candidate SHALL preserve native identity, approved purposes and th
 - **THEN** each exact native package passes the existing semantic-upgrade cohort against a checksum-verified 0.5.0 runtime with three paired samples and unchanged latency/RSS targets
 - **AND** the affected proof verifies complete required parsing and graph/Python results, exactly one publication, native identity and approved-purpose preservation, a subsequent no-op and compatible rollback
 - **AND** the explicit diagnostic may select only that cohort while preserving the default full campaign, its manual-only guard, the separate 0.4.5 schema proof and accepted unaffected measurements; a scoped result cannot represent a complete matrix
+
+#### Scenario: Only one platform has missing or invalidated measurements
+- **WHEN** an operator explicitly enables the prepublication indexing diagnostic and selects `all` or one of the four supported platform labels
+- **THEN** selection gates only measurement preparation, execution and output; every native package and installed-route gate remains required, and the default remains `all`
+- **AND** unknown labels or a non-`all` selection without explicit performance opt-in fail before packaging instead of silently skipping every measurement
+- **AND** earlier reports are reused only after positive exact measured-runtime, container/checksum, baseline, harness/fixture/target/requirement, interpreter/OS/toolchain/configuration and measurement-step reconciliation; routing-only changes need explicit comparison rather than a workflow-file exemption
+- **AND** original report provenance, samples, limits and failures remain intact, every missing or affected result is obtained, and a skipped cohort without accepted matching evidence cannot satisfy release acceptance
 
 ### Requirement: Publication and closure follow verified acceptance
 An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Later authorized stable promotion SHALL repeat exact hosted and installed proof and independently verify assets, checksums, identities, Latest and downstream pins. #715 SHALL close last after every child and stable readback pass.

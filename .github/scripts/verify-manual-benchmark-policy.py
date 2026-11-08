@@ -3,14 +3,64 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path, PurePosixPath
 
 CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py", "indexing_navigation_resources.py", "native_navigation_memory.py")
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
+INDEXING_MEASUREMENT_PLATFORMS = (
+    "all", "linux-x64-posix", "windows-x64", "macos-x64-posix", "macos-arm64-posix",
+)
+
+
+def indexing_platform_input_is_closed(event: str) -> bool:
+    """Require the unchanged all-platform default and the closed measurement choices."""
+    option = re.search(
+        r"^      indexing_performance_platform:\n((?:^        [^\n]*\n)+)",
+        event + "\n", re.MULTILINE,
+    )
+    return (option is not None and "        default: all\n" in option[1]
+            and "        type: choice\n" in option[1]
+            and tuple(re.findall(r"^          - ([a-z0-9-]+)$", option[1], re.MULTILINE))
+            == INDEXING_MEASUREMENT_PLATFORMS)
+
+
+def indexing_platform_guard(*, windows: bool = False) -> str:
+    """Describe only the selected measurement platform, never the native job matrix."""
+    target = "'windows-x64'" if windows else "matrix.label"
+    return ("(inputs.indexing_performance_platform == 'all' || "
+            f"inputs.indexing_performance_platform == {target})")
+
+
+def assert_release_measurement_input_validation(source: str) -> None:
+    """Exercise the actual workflow's input guard without packaging or measurements."""
+    step = source.split("      - name: Validate explicit performance diagnostic\n", 1)[1].split("      - name:", 1)[0]
+    program = textwrap.dedent(step.split("          python3 - <<'PYTHON'\n", 1)[1].split("          PYTHON", 1)[0])
+    cases = [(platform, "true", "true", "v0.5.1-rc1", True)
+             for platform in INDEXING_MEASUREMENT_PLATFORMS]
+    cases += [("all", "false", "false", "v0.5.1-rc1", True),
+              ("all", "true", "true", "v0.5.0", True)]
+    cases += [(platform, "true", "true", "v0.5.1-rc1", False)
+              for platform in ("", "unknown", "MACOS-ARM64-POSIX")]
+    cases += [(platform, "false", "true", "v0.5.1-rc1", False)
+              for platform in INDEXING_MEASUREMENT_PLATFORMS[1:]]
+    cases += [(platform, "true", "false", "v0.5.1-rc1", False)
+              for platform in INDEXING_MEASUREMENT_PLATFORMS]
+    cases += [("all", "true", "true", version, False)
+              for version in ("v0.5.1", "v9.9.9")]
+    for platform, enabled, prepublish, version, allowed in cases:
+        environment = os.environ.copy()
+        environment.update(REQUESTED_PERFORMANCE_PLATFORM=platform,
+                           REQUESTED_PERFORMANCE=enabled, PREPUBLISH_ONLY=prepublish,
+                           RELEASE_VERSION=version)
+        result = subprocess.run([sys.executable, "-c", program], env=environment,
+                                capture_output=True, timeout=10, check=False)
+        assert (result.returncode == 0) == allowed, (platform, enabled, prepublish, version)
 
 
 def is_oversized_tracked_raw_result(
@@ -87,10 +137,18 @@ def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int)
     )
     if option is None or "        default: false\n" not in option[1] or "        type: boolean\n" not in option[1]:
         return False
+    if not indexing_platform_input_is_closed(event[1]):
+        return False
+    job = next((line for line in reversed(lines[:position])
+                if re.fullmatch(r"  [\w-]+:", line)), "")
+    selection = indexing_platform_guard(windows=job == "  prepublish-installer-smoke-windows:")
     for start in range(position, -1, -1):
         if lines[start].startswith("      - name:"):
-            guard = ("        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
-                     if supplemental else "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}")
+            conditions = "always() && " if supplemental else ""
+            conditions += "inputs.prepublish_only && inputs.run_indexing_performance"
+            if supplemental:
+                conditions += " && matrix.label == 'macos-arm64-posix'"
+            guard = "        if: ${{ " + conditions + " && " + selection + " }}"
             return guard in lines[start:position]
     return False
 
@@ -133,9 +191,11 @@ def self_test() -> None:
     diagnostic = [
         "on:", "  workflow_dispatch:", "    inputs:",
         "      run_indexing_performance:", "        default: false", "        type: boolean",
+        "      indexing_performance_platform:", "        default: all", "        type: choice",
+        "        options:", *("          - " + platform for platform in INDEXING_MEASUREMENT_PLATFORMS),
         "permissions:", "  contents: read", "jobs:", "  smoke:", "    steps:",
         "      - name: Explicit diagnostic",
-        "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}",
+        "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && " + indexing_platform_guard() + " }}",
         "        run: python docs/benchmarks/harness/indexing_acceptance.py",
     ]
     route = ".github/workflows/release.yml"
@@ -144,10 +204,32 @@ def self_test() -> None:
         ("        default: false", "        default: true"),
         ("        type: boolean", "        type: string"),
         ("  workflow_dispatch:", "  push:"),
-        ("        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}", "        if: ${{ always() }}"),
+        (diagnostic[-2], "        if: ${{ always() }}"),
+        ("        default: all", "        default: macos-arm64-posix"),
+        ("        type: choice", "        type: string"),
+        ("          - windows-x64", "          - unknown"),
+        (diagnostic[-2], diagnostic[-2].replace(" && " + indexing_platform_guard(), "")),
     ]:
         changed = [after if line == before else line for line in diagnostic]
         assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
+    windows = [line.replace("  smoke:", "  prepublish-installer-smoke-windows:")
+               .replace(indexing_platform_guard(), indexing_platform_guard(windows=True))
+               for line in diagnostic]
+    assert explicit_indexing_diagnostic(route, windows, len(windows) - 1)
+    wrong_windows = [line.replace(indexing_platform_guard(windows=True), indexing_platform_guard())
+                     for line in windows]
+    assert not explicit_indexing_diagnostic(route, wrong_windows, len(wrong_windows) - 1)
+    source = (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
+    assert_release_measurement_input_validation(source)
+    for before in ("if platform not in platforms:",
+                   'if platform != "all" and os.environ["REQUESTED_PERFORMANCE"] != "true":'):
+        assert before in source
+        try:
+            assert_release_measurement_input_validation(source.replace(before, "if False:", 1))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("Input validator accepted removal of " + before)
     native = [
         "on:", "  pull_request:", "  workflow_dispatch:", "    inputs:",
         "      navigation_memory_run_id:", '        default: ""', "        type: string",
@@ -183,7 +265,7 @@ def self_test() -> None:
         assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", changed, len(changed) - 1)
     assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
     supplemental = diagnostic.copy()
-    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}"
+    supplemental[-2] = "        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && " + indexing_platform_guard() + " }}"
     supplemental[-1] = "        run: python docs/benchmarks/harness/indexing_navigation_resources.py"
     assert campaign_entrypoint(supplemental[-1])
     assert explicit_indexing_diagnostic(route, supplemental, len(supplemental) - 1)
