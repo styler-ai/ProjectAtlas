@@ -15,7 +15,7 @@
 ## 3. Accept the complete 0.5.1 behavior
 
 - [x] 3.1 Run the preregistered optimized installed matrix on Windows, Linux and both Mac architectures with normal telemetry. Meet every registered assertion, allowing only the documented RC1 Linux detailed-navigation sampled-RSS exception and exact Windows warm-latency result; prove complete results, preserved state and atomic failure recovery, with no other material regression in unaffected navigation or supported upgrades.
-- [ ] 3.2 Resolve independent review and automated feedback, pass the required Rust/OpenSpec/IssueOps/documentation/installed-platform gates, and reconcile the final implementation with the architecture and user-facing guidance before closing #708.
+- [x] 3.2 Resolve independent review and automated feedback, pass the required Rust/OpenSpec/IssueOps/documentation/installed-platform gates, and reconcile the final implementation with the architecture and user-facing guidance before closing #708.
 
 ## Required verification routes
 
