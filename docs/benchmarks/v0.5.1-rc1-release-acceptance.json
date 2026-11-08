@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "scope": "Verified v0.5.1-rc1 publication and native installed acceptance; stable promotion remains pending.",
+  "release": {
+    "tag": "v0.5.1-rc1",
+    "revision": "327f8565f4007d211771213d6355258c37f028dc",
+    "id": 438518361,
+    "url": "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.1-rc1",
+    "published_at": "2026-11-08T21:00:25Z",
+    "draft": false,
+    "prerelease": true,
+    "stable_latest": "v0.5.0",
+    "stable_latest_release_id": 423457521
+  },
+  "workflow": {
+    "run_id": 42511450741,
+    "url": "https://github.com/styler-ai/ProjectAtlas/actions/runs/42511450741",
+    "accepted_attempt": 2,
+    "conclusion": "success",
+    "successful_jobs": 15,
+    "prior_attempt": {
+      "attempt": 1,
+      "conclusion": "failure",
+      "failed_job": 128828288289,
+      "failed_step": "Upload artifact",
+      "error": "Failed to CreateArtifact: Unable to make request: ENOTFOUND",
+      "recovery": "One unchanged Intel package job and its dependent jobs were rerun. Successful sibling jobs were retained; no new measurement campaign or tag move."
+    }
+  },
+  "installed_acceptance": {
+    "cli_root_commands": 31,
+    "cli_nested_commands": 26,
+    "mcp_tools": 43,
+    "native_codex_convergence_phase": "prepublication on all four platforms; published executables are byte-identical",
+    "prepublication_jobs": {
+      "linux_x64": {
+        "id": 128854095763,
+        "execution_attempt": 2,
+        "test_groups": 75
+      },
+      "windows_x64": {
+        "id": 128836409700,
+        "execution_attempt": 1,
+        "test_groups": 61
+      },
+      "macos_intel": {
+        "id": 128854095723,
+        "execution_attempt": 2,
+        "test_groups": 74
+      },
+      "macos_arm64": {
+        "id": 128854095768,
+        "execution_attempt": 2,
+        "test_groups": 90
+      }
+    },
+    "postpublication_jobs": {
+      "linux_x64": 128860276944,
+      "windows_x64": 128860276799,
+      "macos_intel": 128860276826,
+      "macos_arm64": 128860276903
+    },
+    "postpublication_scope": "All four published runtime installations and generated host bindings passed; Linux also ran the holistic RC CLI/MCP scenario. Windows/macOS postinstall plugin/registry updates were skipped when Codex was unavailable; their same-byte native Codex convergence passed before publication.",
+    "windows_locked_mirror_scope": "Temporary mirror seeded from the RC archive remained unchanged while locked; this does not identify it as the 0.5.0 binary."
+  },
+  "measurement": {
+    "record": "v0.5.1-rc1-indexing-campaign.json",
+    "producer_revision": "9393646ab659e5db4185aac3e9b5ae45b4b58950",
+    "workflow_run_id": 42489987038,
+    "workflow_conclusion": "failure",
+    "passed_original_checks": 1456,
+    "registered_original_checks": 1457,
+    "specific_windows_rc1_tradeoff": {
+      "authorized": true,
+      "report_artifact_id": 13623657163,
+      "report_sha256": "75fdce3dbaae20f3e59d853f71af5e0fb5c9dcb14c57f145f82b741118dac4cf",
+      "failed_check": "warm MCP exact reconciliation latency target",
+      "original_ratio_limit": 1.1,
+      "observed_ratio": 1.1020697724874848,
+      "baseline_median_seconds": 0.05025189999992108,
+      "candidate_median_seconds": 0.05538109999997687,
+      "original_ceiling_seconds": 0.05527708999991319,
+      "excess_seconds": 0.00010401000006367983,
+      "other_limits_unchanged": true,
+      "acceptance_policy": "Only this exact retained result and measured runtime; original failed verdict remains."
+    },
+    "no_other_target_or_gate_waived": true,
+    "reuse": "Original producer revisions and failed verdicts retained; documentation-only source changes were reconciled against unchanged owning inputs and exact final executables plus complete native package members."
+  },
+  "parser_handoff": {
+    "producer_run_id": 42485878806,
+    "producer_revision": "9393646ab659e5db4185aac3e9b5ae45b4b58950",
+    "aggregate_sha256": "b05e4078f5c08c7c0edc603cb9d5d902851de2282d85d226b213392285fbc0b4",
+    "archives_and_aggregate_byte_identical_to_accepted_clean_handoff": true
+  },
+  "native_runtimes": [
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "projectatlas-v0.5.1-rc1-x86_64-unknown-linux-gnu.tar.gz",
+      "native_header": "ELF x86_64",
+      "runtime_sha256": "c07b562eb767b3006c85fc78663da9b3e0f0b875fd0876296a5a4814c4cef076",
+      "runtime_bytes": 63481400,
+      "matches_accepted_measured_executable_and_all_package_members": true
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "archive": "projectatlas-v0.5.1-rc1-x86_64-pc-windows-msvc.zip",
+      "native_header": "PE x86_64",
+      "runtime_sha256": "453c4e9a96c35cdb411c2864d36f4f9c5f5bf165b61d467402f825a46a6eb310",
+      "runtime_bytes": 59160576,
+      "matches_accepted_measured_executable_and_all_package_members": true
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "archive": "projectatlas-v0.5.1-rc1-x86_64-apple-darwin.tar.gz",
+      "native_header": "Mach-O x86_64",
+      "runtime_sha256": "55f687368680d290ae28bf2544cf175eb4c837984dd53a62241e65cc97057c20",
+      "runtime_bytes": 59164528,
+      "matches_accepted_measured_executable_and_all_package_members": true
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "archive": "projectatlas-v0.5.1-rc1-aarch64-apple-darwin.tar.gz",
+      "native_header": "Mach-O arm64",
+      "runtime_sha256": "4e6004006dc1a1f2594d218a4ed0837d71ddf1af3c5fe8738d10f156da14d791",
+      "runtime_bytes": 57245760,
+      "matches_accepted_measured_executable_and_all_package_members": true
+    }
+  ],
+  "assets": [
+    {
+      "id": 725180496,
+      "name": "SHA256SUMS",
+      "bytes": 866,
+      "sha256": "00656a9b9e785ecb05678bb2e67e8f7db344e314d7d7f9d874c5c99068bda247",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/SHA256SUMS"
+    },
+    {
+      "id": 725180493,
+      "name": "projectatlas-v0.5.1-rc1-aarch64-apple-darwin.tar.gz",
+      "bytes": 17618449,
+      "sha256": "248b29b57cd640ffce8549cab28762da8cff6d7620071069f89edf3f1c08376a",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-aarch64-apple-darwin.tar.gz"
+    },
+    {
+      "id": 725180490,
+      "name": "projectatlas-v0.5.1-rc1-broad-parser-x86_64-pc-windows-msvc.tar.zst",
+      "bytes": 10215942,
+      "sha256": "50de0a47054a1853aba7838ad7e99a587610abb690858f7e0ac9d6ecdcd2228a",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-broad-parser-x86_64-pc-windows-msvc.tar.zst"
+    },
+    {
+      "id": 725180491,
+      "name": "projectatlas-v0.5.1-rc1-broad-parser-x86_64-unknown-linux-gnu.tar.zst",
+      "bytes": 10791693,
+      "sha256": "552055fd79bef2916105816a173f3bab1d5fa7c2fb334df14334c9ed0b0f31ec",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-broad-parser-x86_64-unknown-linux-gnu.tar.zst"
+    },
+    {
+      "id": 725180495,
+      "name": "projectatlas-v0.5.1-rc1-optional-parser-pack-proof.json",
+      "bytes": 32704,
+      "sha256": "b05e4078f5c08c7c0edc603cb9d5d902851de2282d85d226b213392285fbc0b4",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-optional-parser-pack-proof.json"
+    },
+    {
+      "id": 725180513,
+      "name": "projectatlas-v0.5.1-rc1-x86_64-apple-darwin.tar.gz",
+      "bytes": 17995787,
+      "sha256": "2689a472100e1780ed122ff8a46de531f76bee4a6fa4df039e715af881202cf1",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-x86_64-apple-darwin.tar.gz"
+    },
+    {
+      "id": 725180524,
+      "name": "projectatlas-v0.5.1-rc1-x86_64-pc-windows-msvc.zip",
+      "bytes": 18091191,
+      "sha256": "ac0134ce087f8066dc7b98573b6478da5fdfeb540f8880f143d1e4043e4a6fba",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-x86_64-pc-windows-msvc.zip"
+    },
+    {
+      "id": 725180539,
+      "name": "projectatlas-v0.5.1-rc1-x86_64-unknown-linux-gnu.tar.gz",
+      "bytes": 19096873,
+      "sha256": "093213ba15ded70790ddead719191fda0a8e2cea09b2a78841e8efb42d157294",
+      "url": "https://github.com/styler-ai/ProjectAtlas/releases/download/v0.5.1-rc1/projectatlas-v0.5.1-rc1-x86_64-unknown-linux-gnu.tar.gz"
+    }
+  ],
+  "independent_verification": {
+    "rc1_accepted": true,
+    "all_uploaded_assets_and_checksums_verified": true,
+    "all_native_headers_and_complete_member_manifests_verified": true,
+    "release_owner_issue": 715,
+    "release_owner_remains_open_for_stable": true,
+    "stable_promotion_approved": false
+  }
+}
