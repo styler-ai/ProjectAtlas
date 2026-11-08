@@ -1446,3 +1446,52 @@ cohort. Reuse verified unchanged source/parser/graph proof rather than repeating
 the numerical cohort after documentation-only reconciliation. Final issue review,
 normal merge and release-owner verification remain separate requirements; the
 development package label does not constitute an RC1 release.
+
+
+## Exact RC1 Windows warm-refresh tradeoff (2026-11-08)
+
+Historical campaign `42359927651` measured development `0.5.0` executables.
+Current full campaign `42489987038` measured the exact `0.5.1-rc1` packages.
+Linux and both Mac jobs passed; Windows passed 363 of 364 checks and failed
+only the warm MCP exact-reconciliation latency target. Its nine measured calls
+per runtime gave baseline median 50.2519 ms and candidate median 55.3811 ms,
+against the original 1.10 ceiling of 55.27709 ms: a 0.10401 ms miss and
+10.206977% overhead. All 120 cold-operation records, 18 measured warm records,
+the 20-entry order/warmup audit and original correctness controls are retained.
+The candidate executable matches its package and both fresh ordinary Windows
+shipping constructions. Eight of nine paired rounds were slower; no cause is
+established and host variation is not excluded.
+
+The user explicitly accepted this specific measured Windows result for RC1.
+Record it as a post-measurement acceptance tradeoff for report artifact
+`13623657163`, report SHA-256
+`75fdce3dbaae20f3e59d853f71af5e0fb5c9dcb14c57f145f82b741118dac4cf`.
+Do not change the harness, original 1.10 target, raw samples, failed check or
+workflow conclusion. This permits only the retained result on its exact
+measured runtime; it is not a new general Windows threshold, an allowance for
+another report, or permission to skip a missing or failed control. The existing
+Linux detailed-navigation RSS allowance remains separate and is not used here.
+
+Retain every other latency, throughput, RSS, work, correctness, compatibility,
+upgrade, cancellation, publication and installed-platform requirement. Prove
+complete data validity, original sample/control inventory and all other targets
+independently; require successful proof for every workflow contract after a
+failed numerical step if it was skipped. Exact final executable SHA and size
+and complete native package members must match these measured packages.
+Input-equivalent documentation-only commits may reuse reports and the official
+clean parser handoff only after positive owning-input, runtime and payload
+reconciliation, retaining the original producer/report revisions.
+
+The optional constructor-count probe confirmed four plan constructions in one
+unchanged real MCP call, but did not establish the Windows timing cause or a
+shipping speedup. Its patch, source and expected failing causal test are parked;
+no runtime, dependency, profile, feature, schema, harness, worker or native
+coverage change is retained in this acceptance-only work. If revisited, a plan
+reuse design must check current root, selected config/content fingerprint and
+text options, use a request plan at most once, and retain fresh retry/fallback,
+source/policy/identity/callback/publication checks. It is not needed for RC1.
+
+Complete the revised tasks and ordered review through normal local/hosted gates
+and merge before closing the reopened #708. Then #715 freezes the accepted
+inputs, applies this narrow policy without falsifying the diagnostic failure,
+and continues native Codex, publication and independent hosted/installed proof.

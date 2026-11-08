@@ -5,7 +5,7 @@ Make initial indexing, full reindexing, symbol/graph rebuilding and large-projec
 ## ADDED Requirements
 
 ### Requirement: Performance covers all indexing entry points
-The capability SHALL cover CLI/MCP initialization, full scan, explicit symbol/graph rebuild and one-shot refresh, plus continuous watch through shared owners. Each path SHALL meet its own preregistered speed, work-count and resource targets, subject only to the explicit RC1 Linux detailed-navigation memory allowance below. Improving only watch-once or warm MCP SHALL not complete the capability.
+The capability SHALL cover CLI/MCP initialization, full scan, explicit symbol/graph rebuild and one-shot refresh, plus continuous watch through shared owners. Each path SHALL meet its own preregistered speed, work-count and resource targets, subject only to the explicit RC1 Linux detailed-navigation memory allowance and the specific Windows warm-latency tradeoff below. Improving only watch-once or warm MCP SHALL not complete the capability.
 
 #### Scenario: Initial and full indexing
 - **WHEN** a representative large project is initially indexed or fully reindexed
@@ -192,16 +192,16 @@ Without an explicit caller timeout, indexing/rebuilding/refresh SHALL select a d
 - **THEN** affected help, schemas and skill/user guidance describe the changed omitted-limit behavior, unchanged ceiling/clamp, unknown-work fallback and preserved explicit limits
 
 ### Requirement: Large-project performance is proven
-Acceptance SHALL use reproducible optimized installed CLI/MCP measurements and causal work-count checks on supported platforms. Baselines and numeric latency/resource targets SHALL be fixed before implementation. The explicitly accepted RC1 Linux detailed-navigation memory allowance SHALL be reported separately from the original target verdict; it SHALL NOT rewrite samples, original failed checks or workflow conclusions. Longer timeouts alone SHALL not satisfy acceptance.
+Acceptance SHALL use reproducible optimized installed CLI/MCP measurements and causal work-count checks on supported platforms. Baselines and targets SHALL be fixed before implementation. Record only the explicitly specified RC1 tradeoffs separately from original verdicts; preserve samples and workflow conclusions. Longer timeouts alone SHALL NOT establish acceptance.
 
 #### Scenario: Representative acceptance
 - **WHEN** the completed change is evaluated on initial/full/rebuild, unchanged, sparse/dense changed and reconciliation large-project fixtures
 - **THEN** every path meets its preregistered latency, throughput and work-count targets with complete correct results, cold/warm starts and caches distinguished, and normal cases finishing within their selected budgets
-- **AND** every resource target and correctness, state, compatibility and failure control passes, except that only the Linux detailed-navigation sampled-RSS assertion may use the explicit RC1 allowance below
+- **AND** every resource target and correctness, state, compatibility and failure control passes, except for the explicit RC1 Linux sampled-RSS allowance and the exact Windows warm-latency tradeoff below
 
 #### Scenario: Unaffected behavior
 - **WHEN** normal navigation and supported installation/database upgrades are exercised
-- **THEN** no material regression beyond the preregistered limits is accepted except the explicit RC1 Linux detailed-navigation memory allowance
+- **THEN** no material regression beyond the preregistered limits is accepted except the explicit RC1 Linux detailed-navigation memory allowance and specific Windows warm-latency tradeoff
 
 #### Scenario: Explicit RC1 Linux detailed-navigation memory allowance
 - **WHEN** the installed matrix is complete and data-valid, every registered assertion other than the single Linux detailed-navigation sampled-RSS assertion passes, and that case's maximum sampled process-tree RSS ratio to its paired native baseline is at most the previously observed `1.1150645027049522`
@@ -209,3 +209,14 @@ Acceptance SHALL use reproducible optimized installed CLI/MCP measurements and c
 - **AND** the original measurements, original target verdicts and failed workflow conclusions remain intact, with the acceptance decision identified separately as a post-measurement RC1 allowance
 - **AND** every other case, platform, latency, throughput, work-count, resource, compatibility and failure control retains its existing requirement; larger or unmeasured memory regressions receive no allowance
 - **AND** every required workflow contract, including contracts skipped after an original target failure, still requires successful proof before issue closure or release
+
+
+#### Scenario: Specific accepted RC1 Windows warm-latency result
+- **WHEN** the complete exact-runtime campaign `42489987038` is data-valid and all original sample, order, work, correctness, resource and compatibility controls are verified
+- **AND** Windows report artifact `13623657163` has SHA-256 `75fdce3dbaae20f3e59d853f71af5e0fb5c9dcb14c57f145f82b741118dac4cf`, with nine retained baseline calls at median 50.2519 ms and nine candidate calls at median 55.3811 ms
+- **AND** the only failed Windows assertion is the original 1.10 warm MCP exact-reconciliation latency target, with the other 363 assertions passing
+- **THEN** RC1 acceptance may record this specifically authorized observed ratio `1.1020697724874848` as a post-measurement tradeoff despite its 0.10401 ms excess over the original ceiling
+- **AND** the original 1.10 target, samples, failed verdict and failed workflow conclusion remain intact, and this result is not described as passing every original target
+- **AND** the allowance applies only to this retained report and its exact measured runtime; no other report, platform, operation, increased resource use or future measurement is covered
+- **AND** every other required limit and workflow contract still passes, including any required proof skipped after the original failure
+- **AND** final publication preserves the measured executable SHA and size and complete native package members; behavior-input or payload drift invalidates reuse rather than authorizing relabeling or an unchanged numerical retry
