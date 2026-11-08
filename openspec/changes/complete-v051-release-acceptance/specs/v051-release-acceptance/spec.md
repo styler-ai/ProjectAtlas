@@ -104,6 +104,12 @@ The installed candidate SHALL preserve native identity, approved purposes and th
 - **THEN** both local import targets and supported aliased callers resolve, native identity and approved purpose text/status survive, and the next unchanged refresh does not publish again
 - **AND** predecessor rollback preserves authored state, with required one-time semantic reconciliation measured separately from current-contract opens
 
+#### Scenario: Candidate provenance advances the semantic contract
+- **WHEN** the candidate's version-bound accepted language set changes the persisted derivation contract from the published 0.5.0 contract
+- **THEN** each exact native package passes the existing semantic-upgrade cohort against a checksum-verified 0.5.0 runtime with three paired samples and unchanged latency/RSS targets
+- **AND** the affected proof verifies complete required parsing and graph/Python results, exactly one publication, native identity and approved-purpose preservation, a subsequent no-op and compatible rollback
+- **AND** the explicit diagnostic may select only that cohort while preserving the default full campaign, its manual-only guard, the separate 0.4.5 schema proof and accepted unaffected measurements; a scoped result cannot represent a complete matrix
+
 ### Requirement: Publication and closure follow verified acceptance
 An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Later authorized stable promotion SHALL repeat exact hosted and installed proof and independently verify assets, checksums, identities, Latest and downstream pins. #715 SHALL close last after every child and stable readback pass.
 

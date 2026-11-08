@@ -23,6 +23,14 @@ on:
         required: false
         default: false
         type: boolean
+      indexing_performance_scope:
+        description: "Explicit indexing diagnostic cohort; scoped proof does not replace the full matrix"
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - semantic-upgrade
       parser_pack_run_id:
         description: "Successful clean optional-parser-pack workflow run for this release tree"
         required: true
@@ -1072,6 +1080,7 @@ jobs:
         shell: bash
         env:
           CANDIDATE_SUFFIX: ${{ matrix.suffix }}
+          MEASUREMENT_SCOPE: ${{ inputs.indexing_performance_scope }}
         run: |
           set -euo pipefail
           "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
@@ -1088,7 +1097,7 @@ jobs:
             --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
             --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
             --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
-            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement" --scope "$MEASUREMENT_SCOPE"
 
       - name: Upload explicit indexing diagnostic result
         if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
@@ -1482,6 +1491,7 @@ jobs:
         shell: bash
         env:
           CANDIDATE_SUFFIX: x86_64-pc-windows-msvc
+          MEASUREMENT_SCOPE: ${{ inputs.indexing_performance_scope }}
         run: |
           set -euo pipefail
           "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" -c 'import json, sqlite3, sys; print(json.dumps({"executable": sys.executable, "python": sys.version, "sqlite": sqlite3.sqlite_version}))'
@@ -1498,7 +1508,7 @@ jobs:
             --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
             --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
             --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
-            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement" --scope "$MEASUREMENT_SCOPE"
 
       - name: Upload explicit indexing diagnostic result
         if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}

@@ -5,8 +5,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -14,8 +16,8 @@ from unittest.mock import patch
 import zipfile
 
 from indexing_acceptance import (
-    Campaign, DENSE_MODULES, SOURCE_FILE, archive_runtime_digest, copy_database,
-    database, database_reader, digest, state, _stream_digest,
+    Campaign, DENSE_MODULES, FULL_SCOPE, SEMANTIC_UPGRADE_SCOPE, SOURCE_FILE, archive_runtime_digest, copy_database,
+    database, database_reader, digest, main, state, _stream_digest,
 )
 
 
@@ -403,11 +405,59 @@ class WarmMeasurement(unittest.TestCase):
                     self.assertEqual(saved["warm_mcp_order"], campaign.result["warm_mcp_order"])
 
 
+class SourceProvenance(unittest.TestCase):
+    def test_untracked_downloads_are_distinct_from_tracked_changes(self):
+        for tracked_dirty in (False, True):
+            with self.subTest(tracked_dirty=tracked_dirty), tempfile.TemporaryDirectory() as task:
+                root = Path(task)
+                runtime = root / "runtime"
+                runtime.write_bytes(b"provenance fixture")
+                status = "?? release-assets/runtime.tar.gz\n"
+                if tracked_dirty:
+                    status += " M tracked-source.py\n"
+                with patch("indexing_acceptance.subprocess.run", return_value=subprocess.CompletedProcess(
+                        [], int(tracked_dirty))), patch("indexing_acceptance.subprocess.check_output",
+                        side_effect=["revision\n", status, ""]):
+                    campaign = Campaign(root / "results.json", runtime, runtime, "0.5.1-rc1")
+                self.assertTrue(campaign.result["source_dirty"])
+                self.assertEqual(campaign.result["source_tracked_dirty"], tracked_dirty)
+
+    def test_unknown_tracked_source_state_is_not_clean(self):
+        with patch("indexing_acceptance.subprocess.run", return_value=subprocess.CompletedProcess([], 128)):
+            with self.assertRaisesRegex(RuntimeError, "could not establish tracked-source cleanliness"):
+                Campaign(Path("unused"), Path("unused"), Path("unused"), "0.5.1-rc1")
+
+    def test_hosted_tracked_drift_stops_before_either_runtime(self):
+        with tempfile.TemporaryDirectory() as task:
+            root = Path(task)
+            runtime = root / "runtime"
+            runtime.write_bytes(b"runtime must never execute")
+            work = root / "work"
+            arguments = ["indexing_acceptance.py", "--baseline", str(runtime),
+                         "--candidate", str(runtime), "--candidate-version", "0.5.1-rc1",
+                         "--baseline-archive", str(root / "unread-archive"),
+                         "--baseline-checksums", str(root / "unread-checksums"),
+                         "--work-root", str(work), "--scope", SEMANTIC_UPGRADE_SCOPE]
+            with patch("sys.argv", arguments), patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+                    patch("indexing_acceptance.subprocess.run", return_value=subprocess.CompletedProcess([], 1)), \
+                    patch("indexing_acceptance.subprocess.check_output",
+                          side_effect=["revision\n", " M tracked-source.py\n", ""]), \
+                    patch.object(Campaign, "run") as spawn:
+                with self.assertRaisesRegex(AssertionError, "installed workflow has unchanged tracked source"):
+                    main()
+                spawn.assert_not_called()
+            saved = json.loads((work / "results.json").read_text())
+            self.assertFalse(saved["passed"])
+            self.assertTrue(saved["source_tracked_dirty"])
+            self.assertEqual(saved["samples"], [])
+            self.assertNotIn("baseline_archive", saved)
+
+
 class AcceptanceTargets(unittest.TestCase):
-    def campaign(self, root: Path, candidate_ratio: float) -> Campaign:
+    def campaign(self, root: Path, candidate_ratio: float, scope: str = FULL_SCOPE) -> Campaign:
         runtime = root / "runtime"
         runtime.write_bytes(b"measurement arithmetic fixture")
-        campaign = Campaign(root / "result.json", runtime, runtime, "0.5.1-rc1")
+        campaign = Campaign(root / "result.json", runtime, runtime, "0.5.1-rc1", scope)
         cases = {"initial": 3, "full": 5, "rebuild": 3, "cold_noop": 6,
                  "sparse": 3, "summary": 9, "detailed": 9, "compatible_open": 9,
                  "large_sparse": 3, "dense_sparse": 3, "semantic_upgrade": 3}
@@ -446,6 +496,58 @@ class AcceptanceTargets(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "exact sample count"):
                 campaign.evaluate()
             self.assertFalse(campaign.result["passed"])
+
+    def test_semantic_scope_cannot_claim_full_matrix_acceptance(self):
+        for scope in (FULL_SCOPE, SEMANTIC_UPGRADE_SCOPE):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as task:
+                campaign = self.campaign(Path(task), .4, scope)
+                campaign.result["samples"] = [row for row in campaign.result["samples"]
+                                              if row["case"] == "semantic_upgrade"]
+                del campaign.result["warm_mcp"]
+                if scope == FULL_SCOPE:
+                    with self.assertRaisesRegex(AssertionError, "initial exact sample count"):
+                        campaign.evaluate()
+                    self.assertFalse(campaign.result["passed"])
+                else:
+                    campaign.evaluate()
+                    self.assertTrue(campaign.result["passed"])
+                    saved = json.loads(campaign.output.read_text())
+                    self.assertEqual(saved["scope"], SEMANTIC_UPGRADE_SCOPE)
+                    self.assertEqual(set(saved["summary"]), {"semantic_upgrade"})
+                    campaign.result["samples"].pop()
+                    with self.assertRaisesRegex(AssertionError, "semantic_upgrade exact sample count"):
+                        campaign.evaluate()
+                    self.assertFalse(campaign.result["passed"])
+
+    def test_semantic_scope_keeps_latency_and_rss_limits(self):
+        for field, value, failure in (("wall_seconds", 1.11, "latency target"),
+                                      ("sampled_peak_rss_bytes", 111, "sampled RSS target")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as task:
+                campaign = self.campaign(Path(task), .4, SEMANTIC_UPGRADE_SCOPE)
+                for row in campaign.result["samples"]:
+                    if row["runtime"] == "candidate" and row["case"] == "semantic_upgrade":
+                        row[field] = value
+                with self.assertRaisesRegex(AssertionError, failure):
+                    campaign.evaluate()
+                self.assertFalse(campaign.result["passed"])
+
+    def test_semantic_work_refuses_candidate_noop_or_incomplete_parse(self):
+        with tempfile.TemporaryDirectory() as task:
+            campaign = self.campaign(Path(task), .4, SEMANTIC_UPGRADE_SCOPE)
+            complete = {"parsed": 1029, "unchanged": 0, "symbols": 12295,
+                        "relations": 12293, "too_large": 0, "binary_or_non_utf8": 0, "timed_out": 0}
+            for runtime in campaign.runtimes:
+                campaign.semantic_work({"last_symbols": complete}, runtime)
+                for update in ({"parsed": 0}, {"parsed": 1028}, {"unchanged": 1},
+                               {"symbols": 12294}, {"relations": 12292}, {"timed_out": 1}):
+                    with self.subTest(runtime=runtime, update=update), self.assertRaisesRegex(
+                            AssertionError, "complete Rust/document/Python work"):
+                        campaign.semantic_work({"last_symbols": {**complete, **update}}, runtime)
+
+    def test_unknown_scope_is_rejected_before_measurement(self):
+        with tempfile.TemporaryDirectory() as task:
+            with self.assertRaisesRegex(ValueError, "unknown indexing acceptance scope"):
+                self.campaign(Path(task), .4, "unknown")
 
     def test_full_work_refuses_reuse_and_missing_parse(self):
         with tempfile.TemporaryDirectory() as task:
