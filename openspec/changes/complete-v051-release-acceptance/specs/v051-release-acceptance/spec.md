@@ -104,11 +104,11 @@ The packaged skill SHALL explain when and why to use the existing command famili
 - **AND** the separate complete specification/source relation and purpose-integration verification remains outside RC1 under #751
 
 ### Requirement: Performance proof covers the complete indexing topic
-Acceptance SHALL verify #708's preregistered speed, work-count and resource targets using the exact optimized installed candidate with normal telemetry. Initial indexing, full reindexing, cold CLI refresh, warm MCP, no-op, sparse/dense changes and required reconciliation SHALL have distinct measured cases.
+Acceptance SHALL verify #708's preregistered speed, work-count and resource targets using the exact optimized installed candidate with normal telemetry, applying only its explicitly accepted RC1 tradeoffs without changing original verdicts. Initial indexing, full reindexing, cold CLI refresh, warm MCP, no-op, sparse/dense changes and required reconciliation SHALL have distinct measured cases.
 
 #### Scenario: Complete performance result
 - **WHEN** representative large repositories are tested on supported platforms
-- **THEN** every required path meets its own target with correct complete results; faster warm MCP or a longer timeout cannot substitute for another path's missing improvement
+- **THEN** every required path meets its own target or its specifically authorized #708 RC1 tradeoff with correct complete results; faster warm MCP or a longer timeout cannot substitute for another path's missing improvement
 
 ### Requirement: Upgrades and recovery preserve authored state
 The installed candidate SHALL preserve native identity, approved purposes and the last valid publication through supported upgrades, concurrent operations, cancellation, deadlines and injected failures, with safe retry and compatible rollback proof.
@@ -151,3 +151,10 @@ An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Lat
 #### Scenario: Final stable closeout
 - **WHEN** stable promotion and complete readback succeed
 - **THEN** 0.5.1 is Latest, current feedback and task mirrors are reconciled, and #715 closes before the milestone is finalized
+
+
+#### Scenario: Reuse of the specifically accepted Windows warm result
+- **WHEN** #708 has accepted the exact Windows report from campaign `42489987038` under its narrowly specified RC1 warm-latency tradeoff
+- **THEN** the release owner retains the original failed target and workflow conclusion alongside the separately authorized acceptance decision, and independently verifies complete data and every other required assertion and workflow contract
+- **AND** documentation-only source revisions may reuse the reports and official clean parser handoff only after positive behavior-input and exact runtime/package reconciliation, keeping original producer and report revisions
+- **AND** the publishing workflow still executes all four native Codex-convergence and installed-product gates before publication, and all four post-publication installer gates afterward; the tradeoff waives none of those gates

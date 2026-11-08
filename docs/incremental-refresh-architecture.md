@@ -1,6 +1,6 @@
 # Indexing and incremental refresh
 
-This documents the 0.5.1 issue #708 behavior: faster initial indexing, full reindexing, symbol/graph rebuilding and refresh. The implementation retains exact one-shot reconciliation. The complete four-platform installed campaign passed all 1,441 original assertions and its prepublish workflow; results and retained earlier failures are in the [indexing reference](benchmarks/v0.5.1-indexing.md#accepted-installed-candidate-complete-original-targets). Final issue review, normal merge and RC1 release acceptance remain separate requirements.
+This documents the 0.5.1 issue #708 behavior: faster initial indexing, full reindexing, symbol/graph rebuilding and refresh. The implementation retains exact one-shot reconciliation. The historical 7 November development campaign `42359927651` measured `0.5.0` executables and passed all 1,441 original assertions and its prepublish workflow. The [exact RC1 package results](benchmarks/v0.5.1-indexing.md#exact-rc1-package-measurements-and-accepted-windows-tradeoff) separately retain 1,456 of 1,457 passing checks and the specifically accepted Windows warm-latency tradeoff. Final issue review, normal merge and RC1 release acceptance remain separate requirements.
 
 ## Shared owners and accepted behavior
 
