@@ -2637,13 +2637,16 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     let owned = owner_guard.directory.join(HOST_FILES[0]);
     fs::write(&owned, b"other owner's output")?;
     fs::set_permissions(&owned, fs::Permissions::from_mode(0o644))?;
-    let chown = Command::new("sudo")
-        .args(["-n", "chown", "nobody"])
+    let chown = Command::new("/usr/bin/sudo")
+        .args(["-n", "/usr/sbin/chown", "nobody"])
         .arg(&owned)
         .output()?;
+    let observed_uid = fs::metadata(&owned)?.uid();
     require(
-        chown.status.success() && fs::metadata(&owned)?.uid() != writer,
-        "owner-mismatch fixture failed",
+        chown.status.success() && observed_uid != writer,
+        &format!(
+            "owner-mismatch fixture failed: writer_uid={writer}, observed_uid={observed_uid}, chown={chown:?}"
+        ),
     )?;
     let identity = fs::metadata(&owned)?.ino();
     let mut observed = false;

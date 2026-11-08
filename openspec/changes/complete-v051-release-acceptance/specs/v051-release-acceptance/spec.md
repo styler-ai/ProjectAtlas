@@ -45,6 +45,12 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** stderr collection retains a fixed prefix and total/truncation metadata while draining the remaining bytes, bounded diagnostic artifacts use an explicit host directory outside mounted fixture images, queued stdout producers cannot block reader cleanup, and owned diagnostic files are removed
 - **AND** the original request deadline, single attempt and failure outcome remain authoritative; diagnostics do not retry an operation or replace its required acceptance proof
 
+#### Scenario: Isolated native host needs administrative utilities
+- **WHEN** the clean Mac host setup selects fixture-owned home and runtime paths for native acceptance
+- **THEN** its selected `PATH` retains trusted standard bin/sbin directories without inheriting operator paths or losing fixture-runtime precedence
+- **AND** the privileged Mac owner-change control selects trusted native utilities and reports command status/output and writer/observed UID on failure, while all ACL, ownership and foreign-entry checks remain required
+- **AND** the existing causal fixture gate exercises the actual setup and utility discovery, while acceptance still requires the corrected real ARM ownership and native route within its original bounds
+
 #### Scenario: Native image construction encounters a busy host resource
 - **WHEN** macOS fixture construction exits with status 1 and the exact diagnostic `hdiutil: create failed - Resource busy`
 - **THEN** setup may make at most three construction attempts using fresh private image paths, retaining each attempt's error and requiring verified absence of attachments for every preceding attempt before retrying

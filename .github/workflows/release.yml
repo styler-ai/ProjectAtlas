@@ -724,7 +724,7 @@ jobs:
             echo "XDG_STATE_HOME=$isolation_root/state"
             echo "CODEX_HOME=$isolation_root/codex"
             echo "TMPDIR=$isolation_root/tmp"
-            echo "PATH=$isolation_root/home/.local/bin:$isolation_root/home/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+            echo "PATH=$isolation_root/home/.local/bin:$isolation_root/home/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
             echo "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1"
             echo "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1"
             echo "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1"

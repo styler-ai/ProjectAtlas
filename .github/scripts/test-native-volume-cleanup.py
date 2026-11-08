@@ -8,11 +8,80 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
 import textwrap
 
+if sys.flags.optimize:
+    raise SystemExit("Native fixture controls require non-optimized Python")
+
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = ROOT / ".github/scripts/native-project-state-contracts.sh"
+
+
+def verify_isolated_host_utilities() -> int:
+    """Exercise actual host selection without invoking privileged native tools."""
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    step = workflow.split("- name: Prepare isolated macOS arm64 host state", 1)[1]
+    step = step.split("\n      - name:", 1)[0]
+    script = textwrap.dedent(step.split("run: |\n", 1)[1])
+    with tempfile.TemporaryDirectory(prefix="native-host-selection-") as temporary:
+        root = Path(temporary)
+        runner = root / "runner"
+        runner.mkdir()
+        ambient = root / "operator-bin"
+        ambient.mkdir()
+        environment = root / "environment"
+        result = subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, timeout=10,
+            env={**os.environ, "RUNNER_TEMP": str(runner), "GITHUB_ENV": str(environment),
+                 "GITHUB_STEP_SUMMARY": str(root / "summary"),
+                 "PATH": str(ambient) + os.pathsep + os.environ["PATH"]},
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        bindings = dict(line.split("=", 1) for line in environment.read_text().splitlines())
+        isolation = runner / "projectatlas-macos-arm64-clean"
+        selected = bindings["PATH"].split(os.pathsep)
+        assert selected[:2] == [str(isolation / "home/.local/bin"), str(isolation / "home/bin")]
+        for key, relative in (("HOME", "home"), ("CODEX_HOME", "codex"),
+                              ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"),
+                              ("XDG_STATE_HOME", "state"), ("TMPDIR", "tmp")):
+            assert Path(bindings[key]) == isolation / relative, (key, bindings[key])
+
+        # Reproduce the native command layout even on Linux: only disposable
+        # stand-ins exist in this PATH, so neither sudo nor an OS tool runs.
+        layout = root / "native-layout"
+        mapped = []
+        for entry in selected:
+            path = Path(entry)
+            assert path.is_absolute() and ".." not in path.parts, entry
+            directory = layout / entry.lstrip("/")
+            directory.mkdir(parents=True, exist_ok=True)
+            mapped.append(str(directory))
+
+        def executable(relative: str, body: str) -> None:
+            path = layout / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+            path.chmod(0o755)
+
+        executable("usr/bin/sudo", 'if [ "${1:-}" = -n ]; then shift; fi\nexec "$@"\n')
+        commands = {"chown": "usr/sbin", "diskutil": "usr/sbin",
+                    "lsof": "usr/sbin", "mount": "sbin"}
+        for command, directory in commands.items():
+            executable(directory + "/" + command, "printf '%s\\n' 'native-" + command + "'\n")
+        executable(str(ambient).lstrip("/") + "/operator_native_command",
+                   "printf '%s\\n' 'ambient operator command reached'\n")
+        child_environment = {**os.environ, **bindings, "PATH": os.pathsep.join(mapped)}
+        for command in commands:
+            child = subprocess.run(["sudo", "-n", command], text=True, capture_output=True,
+                                   timeout=5, env=child_environment)
+            assert child.returncode == 0 and child.stdout.strip() == "native-" + command, (
+                command, child.returncode, child.stdout, child.stderr)
+        child = subprocess.run(["sudo", "-n", "operator_native_command"], text=True,
+                               capture_output=True, timeout=5, env=child_environment)
+        assert child.returncode == 127 and not child.stdout, (child.returncode, child.stdout, child.stderr)
+    return len(commands) + 1
 
 
 def verify_contract_dispatch() -> int:
@@ -227,6 +296,7 @@ printf '%s\n' "$cleanup_status" > "$MODEL_AUDIT/cleanup-status"
 
 def main() -> None:
     """Run the actual workflow functions against isolated disk-command doubles."""
+    utility_controls = verify_isolated_host_utilities()
     routing_controls = verify_contract_dispatch()
     creation_controls = verify_image_construction()
     source = CONTRACTS.read_text(encoding="utf-8")
@@ -411,6 +481,7 @@ printf '%s %s\n' "$result" "$detach_failed" > "$MODEL_AUDIT/result"
                 if attach_failure:
                     assert int(report[2]) == int(failed_cleanup), (case, report)
     print(json.dumps({"native_volume_cleanup_controls": len(controls) * 2,
+                      "native_host_utility_controls": utility_controls,
                       "native_image_construction_controls": creation_controls,
                       "packaged_contract_routing_controls": routing_controls, "status": "passed"}))
 
