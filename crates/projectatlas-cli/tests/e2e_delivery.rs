@@ -15323,6 +15323,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
                     isolated_home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR),
                 )
                 .env("CODEX_HOME", &codex_dir)
+                .env("XDG_STATE_HOME", isolated_home.join(TEST_XDG_STATE_DIR))
                 .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
                 .env(
                     "PROJECTATLAS_FAKE_CODEX_STATE",

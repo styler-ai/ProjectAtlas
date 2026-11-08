@@ -19,7 +19,7 @@ on:
         default: false
         type: boolean
       run_indexing_performance:
-        description: "Explicit four-platform 0.5.1 indexing comparison (prepublish diagnostic only)"
+        description: "Explicit 0.5.1 indexing comparison on selected platforms (prepublish diagnostic only)"
         required: false
         default: false
         type: boolean
@@ -31,6 +31,17 @@ on:
         options:
           - full
           - semantic-upgrade
+      indexing_performance_platform:
+        description: "Platform to measure; all package and installed-platform checks still run"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - linux-x64-posix
+          - windows-x64
+          - macos-x64-posix
+          - macos-arm64-posix
       parser_pack_run_id:
         description: "Successful clean optional-parser-pack workflow run for this release tree"
         required: true
@@ -72,10 +83,17 @@ jobs:
       - name: Validate explicit performance diagnostic
         env:
           REQUESTED_PERFORMANCE: ${{ inputs.run_indexing_performance }}
+          REQUESTED_PERFORMANCE_PLATFORM: ${{ inputs.indexing_performance_platform }}
           PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
         run: |
           python3 - <<'PYTHON'
           import os, re
+          platform = os.environ["REQUESTED_PERFORMANCE_PLATFORM"]
+          platforms = {"all", "linux-x64-posix", "windows-x64", "macos-x64-posix", "macos-arm64-posix"}
+          if platform not in platforms:
+              raise SystemExit("Unknown indexing measurement platform")
+          if platform != "all" and os.environ["REQUESTED_PERFORMANCE"] != "true":
+              raise SystemExit("Platform selection requires an explicit indexing performance diagnostic")
           if os.environ["REQUESTED_PERFORMANCE"] == "true":
               if os.environ["PREPUBLISH_ONLY"] != "true" or not re.fullmatch(r"v0\.5\.(?:0|1-rc[1-9][0-9]*)", os.environ["RELEASE_VERSION"]):
                   raise SystemExit("Indexing comparison requires an explicit prepublish-only 0.5.0-development or 0.5.1 RC diagnostic")
@@ -690,7 +708,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Capture indexing measurement interpreter
-        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1054,7 +1072,7 @@ jobs:
           done
 
       - name: Prepare explicit indexing comparison baseline
-        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1075,7 +1093,7 @@ jobs:
           echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
 
       - name: Explicit installed indexing performance diagnostic
-        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         timeout-minutes: 30
         shell: bash
         env:
@@ -1100,7 +1118,7 @@ jobs:
             --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement" --scope "$MEASUREMENT_SCOPE"
 
       - name: Upload explicit indexing diagnostic result
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: indexing-performance-${{ matrix.label }}
@@ -1108,7 +1126,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Supplemental native navigation resource attribution
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         timeout-minutes: 5
         shell: bash
         run: |
@@ -1124,7 +1142,7 @@ jobs:
             --output-root "$RUNNER_TEMP/projectatlas-indexing-navigation-resources"
 
       - name: Upload supplemental native navigation resources
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && matrix.label == 'macos-arm64-posix' && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == matrix.label) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: indexing-navigation-resources-${{ matrix.label }}
@@ -1465,7 +1483,7 @@ jobs:
           }
 
       - name: Prepare explicit indexing comparison baseline
-        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == 'windows-x64') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1486,7 +1504,7 @@ jobs:
           echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
 
       - name: Explicit installed indexing performance diagnostic
-        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == 'windows-x64') }}
         timeout-minutes: 30
         shell: bash
         env:
@@ -1511,7 +1529,7 @@ jobs:
             --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement" --scope "$MEASUREMENT_SCOPE"
 
       - name: Upload explicit indexing diagnostic result
-        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance && (inputs.indexing_performance_platform == 'all' || inputs.indexing_performance_platform == 'windows-x64') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: indexing-performance-windows-x64

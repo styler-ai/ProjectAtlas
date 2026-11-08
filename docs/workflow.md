@@ -198,6 +198,19 @@ RELEASE_VERSION=v0.5.0
    Preserve the separate 0.4.5 schema-upgrade proof. Re-freeze changed reviewed inputs
    after normal merge before binding these results to publication.
 
+   To obtain only missing or invalidated platform measurements, add
+   `--field indexing_performance_platform=macos-arm64-posix` (or another supported
+   native platform label). The default `all` keeps all four measurement routes.
+   Unknown labels and a non-`all` selection without explicit performance opt-in
+   fail before packaging. This filters only measurement preparation/execution and
+   reports; all four package and installed-platform gates remain required. A skipped
+   cohort needs a retained matching report with original provenance, positively
+   reconciled runtime bytes, container/checksums, baseline, harness/fixtures/targets,
+   interpreter/OS/toolchain/configuration and actual measurement behavior. Routing-only
+   condition edits require explicit diff proof; unexplained drift invalidates affected
+   evidence. Never repeat unchanged numerical samples for bookkeeping or treat this
+   selector as a waiver for a missing platform result.
+
 3. Before any ref mutation, require the publication checklist to pass and verify `main` still points at the reviewed SHA:
 
    ```bash
