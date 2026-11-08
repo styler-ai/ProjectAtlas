@@ -31,6 +31,8 @@ SOURCE_FILE = "src/group_0/module_0.rs"
 DECLARATIONS_PER_FILE = 12
 DENSE_MODULES = 256
 COMMAND_TIMEOUT = 1800
+FULL_SCOPE = "full"
+SEMANTIC_UPGRADE_SCOPE = "semantic-upgrade"
 
 
 def _stream_digest(source) -> str:
@@ -163,12 +165,20 @@ def symbol_report(payload: dict) -> dict:
 
 
 class Campaign:
-    def __init__(self, output: Path, baseline: Path, candidate: Path, version: str):
+    def __init__(self, output: Path, baseline: Path, candidate: Path, version: str,
+                 scope: str = FULL_SCOPE):
+        if scope not in (FULL_SCOPE, SEMANTIC_UPGRADE_SCOPE):
+            raise ValueError("unknown indexing acceptance scope")
+        tracked = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], check=False, timeout=30)
+        if tracked.returncode not in (0, 1):
+            raise RuntimeError("could not establish tracked-source cleanliness")
+        self.scope = scope
         self.output = output
         self.runtimes = {"baseline": baseline, "candidate": candidate}
         self.versions = {"baseline": "0.5.0", "candidate": version}
         self.result = {
-            "schema_version": 1, "passed": False, "telemetry": "enabled",
+            "schema_version": 1, "passed": False, "telemetry": "enabled", "scope": scope,
+            "source_tracked_dirty": tracked.returncode == 1,
             "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=30).strip(),
             "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], text=True, timeout=30).strip()),
             "workflow_run_id": os.environ.get("GITHUB_RUN_ID"),
@@ -367,6 +377,11 @@ class Campaign:
                     self.check(state(current) == states[runtime],
                                runtime + " current-contract navigation/open preserves complete state")
 
+        self.semantic_upgrade(root)
+
+    def semantic_upgrade(self, root: Path) -> None:
+        """Reconcile the published 0.5.0 contract without repeating unaffected cohorts."""
+        root.mkdir(parents=True, exist_ok=True)
         # A prior semantic contract requires one-time repair, not a steady-state no-op.
         upgrade = root / "semantic-upgrade"
         fixture(upgrade)
@@ -425,14 +440,8 @@ class Campaign:
                            and after["counts"] == before["counts"]
                            and after["generation"] == before["generation"] + 1,
                            runtime + " semantic reconciliation preserves complete graph/identity/purpose and publishes once")
-                if runtime == "baseline":
-                    symbols = symbol_report(payload)
-                    self.check(symbols.get("parsed") == 1024 + 1 + 4 and symbols.get("unchanged") == 0
-                               and symbols.get("symbols") == 1024 * DECLARATIONS_PER_FILE + 1 + 6
-                               and symbols.get("relations") == 1024 * DECLARATIONS_PER_FILE + 5
-                               and all(symbols.get(field) == 0 for field in ("too_large", "binary_or_non_utf8", "timed_out")),
-                               "semantic upgrade baseline performs complete Rust/document/Python work")
-                else:
+                self.semantic_work(payload, runtime)
+                if runtime == "candidate":
                     self.run(runtime, upgrade, ["watch", "--once"])
                     self.check(state(upgrade) == after, "semantic upgrade subsequent current-contract open is a no-op")
                 verify_python(runtime)
@@ -444,6 +453,15 @@ class Campaign:
         self.check(after["identity"] == before["identity"] and after["purpose"] == before["purpose"]
                    and after["approved_purposes"] == before["approved_purposes"]
                    and after["counts"] == before["counts"], "semantic rollback preserves complete authored and derived state")
+
+    def semantic_work(self, payload: dict, runtime: str) -> None:
+        """Require complete parser work in both halves of the semantic transition."""
+        symbols = symbol_report(payload)
+        self.check(symbols.get("parsed") == 1024 + 1 + 4 and symbols.get("unchanged") == 0
+                   and symbols.get("symbols") == 1024 * DECLARATIONS_PER_FILE + 1 + 6
+                   and symbols.get("relations") == 1024 * DECLARATIONS_PER_FILE + 5
+                   and all(symbols.get(field) == 0 for field in ("too_large", "binary_or_non_utf8", "timed_out")),
+                   runtime + " semantic upgrade performs complete Rust/document/Python work")
 
     def larger_and_dense(self, root: Path) -> None:
         for runtime in self.runtimes:
@@ -572,7 +590,9 @@ class Campaign:
             if not condition:
                 failures.append(name)
 
-        for case in ("initial", "full", "rebuild", "cold_noop", "sparse", "summary", "detailed", "compatible_open", "large_sparse", "dense_sparse", "semantic_upgrade"):
+        cases = (("semantic_upgrade",) if self.scope == SEMANTIC_UPGRADE_SCOPE else
+                 ("initial", "full", "rebuild", "cold_noop", "sparse", "summary", "detailed", "compatible_open", "large_sparse", "dense_sparse", "semantic_upgrade"))
+        for case in cases:
             summaries[case] = {}
             for runtime in self.runtimes:
                 samples = [row for row in self.result["samples"] if row["case"] == case and row["runtime"] == runtime]
@@ -594,13 +614,14 @@ class Campaign:
                        case + " complete-source throughput target")
             if case == "cold_noop" and platform.system() == "Linux":
                 target(candidate["median_seconds"] < .060, "Linux cold no-op below 60ms")
-        warm = {}
-        for runtime in self.runtimes:
-            samples = [row["wall_seconds"] for row in self.result["warm_mcp"] if row["runtime"] == runtime]
-            self.check(len(samples) == 9, runtime + " warm MCP exact sample count")
-            warm[runtime] = statistics.median(samples)
-        summaries["warm_mcp"] = {"median_seconds": warm, "rss": "not measured by public MCP route"}
-        target(warm["candidate"] <= warm["baseline"] * 1.1, "warm MCP exact reconciliation latency target")
+        if self.scope == FULL_SCOPE:
+            warm = {}
+            for runtime in self.runtimes:
+                samples = [row["wall_seconds"] for row in self.result["warm_mcp"] if row["runtime"] == runtime]
+                self.check(len(samples) == 9, runtime + " warm MCP exact sample count")
+                warm[runtime] = statistics.median(samples)
+            summaries["warm_mcp"] = {"median_seconds": warm, "rss": "not measured by public MCP route"}
+            target(warm["candidate"] <= warm["baseline"] * 1.1, "warm MCP exact reconciliation latency target")
         self.result["passed"] = not failures
         self.save()
         if failures:
@@ -616,12 +637,16 @@ def main() -> None:
     parser.add_argument("--baseline-archive", type=Path, required=True)
     parser.add_argument("--baseline-checksums", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
+    parser.add_argument("--scope", choices=(FULL_SCOPE, SEMANTIC_UPGRADE_SCOPE), default=FULL_SCOPE)
     args = parser.parse_args()
     root = args.work_root.resolve()
     root.mkdir(parents=True, exist_ok=False)
     campaign = Campaign(root / "results.json", args.baseline.resolve(strict=True),
-                        args.candidate.resolve(strict=True), args.candidate_version)
+                        args.candidate.resolve(strict=True), args.candidate_version, args.scope)
     try:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            campaign.check(not campaign.result["source_tracked_dirty"],
+                           "installed workflow has unchanged tracked source")
         archive_digest = digest(args.baseline_archive)
         catalog = json.loads((Path(__file__).resolve().parents[1] /
                               "v0.5.1-indexing-baselines.json").read_text(encoding="utf-8"))
@@ -644,10 +669,13 @@ def main() -> None:
         for runtime in campaign.runtimes:
             info = campaign.run(runtime, root, ["runtime-info"])
             campaign.check(info.get("version") == campaign.versions[runtime], runtime + " exact version")
-        campaign.reference(root / "reference")
-        campaign.navigation(root / "navigation")
-        campaign.larger_and_dense(root / "expanded")
-        campaign.warm(root / "warm")
+        if args.scope == SEMANTIC_UPGRADE_SCOPE:
+            campaign.semantic_upgrade(root / "navigation")
+        else:
+            campaign.reference(root / "reference")
+            campaign.navigation(root / "navigation")
+            campaign.larger_and_dense(root / "expanded")
+            campaign.warm(root / "warm")
         campaign.evaluate()
     except BaseException as error:
         campaign.result["failure"] = f"{type(error).__name__}: {error}"

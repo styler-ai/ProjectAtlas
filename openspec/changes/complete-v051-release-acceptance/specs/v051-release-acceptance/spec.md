@@ -45,6 +45,12 @@ The candidate SHALL reconcile and safely execute the complete CLI command/nested
 - **AND** stderr collection retains a fixed prefix and total/truncation metadata while draining the remaining bytes, bounded diagnostic artifacts use an explicit host directory outside mounted fixture images, queued stdout producers cannot block reader cleanup, and owned diagnostic files are removed
 - **AND** the original request deadline, single attempt and failure outcome remain authoritative; diagnostics do not retry an operation or replace its required acceptance proof
 
+#### Scenario: Isolated native host needs administrative utilities
+- **WHEN** the clean Mac host setup selects fixture-owned home and runtime paths for native acceptance
+- **THEN** its selected `PATH` retains trusted standard bin/sbin directories without inheriting operator paths or losing fixture-runtime precedence
+- **AND** the privileged Mac owner-change control selects trusted native utilities and reports command status/output and writer/observed UID on failure, while all ACL, ownership and foreign-entry checks remain required
+- **AND** the existing causal fixture gate exercises the actual setup and utility discovery, while acceptance still requires the corrected real ARM ownership and native route within its original bounds
+
 #### Scenario: Native image construction encounters a busy host resource
 - **WHEN** macOS fixture construction exits with status 1 and the exact diagnostic `hdiutil: create failed - Resource busy`
 - **THEN** setup may make at most three construction attempts using fresh private image paths, retaining each attempt's error and requiring verified absence of attachments for every preceding attempt before retrying
@@ -103,6 +109,12 @@ The installed candidate SHALL preserve native identity, approved purposes and th
 - **WHEN** the exact installed candidate refreshes an unchanged 0.5.0 index containing the confirmed parenthesized Python import reproduction
 - **THEN** both local import targets and supported aliased callers resolve, native identity and approved purpose text/status survive, and the next unchanged refresh does not publish again
 - **AND** predecessor rollback preserves authored state, with required one-time semantic reconciliation measured separately from current-contract opens
+
+#### Scenario: Candidate provenance advances the semantic contract
+- **WHEN** the candidate's version-bound accepted language set changes the persisted derivation contract from the published 0.5.0 contract
+- **THEN** each exact native package passes the existing semantic-upgrade cohort against a checksum-verified 0.5.0 runtime with three paired samples and unchanged latency/RSS targets
+- **AND** the affected proof verifies complete required parsing and graph/Python results, exactly one publication, native identity and approved-purpose preservation, a subsequent no-op and compatible rollback
+- **AND** the explicit diagnostic may select only that cohort while preserving the default full campaign, its manual-only guard, the separate 0.4.5 schema proof and accepted unaffected measurements; a scoped result cannot represent a complete matrix
 
 ### Requirement: Publication and closure follow verified acceptance
 An authorized 0.5.1 RC SHALL be a non-draft prerelease with Latest excluded. Later authorized stable promotion SHALL repeat exact hosted and installed proof and independently verify assets, checksums, identities, Latest and downstream pins. #715 SHALL close last after every child and stable readback pass.

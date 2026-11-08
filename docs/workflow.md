@@ -187,6 +187,17 @@ RELEASE_VERSION=v0.5.0
 
    This builds and checks packages but skips native Codex installation, the publication checklist, and the publish job. It is diagnostic only, not native acceptance.
 
+   When candidate provenance changes the persisted 0.5.0 index contract, add
+   `--field run_indexing_performance=true --field indexing_performance_scope=semantic-upgrade`
+   to select the existing affected upgrade cohort on all four exact packages. It keeps
+   the checksum-verified 0.5.0 baseline, three paired samples, original latency/RSS
+   targets, complete parsing/graph/Python checks, identity and purpose preservation,
+   one publication, next-open no-op and rollback. The default scope remains `full`;
+   a `semantic-upgrade` report proves only that cohort and supplements reusable
+   accepted measurements. Both scopes retain the explicit prepublication-only guard.
+   Preserve the separate 0.4.5 schema-upgrade proof. Re-freeze changed reviewed inputs
+   after normal merge before binding these results to publication.
+
 3. Before any ref mutation, require the publication checklist to pass and verify `main` still points at the reviewed SHA:
 
    ```bash
